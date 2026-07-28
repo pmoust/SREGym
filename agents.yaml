@@ -23,6 +23,7 @@ agents:
     kickoff_env: null
     install_script: install-claudecode.sh
     agent_version: null
+    container_isolation: false
   - name: "debug"
     kickoff_command: "python -c \"import signal; signal.pause()\""
     install_script: null
