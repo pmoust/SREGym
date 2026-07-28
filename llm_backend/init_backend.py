@@ -1,5 +1,6 @@
 import os
 
+from llm_backend.claude_cli_backend import ClaudeCliBackend, is_claude_cli_judge
 from llm_backend.get_llm_backend import LiteLLMBackend
 
 
@@ -26,11 +27,14 @@ def get_llm_backend_for_agent() -> LiteLLMBackend:
     )
 
 
-def get_llm_backend_for_judge() -> LiteLLMBackend:
+def get_llm_backend_for_judge() -> LiteLLMBackend | ClaudeCliBackend:
     """Get LLM backend for the LLM-as-a-judge evaluator."""
     model_id = os.environ.get("JUDGE_MODEL_ID")
     if not model_id:
         raise ValueError("JUDGE_MODEL_ID environment variable is not set.")
+    if is_claude_cli_judge():
+        print(f"🔧 Initializing Claude Code CLI judge backend — model: {model_id}")
+        return ClaudeCliBackend(model_id)
     return get_llm_backend(
         model_id,
         api_base=os.environ.get("JUDGE_API_BASE"),

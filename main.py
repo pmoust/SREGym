@@ -573,7 +573,7 @@ def main(args):
         f"agent_api_base: {_env_status('AGENT_API_BASE')}, judge_api_base: {_env_status('JUDGE_API_BASE')}"
     )
 
-    if not args.use_external_harness:
+    if not args.use_external_harness and os.getenv("SREGYM_SKIP_JUDGE_PREFLIGHT") != "1":
         run_judge_preflight_check()
 
     # Only build/check agent container image if the agent requires it
