@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 import shlex
 import shutil
 import time
@@ -219,6 +220,17 @@ class Conductor:
     def _inject_fault(self):
         """Inject fault and prepare diagnosis checkpoint if available."""
         problem = self.current_problem
+        # Let the observability/edge layer capture a baseline snapshot of the
+        # app's healthy live state BEFORE the fault mutates it, so change-detection
+        # has a before/after to diff (e.g. an env-var removal only surfaces as
+        # "removed" if the with-var state was synced first). Test-harness only;
+        # gated by SREGYM_BASELINE_SYNC_SECONDS so it never affects normal runs.
+        baseline_wait = int(os.environ.get("SREGYM_BASELINE_SYNC_SECONDS", "0"))
+        if baseline_wait > 0:
+            self.logger.info(
+                f"[ENV] Baseline-sync wait {baseline_wait}s before fault injection"
+            )
+            time.sleep(baseline_wait)
         problem.inject_fault()
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
