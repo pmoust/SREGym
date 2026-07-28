@@ -39,6 +39,14 @@ agents:
     kickoff_env: null
     install_script: install-opencode.sh
     agent_version: null
+  - name: brain
+    kickoff_command: python -m clients.brain.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BRAIN_API_URL: "http://localhost:8001"
+    install_script: null
+    agent_version: null
+    container_isolation: false
   - name: tierzero
     kickoff_command: python -m clients.tierzero.driver
     kickoff_workdir: .
