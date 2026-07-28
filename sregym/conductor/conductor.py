@@ -231,6 +231,13 @@ class Conductor:
                 f"[ENV] Baseline-sync wait {baseline_wait}s before fault injection"
             )
             time.sleep(baseline_wait)
+
+        # Snapshot the healthy cluster before breaking it. The oracle is built
+        # in Problem.__init__, which runs before deploy_app(), so this is the
+        # first point at which the app actually exists.
+        if getattr(problem, "mitigation_oracle", None):
+            problem.mitigation_oracle.capture_baseline()
+
         problem.inject_fault()
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
@@ -766,6 +773,14 @@ class Conductor:
             self.dm_flakey_manager.teardown_openebs_dm_flakey_infrastructure()
         except Exception as e:
             self.logger.warning(f"Could not teardown dm-flakey (Khaos may not be deployed yet): {e}")
+
+        self.logger.info("[FIX] NightlyRebalanceOOM kube-system actor leftover if any")
+        try:
+            from sregym.conductor.problems.nightly_rebalance_oom import NightlyRebalanceOOM
+
+            NightlyRebalanceOOM.cleanup_leftover_actor()
+        except Exception as e:
+            self.logger.warning(f"Could not clean up NightlyRebalanceOOM actor: {e}")
 
         self.logger.info("[FIX] Clock drift leftover if any")
         try:
