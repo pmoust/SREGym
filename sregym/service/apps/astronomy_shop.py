@@ -56,6 +56,24 @@ class AstronomyShop(Application):
             # serves flags from its config volume, so flag serving is unaffected.
             "--set-json",
             "components.flagd.sidecarContainers=[]",
+            # Prune the collector agent's two dead downstream exporters so it stops
+            # flooding permanent export failures — a loud "telemetry export failure"
+            # confound that competes with (and defeats) quiet faults in diagnosis.
+            #   * logs -> opensearch:9200 floods during OpenSearch's slow JVM start
+            #     (hundreds of "connection refused" before it is Ready).
+            #   * metrics -> in-namespace prometheus:9090 is a permanent "no such
+            #     host" because prometheus.enabled=false removed it above.
+            # Both are redundant: brain reads logs from Loki (promtail) and span
+            # metrics from the observe-namespace gateway scrape (fed by the healthy
+            # traces->jaeger path), never these exporters. Keep debug so the
+            # pipelines stay valid and never backpressure the apps.
+            # Values are single-quoted: Helm.install joins extra_args into one
+            # shell string (shell=True), which would otherwise strip the JSON
+            # double-quotes and make helm reject --set-json as unparseable.
+            "--set-json",
+            "'opentelemetry-collector.config.service.pipelines.logs.exporters=[\"debug\"]'",
+            "--set-json",
+            "'opentelemetry-collector.config.service.pipelines.metrics.exporters=[\"debug\"]'",
         ]
 
         Helm.install(**self.helm_configs)

@@ -60,11 +60,23 @@ LOCAL_CMD_TIMEOUT = int(os.environ.get("BRAIN_LOCAL_CMD_TIMEOUT", "180"))
 
 # Local tool types brain is allowed to execute on this host (its CLI-agent
 # flow). Everything else gets an error result steering it to the MCP tools.
-ALLOWED_LOCAL_TOOLS = set(
-    t.strip()
-    for t in os.environ.get("BRAIN_LOCAL_TOOLS", "kubectl,helm").split(",")
-    if t.strip()
+def _parse_local_tools(env_value: str) -> set:
+    return set(t.strip() for t in env_value.split(",") if t.strip())
+
+
+# The two phases have opposite tool policies. Diagnosis must be grounded in the
+# observability context alone — giving brain kubectl lets it read the injected
+# fault straight off the cluster, bypassing the RCI context channels we are
+# actually benchmarking. Mitigation is the inverse: the task IS to change the
+# cluster, and kubectl/helm (patch, set, rollout, apply) are the intended
+# mechanism. run_investigation swaps ALLOWED_LOCAL_TOOLS between the two.
+DIAGNOSIS_LOCAL_TOOLS = _parse_local_tools(
+    os.environ.get("BRAIN_DIAGNOSIS_TOOLS", os.environ.get("BRAIN_LOCAL_TOOLS", ""))
 )
+MITIGATION_LOCAL_TOOLS = _parse_local_tools(
+    os.environ.get("BRAIN_MITIGATION_TOOLS", "kubectl,helm")
+)
+ALLOWED_LOCAL_TOOLS = DIAGNOSIS_LOCAL_TOOLS
 
 MAX_TOOL_RESULT_CHARS = 100_000
 
@@ -720,12 +732,15 @@ Description: {descriptions}
 
 Your task is to diagnose the root cause of the failure in this application.
 
-Investigate using your connected tools:
-1. Check pod status, events, and describe problematic resources with kubectl
-2. Query Prometheus for error rates, latency, and resource usage metrics
-3. Search logs (Loki) for error patterns and crash messages
-4. Correlate findings across metrics, logs, and cluster state
+You do NOT have kubectl or any live cluster access. Diagnose entirely from the
+observability context brain already has:
+1. The entity graph — service/workload topology and dependencies, recent config
+   and env changes, container specs, and Service endpoint availability
+2. Prometheus — error rates, latency, and resource-usage metrics
+3. Loki — error patterns and crash messages in logs
+4. Correlate findings across the entity graph, metrics, and logs
 
+Do not enumerate a specific component to start from — let the signals lead you.
 Work autonomously — do not ask clarifying questions. Investigate until you can
 state the root cause with confidence.
 
@@ -766,6 +781,7 @@ Finish with a summary of what you changed and the verification results."""
 
 
 def main():
+    global ALLOWED_LOCAL_TOOLS
     # Setup logging
     logs_dir = Path(AGENT_LOGS_DIR)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -777,7 +793,8 @@ def main():
     logger.info("Brain driver starting")
     logger.info(f"Conductor: {CONDUCTOR_URL}")
     logger.info(f"Brain API: {BRAIN_API_URL}")
-    logger.info(f"Allowed local tools: {sorted(ALLOWED_LOCAL_TOOLS)}")
+    logger.info(f"Diagnosis local tools: {sorted(DIAGNOSIS_LOCAL_TOOLS)}")
+    logger.info(f"Mitigation local tools: {sorted(MITIGATION_LOCAL_TOOLS)}")
     logger.info("=" * 60)
 
     if not BRAIN_API_KEY:
@@ -847,6 +864,7 @@ def main():
     # so every such event has synced — so the config channel is production-clean.
     purge_stabilizer_env_churn(params["namespace"])
 
+    ALLOWED_LOCAL_TOOLS = DIAGNOSIS_LOCAL_TOOLS
     diagnosis_text = ""
     try:
         diagnosis_text = brain_chat(DIAGNOSIS_PROMPT.format(**params), thread_id)
@@ -887,6 +905,8 @@ def main():
     # ================================================================
     logger.info("=" * 40 + " MITIGATION " + "=" * 39)
 
+    ALLOWED_LOCAL_TOOLS = MITIGATION_LOCAL_TOOLS
+    logger.info(f"Mitigation phase: local tools now {sorted(ALLOWED_LOCAL_TOOLS)}")
     mitigation_text = ""
     try:
         mitigation_text = brain_chat(MITIGATION_PROMPT.format(**params), thread_id)
