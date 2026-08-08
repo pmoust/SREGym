@@ -48,6 +48,14 @@ class AstronomyShop(Application):
             "components.load-generator.envOverrides[0].name=LOCUST_BROWSER_TRAFFIC_ENABLED",
             "--set-string",
             "components.load-generator.envOverrides[0].value=false",
+            # Drop the flagd-ui sidecar. The otel-demo 2.2.0 Phoenix/Elixir flagd-ui
+            # leaks memory (OOMKills past 2Gi even in isolation), which crash-loops
+            # the whole flagd pod NotReady -> flagd Service shows 0 endpoints -> a
+            # loud confound that competes with quiet endpoint faults (e.g.
+            # wrong_service_selector). It is a non-essential admin editor; flagd
+            # serves flags from its config volume, so flag serving is unaffected.
+            "--set-json",
+            "components.flagd.sidecarContainers=[]",
         ]
 
         Helm.install(**self.helm_configs)
