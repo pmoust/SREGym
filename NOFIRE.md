@@ -25,6 +25,16 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   injection (`SREGYM_BASELINE_SYNC_SECONDS`). Candidate for upstreaming.
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
+- `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, and it hardcodes the values it
+  exports for `API_PORT` and `MCP_SERVER_PORT`. Parameterising those is what
+  lets several runs share a host.
+- `llm_backend/init_backend.py` — routes the judge to `ClaudeCliBackend` when
+  `is_claude_cli_judge()` says so. Keep that branch when merging upstream: it
+  conflicts with any upstream change to `get_llm_backend_for_judge`, and losing
+  it fails silently by falling back to LiteLLM.
+- `sregym/service/apps/astronomy_shop.py` — drops the flagd-ui sidecar and
+  prunes two dead collector exporters. **Not env-gated**, so it applies to every
+  run. Revert it for any run that claims to be stock.
 
 ## Syncing from upstream
 
@@ -36,6 +46,20 @@ git push --force-with-lease origin upstream-main   # allowed: only main is prote
 git checkout main && git merge upstream-main
 # resolve conflicts (our changes are deliberately small and env-gated),
 # then push main
+```
+
+## Keeping the sync current
+
+The mirror only tracks upstream if somebody makes it. Between 2026-07-29 and
+2026-08-24 upstream moved six commits ahead, three of them in the last three
+days, and one changed SREGym-Lite from 20 problems to 21. Check weekly: a small
+gap is one conflicted function, a large one is a merge nobody wants to do.
+
+Rehearse without touching the working tree:
+
+```bash
+git fetch upstream
+git merge-tree --write-tree --name-only origin/main upstream/main
 ```
 
 Keep the NOFire footprint in upstream files as small as possible — every change
