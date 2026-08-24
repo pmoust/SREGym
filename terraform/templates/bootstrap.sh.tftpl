@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# SREGym benchmark shard bootstrap. Rendered by terraform/compute.tf.
+#
+# Lifecycle: install -> pull prior results -> run this shard with --resume ->
+# sync after every problem -> terminate.
+#
+# Terminating is the normal exit, not the error path. A forgotten r7a.24xlarge
+# costs about $7.30/hr on demand, so the instance kills itself when its shard is
+# done and again when max_runtime_hours elapses, whichever comes first.
+
+set -uo pipefail
+exec > >(tee -a /var/log/sregym-bootstrap.log) 2>&1
+
+RUN_ID="${run_id}"
+SHARD_INDEX="${shard_index}"
+SHARD_COUNT="${shard_count}"
+REGION="${region}"
+BUCKET="${bucket}"
+S3_PREFIX="s3://${bucket}/${run_id}/shard-${shard_index}"
+WORKDIR=/opt/sregym
+RESULTS_DIR="$WORKDIR/results"
+
+echo "[bootstrap] run=$RUN_ID shard=$SHARD_INDEX/$SHARD_COUNT region=$REGION"
+echo "[bootstrap] results -> $S3_PREFIX"
+
+IID=$(curl -sf -H "X-aws-ec2-metadata-token: $(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')" \
+      http://169.254.169.254/latest/meta-data/instance-id)
+echo "[bootstrap] instance=$IID"
+
+terminate() {
+  local reason="$1"
+  echo "[bootstrap] terminating: $reason"
+  sync_results || true
+  %{ if keep_alive_on_failure }
+  echo "[bootstrap] keep_alive_on_failure is set, staying up. The runtime cap still applies."
+  %{ else }
+  aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" || shutdown -h now
+  %{ endif }
+}
+
+sync_results() {
+  [ -d "$RESULTS_DIR" ] || return 0
+  aws s3 sync "$RESULTS_DIR" "$S3_PREFIX/results/" --region "$REGION" --only-show-errors
+}
+
+# --- hard runtime cap -------------------------------------------------------
+# Backstop against a wedged run. The normal exit is shard completion below.
+( sleep $(( ${max_runtime_hours} * 3600 )) && terminate "max_runtime_hours=${max_runtime_hours} elapsed" ) &
+
+# --- spot interruption ------------------------------------------------------
+# EC2 gives two minutes' notice on IMDS. With per-problem syncing this is belt
+# and braces, but it costs ten lines and saves the in-flight problem's partial
+# artifacts.
+(
+  while true; do
+    TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' || true)
+    if [ -n "$TOKEN" ] && curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" \
+         http://169.254.169.254/latest/meta-data/spot/instance-action >/dev/null 2>&1; then
+      echo "[spot] interruption notice received, syncing before we lose the box"
+      sync_results || true
+      exit 0
+    fi
+    sleep 5
+  done
+) &
+
+# --- host prerequisites -----------------------------------------------------
+# kind nodes share the host's inotify limits, and the defaults are low enough
+# that system pods die with "too many open files" once several clusters are up.
+cat >/etc/sysctl.d/99-sregym.conf <<'SYSCTL'
+fs.inotify.max_user_instances=1024
+fs.inotify.max_user_watches=1048576
+fs.file-max=2097152
+SYSCTL
+sysctl --system
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg git jq unzip make
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  >/etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+
+curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+chmod +x /usr/local/bin/kind
+curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x /usr/local/bin/kubectl
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update
+
+# --- the harness ------------------------------------------------------------
+GH_TOKEN=$(aws ssm get-parameter --region "$REGION" --name "${github_token_ssm_path}" --with-decryption --query 'Parameter.Value' --output text)
+if [ -z "$GH_TOKEN" ] || [ "$GH_TOKEN" = "None" ]; then
+  terminate "could not read the clone token from ${github_token_ssm_path}"
+  exit 1
+fi
+
+git clone --recurse-submodules "https://x-access-token:$GH_TOKEN@github.com/NOFireAI/sregym.git" "$WORKDIR"
+cd "$WORKDIR"
+git checkout "${sregym_ref}"
+uv sync
+
+# --- brain-go ---------------------------------------------------------------
+# BRAIN_API_URL defaults to localhost:8001, so brain-go runs here beside the
+# harness. Standing it up, seeding the account and the four CUSTOM_MCP rows, and
+# minting the CLI key is NOFireAI/brain-go#2219's job. Until that lands this
+# shard cannot run, so fail loudly rather than burning an hour looking healthy.
+if [ ! -x "$WORKDIR/scripts/benchmark/setup_brain_go.sh" ]; then
+  echo "[bootstrap] scripts/benchmark/setup_brain_go.sh is missing."
+  echo "[bootstrap] That script is NOFireAI/brain-go#2219. Nothing to run without it."
+  terminate "brain-go setup not implemented yet"
+  exit 1
+fi
+"$WORKDIR/scripts/benchmark/setup_brain_go.sh"
+
+# --- resume -----------------------------------------------------------------
+# Pull whatever this shard already finished. main.py --resume counts attempts
+# per problem_id and skips any problem that already has n_attempts rows, so a
+# replacement instance costs the in-flight problem and nothing more.
+mkdir -p "$RESULTS_DIR"
+aws s3 sync "$S3_PREFIX/results/" "$RESULTS_DIR" --region "$REGION" --only-show-errors || true
+
+RESUME_CSV=$(find "$RESULTS_DIR" -name '*_ALL_results.csv' -print -quit 2>/dev/null || true)
+RESUME_ARG=""
+if [ -n "$RESUME_CSV" ]; then
+  echo "[bootstrap] resuming from $RESUME_CSV ($(wc -l <"$RESUME_CSV") rows)"
+  RESUME_ARG="--resume $RESUME_CSV"
+else
+  echo "[bootstrap] no prior results for this shard, starting clean"
+fi
+
+# --- shard ------------------------------------------------------------------
+# Static sharding: problem index % shard_count. No queue and no coordinator,
+# which is the right trade for 90 to 540 runs where the only failure mode that
+# matters is instance death, and S3 resume already covers that.
+# problem_sets.py is pure data. The registry is not: ProblemRegistry() loads a
+# kubeconfig on construction, and at this point the cluster may not exist yet.
+# The full-suite path is blocked on NOFireAI/brain-go#2221 anyway, which has to
+# reconstruct which 90 of the 137 registered problems the paper used.
+if [ -z "${problem_set}" ]; then
+  echo "[bootstrap] problem_set is empty, which means the full registry."
+  echo "[bootstrap] That set is undefined: 137 problems are registered, the paper"
+  echo "[bootstrap] used 90, and nothing in the repo says which. See NOFireAI/brain-go#2221."
+  terminate "full-suite runs need a defined problem set"
+  exit 1
+fi
+
+PROBLEMS=$(uv run python -c "
+from sregym.conductor.problem_sets import PROBLEM_SETS
+ids = sorted(PROBLEM_SETS['${problem_set}'])
+print(' '.join(p for i, p in enumerate(ids) if i % $SHARD_COUNT == $SHARD_INDEX))
+")
+
+if [ -z "$PROBLEMS" ]; then
+  terminate "shard $SHARD_INDEX resolved to no problems"
+  exit 0
+fi
+echo "[bootstrap] shard $SHARD_INDEX owns $(echo $PROBLEMS | wc -w) problems"
+
+# --- run --------------------------------------------------------------------
+export AGENT_MODEL_ID="${agent_model}"
+export JUDGE_MODEL_ID="${judge_model}"
+export AWS_DEFAULT_REGION="$REGION"
+
+# Every SREGYM_* intervention stays off. They exist to work around a 24 GB ARM
+# laptop and they are why engineering#799's numbers cannot be read. SETTLE_SECONDS
+# defaults to 180, so leaving it unset is not the same as turning it off.
+export SREGYM_SETTLE_SECONDS=0
+unset SREGYM_WAIT_FAULT_EVENT SREGYM_WAIT_EDGE_SYNC SREGYM_STELLARIZE \
+      SREGYM_STABILIZE_PODS SREGYM_GATE_SKIP SREGYM_BASELINE_SYNC_SECONDS \
+      SREGYM_SKIP_JUDGE_PREFLIGHT
+
+# Sync after every problem rather than at the end, so an interruption costs one
+# problem. The watcher is cheap and independent of the run's own exit path.
+( while true; do sleep 60; sync_results || true; done ) &
+
+NOISE_FLAG=""
+%{ if noise }
+NOISE_FLAG="--noise"
+%{ endif }
+
+for pid in $PROBLEMS; do
+  echo "[run] === $pid ==="
+  uv run main.py \
+    --agent brain_go \
+    --problem "$pid" \
+    --model "${agent_model}" \
+    --judge-model "${judge_model}" \
+    --n-attempts ${n_attempts} \
+    --agent-timeout ${agent_timeout_seconds} \
+    $NOISE_FLAG $RESUME_ARG || echo "[run] $pid failed, continuing"
+  sync_results || true
+done
+
+echo "[bootstrap] shard $SHARD_INDEX complete"
+terminate "shard complete"
