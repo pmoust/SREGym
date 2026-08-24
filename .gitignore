@@ -250,3 +250,10 @@ logs/
 docker/agents/build-context/
 
 resolve-values.yaml
+
+# terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfvars
