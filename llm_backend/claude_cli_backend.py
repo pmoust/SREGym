@@ -131,8 +131,25 @@ class ClaudeCliBackend:
         return re.sub(r"```json\s*|\s*```", "", result).strip() if isinstance(result, str) else ""
 
 
-def is_claude_cli_judge() -> bool:
-    """True when the configured judge should route through the Claude Code CLI."""
-    if os.environ.get("JUDGE_PROVIDER", "").strip().lower() == "claude_cli":
+def is_claude_cli_judge(
+    *,
+    provider: str | None = None,
+    model_name: str | None = None,
+) -> bool:
+    """True when the configured judge should route through the Claude Code CLI.
+
+    Explicit constructor configuration wins over the environment. Upstream #963
+    made DiagnosisJudge pass provider/model_name through, so a judge configured in
+    code with provider="claude_cli" must route here even when JUDGE_PROVIDER and
+    JUDGE_MODEL_ID are unset. Falling back to the env vars keeps the original
+    behaviour for callers that pass nothing.
+    """
+    if provider is not None and provider.strip().lower() == "claude_cli":
         return True
-    return os.environ.get("JUDGE_MODEL_ID", "").startswith(_MODEL_PREFIX)
+    if model_name is not None and model_name.startswith(_MODEL_PREFIX):
+        return True
+    if provider is None and os.environ.get("JUDGE_PROVIDER", "").strip().lower() == "claude_cli":
+        return True
+    if model_name is None and os.environ.get("JUDGE_MODEL_ID", "").startswith(_MODEL_PREFIX):
+        return True
+    return False

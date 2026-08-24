@@ -716,9 +716,7 @@ class Conductor:
         self.logger.info("[FIX] Imbalance leftover if any")
 
         injector = VirtualizationFaultInjector(namespace="kube-system")
-        injector.recover_daemon_set_image_replacement(
-            daemon_set_name="kube-proxy", original_image="registry.k8s.io/kube-proxy:v1.31.13"
-        )
+        injector.recover_daemon_set_image_replacement(daemon_set_name="kube-proxy")
 
         self.logger.info("[FIX] KubeletCrash leftover if any")
         injector = RemoteOSFaultInjector()
@@ -879,8 +877,11 @@ class Conductor:
             for ns in app_namespaces:
                 self.jaeger.create_external_name_service(ns)
 
-        problem.app.start_workload()
-        self.logger.info("[ENV] Start workload")
+        if problem.run_default_workload:
+            problem.app.start_workload()
+            self.logger.info("[ENV] Start workload")
+        else:
+            self.logger.info("[ENV] Default application workload disabled for this problem")
 
     def undeploy_app(self):
         """Teardown problem.app and, if no other apps running, OpenEBS/Prometheus."""

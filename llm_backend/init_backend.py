@@ -8,11 +8,21 @@ def get_llm_backend(
     model_name: str,
     api_base: str | None = None,
     api_key: str | None = None,
+    provider: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int | None = None,
 ) -> LiteLLMBackend:
     """Initialize an LLM backend for the given litellm model string."""
     endpoint_status = "set" if api_base else "unset"
     print(f"🔧 Initializing LLM backend — model: {model_name}, api_base: {endpoint_status}")
-    return LiteLLMBackend(model_name=model_name, api_base=api_base, api_key=api_key)
+    return LiteLLMBackend(
+        model_name=model_name,
+        api_base=api_base,
+        api_key=api_key,
+        provider=provider,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
 
 def get_llm_backend_for_agent() -> LiteLLMBackend:
@@ -27,16 +37,27 @@ def get_llm_backend_for_agent() -> LiteLLMBackend:
     )
 
 
-def get_llm_backend_for_judge() -> LiteLLMBackend | ClaudeCliBackend:
+def get_llm_backend_for_judge(
+    *,
+    provider: str | None = None,
+    model_name: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    temperature: float = 0.0,
+    max_tokens: int | None = None,
+) -> LiteLLMBackend | ClaudeCliBackend:
     """Get LLM backend for the LLM-as-a-judge evaluator."""
-    model_id = os.environ.get("JUDGE_MODEL_ID")
+    model_id = model_name or os.environ.get("JUDGE_MODEL_ID")
     if not model_id:
-        raise ValueError("JUDGE_MODEL_ID environment variable is not set.")
-    if is_claude_cli_judge():
+        raise ValueError("A judge model must be passed or set in JUDGE_MODEL_ID.")
+    if is_claude_cli_judge(provider=provider, model_name=model_name):
         print(f"🔧 Initializing Claude Code CLI judge backend — model: {model_id}")
         return ClaudeCliBackend(model_id)
     return get_llm_backend(
         model_id,
-        api_base=os.environ.get("JUDGE_API_BASE"),
-        api_key=os.environ.get("JUDGE_API_KEY"),
+        api_base=api_base if api_base is not None else os.environ.get("JUDGE_API_BASE"),
+        api_key=api_key if api_key is not None else os.environ.get("JUDGE_API_KEY"),
+        provider=provider,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
