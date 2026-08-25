@@ -48,6 +48,18 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
+
+  # brain-go. Runs on the host beside the harness, like the brain entry above:
+  # it drives an external service over SSE rather than executing in a sandbox,
+  # and needs the host's kubeconfig for the mitigation phase.
+  - name: brain_go
+    kickoff_command: python -m clients.brain_go.driver
+    kickoff_workdir: .
+    kickoff_env:
+      BRAIN_API_URL: "http://localhost:8001"
+    install_script: null
+    agent_version: null
+    container_isolation: false
   - name: tierzero
     kickoff_command: python -m clients.tierzero.driver
     kickoff_workdir: .

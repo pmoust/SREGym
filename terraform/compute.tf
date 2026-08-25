@@ -57,6 +57,7 @@ resource "aws_instance" "bench" {
     region                = var.region
     bucket                = local.bucket
     sregym_ref            = var.sregym_ref
+    brain_go_ref          = var.brain_go_ref
     github_token_ssm_path = var.github_token_ssm_path
     problem_set           = var.problem_set
     n_attempts            = var.n_attempts
