@@ -18,9 +18,9 @@ def test_parses_a_named_event():
 def test_skips_keepalive_comments():
     """Comment lines are keepalives, not events.
 
-    brain-go does not send these today (NOFireAI/brain-go#2249) but Python's
-    sse_starlette did every 15s by default, and the fix restores them. Either
-    way a keepalive must not surface as an event.
+    brain-go sends one every 15s on an idle stream (NOFireAI/brain-go#2250),
+    matching Python's sse_starlette default. Either way a keepalive must not
+    surface as an event.
     """
     assert frames(": keepalive", "event: done", "data: {}", "") == [("done", {})]
 

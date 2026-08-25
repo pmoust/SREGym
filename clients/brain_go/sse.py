@@ -18,10 +18,10 @@ from typing import Any
 def iter_sse_events(lines: Iterable[str | None]) -> Iterator[tuple[str, dict[str, Any]]]:
     """Parse SSE lines into (event_name, data) pairs.
 
-    Comment lines (`:` prefix) are skipped. Those are keepalives: brain-go does
-    not send them today (NOFireAI/brain-go#2249), but Python's sse_starlette did
-    every 15 seconds by library default, and the fix restores them. Skipping
-    them is required either way, since a keepalive is not an event.
+    Comment lines (`:` prefix) are skipped. Those are keepalives: brain-go
+    sends one every 15 seconds on an idle stream (NOFireAI/brain-go#2250),
+    matching Python's sse_starlette default. Skipping them is required either
+    way, since a keepalive is not an event.
     """
     event_name: str | None = None
     data_lines: list[str] = []
