@@ -37,6 +37,18 @@ ENV_OUT="${BRAIN_GO_ENV_OUT:-/etc/profile.d/sregym-brain-go.sh}"
 log() { echo "[setup-brain-go] $*"; }
 die() { echo "[setup-brain-go] ERROR: $*" >&2; exit 1; }
 
+# Set a key in deploy/.env, replacing it if present and appending if not.
+# dev-env.sh's set_key only fills keys that are empty, so it will not correct a
+# key that already holds the wrong value; this will.
+set_env_key() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" deploy/.env; then
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" deploy/.env && rm -f deploy/.env.bak
+  else
+    echo "${key}=${value}" >>deploy/.env
+  fi
+}
+
 [ -d "$BRAIN_GO_DIR" ] || die "brain-go checkout not found at $BRAIN_GO_DIR"
 cd "$BRAIN_GO_DIR"
 
@@ -54,17 +66,26 @@ esac
 MCP_BASE="http://${PRIVATE_IP}:${MCP_PORT}"
 log "private address $PRIVATE_IP, MCP base $MCP_BASE"
 
-# --- pin the tenant name before anything generates .env ----------------------
+# --- pin the tenant and the feature flags before the stack starts -------------
 # A distinct customer gives a distinct account, which is what keeps concurrent
-# runs from sharing a tenant. dev-env.sh's set_key only fills empty keys, so
-# writing this first survives its run.
+# runs from sharing a tenant.
 ./scripts/dev-env.sh ensure
-if grep -q '^DEV_CUSTOMER=' deploy/.env; then
-  sed -i.bak "s|^DEV_CUSTOMER=.*|DEV_CUSTOMER=${CUSTOMER}|" deploy/.env && rm -f deploy/.env.bak
-else
-  echo "DEV_CUSTOMER=${CUSTOMER}" >>deploy/.env
-fi
+set_env_key DEV_CUSTOMER "${CUSTOMER}"
 log "tenant: $CUSTOMER"
+
+# Force every cli_mode turn onto the RCI path (NOFireAI/brain-go#1547, merged as
+# #1698). The flag is opt-in and off by default, so merging it was not enough:
+# without this the supervisor's createPlan decides per turn whether to
+# investigate, and it can return an empty plan that routes to FINISH or a
+# guidance plan instead. A benchmark cannot tell that apart from a bad
+# diagnosis, and the token counts the first run exists to capture would be
+# measuring a conversational answer rather than an investigation.
+#
+# Both readers pick this up from deploy/.env: chatsvc for the in-process bridge
+# and tworker for the Temporal path, since both compose services inherit
+# env_file: .env.
+set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
+log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 
 # --- bring up the stack ------------------------------------------------------
 # Temporal is not optional. buildWorkflowChat is called unconditionally in
