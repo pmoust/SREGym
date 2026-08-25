@@ -571,10 +571,14 @@ def main(args):
 
     if args.noise:
         logger.info("Noise injection enabled.")
-    os.environ["API_HOSTNAME"] = "0.0.0.0"
-    os.environ["API_PORT"] = "8000"
-    os.environ["MCP_SERVER_PORT"] = "9954"
-    os.environ["MCP_SERVER_URL"] = "http://127.0.0.1:9954"
+    # Defaults, not overrides: an already-exported value wins, so several runs
+    # can share a host by each exporting its own ports. MCP_SERVER_URL is derived
+    # from the resolved port rather than defaulted independently, since
+    # overriding only the port would otherwise leave the URL pointing at 9954.
+    os.environ.setdefault("API_HOSTNAME", "0.0.0.0")
+    os.environ.setdefault("API_PORT", "8000")
+    os.environ.setdefault("MCP_SERVER_PORT", "9954")
+    os.environ.setdefault("MCP_SERVER_URL", f"http://127.0.0.1:{os.environ['MCP_SERVER_PORT']}")
 
     logger.info(
         f"🔧 Config — agent: {args.agent}, agent_model: {agent_model}, judge_model: {judge_model}, "

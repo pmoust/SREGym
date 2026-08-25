@@ -16,7 +16,9 @@ class MCPServer:
     def __init__(self):
         self.namespace = "sregym"
         self.service_name = "mcp-server"
-        self.port = 9954
+        # Host side of the port-forward below, so it has to differ between runs
+        # sharing a host. The in-cluster service port stays 9954 either way.
+        self.port = int(os.getenv("MCP_SERVER_PORT", "9954"))
         self.port_forward_process = None
         self.kubectl = KubeCtl()
 

@@ -25,9 +25,9 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   injection (`SREGYM_BASELINE_SYNC_SECONDS`). Candidate for upstreaming.
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
-- `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, and it hardcodes the values it
-  exports for `API_PORT` and `MCP_SERVER_PORT`. Parameterising those is what
-  lets several runs share a host.
+- `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, and it sets `API_PORT`,
+  `MCP_SERVER_PORT` and friends as defaults rather than overrides so several
+  runs can share a host. Candidate for upstreaming.
 - `llm_backend/init_backend.py` — routes the judge to `ClaudeCliBackend` when
   `is_claude_cli_judge()` says so. Keep that branch when merging upstream: it
   conflicts with any upstream change to `get_llm_backend_for_judge`, and losing
@@ -35,6 +35,24 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
 - `sregym/service/apps/astronomy_shop.py` — drops the flagd-ui sidecar and
   prunes two dead collector exporters. **Not env-gated**, so it applies to every
   run. Revert it for any run that claims to be stock.
+- `sregym/service/mcp_server.py` — the host side of the MCP port-forward reads
+  `MCP_SERVER_PORT` instead of hardcoding 9954. Candidate for upstreaming.
+- `sregym/paths.py` — `SREGYM_CACHE_DIR` overrides the cache location, so runs
+  sharing a host do not share a per-cluster baseline snapshot. Candidate for
+  upstreaming.
+- `kind/setup_kind_cluster.sh` — `KIND_CLUSTER_NAME`, so a second cluster on the
+  same host does not collide with the default name `kind`. Candidate for
+  upstreaming.
+
+NOFire-only directories, which add no merge drift because upstream has no such
+path:
+
+- `clients/brain_go/` — the brain-go agent driver and its SSE parser, with tests
+  in `tests/brain_go/`.
+- `scripts/benchmark/` — stands up and seeds brain-go on an instance
+  (`setup_brain_go.sh`, `seed_connections.py`) and computes the per-run
+  environment that lets runs share a host (`run_slot_env.sh`).
+- `terraform/` — the ephemeral spot fleet the suite runs on.
 
 ## Syncing from upstream
 

@@ -8,8 +8,11 @@ BASE_PARENT_DIR = Path(__file__).resolve().parent.parent
 # Targe microservice and its utilities directories
 TARGET_MICROSERVICES = BASE_PARENT_DIR / "SREGym-applications"
 
-# Cache directories
-CACHE_DIR = HOME_DIR / "cache_dir"
+# Cache directories. SREGYM_CACHE_DIR gives each run sharing a host its own,
+# because what is cached below is per-cluster: a second run that reads the first
+# run's cluster_baseline_state.json compares against a baseline captured from a
+# different cluster, and does it silently.
+CACHE_DIR = Path(os.getenv("SREGYM_CACHE_DIR") or HOME_DIR / "cache_dir")
 LLM_CACHE_FILE = CACHE_DIR / "llm_cache.json"
 
 # Cluster baseline state snapshot (captured from a fresh cluster)

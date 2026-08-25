@@ -5,6 +5,13 @@
 # Usage (from repo root):
 #   bash kind/setup_kind_cluster.sh [arm|x86]
 #
+# Environment:
+#   KIND_CLUSTER_NAME  cluster to create (default "kind"). Two clusters on one
+#                      host need distinct names, or the second create fails.
+#   KUBECONFIG         where kind writes the cluster's context. Point each
+#                      concurrent run at its own file so the current-context
+#                      every later kubectl resolves is unambiguous.
+#
 # Requirements:
 #   - kind
 #   - kubectl
@@ -13,6 +20,7 @@ set -euo pipefail
 
 CALICO_VERSION="v3.27.0"
 ARCH="${1:-x86}"
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIND_CONFIG="${SCRIPT_DIR}/kind-config-${ARCH}.yaml"
 
@@ -22,8 +30,8 @@ if [[ ! -f "${KIND_CONFIG}" ]]; then
     exit 1
 fi
 
-echo "==> Step 1: Create Kind cluster (arch: ${ARCH})"
-kind create cluster --config "${KIND_CONFIG}"
+echo "==> Step 1: Create Kind cluster (arch: ${ARCH}, name: ${KIND_CLUSTER_NAME})"
+kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"
 
 echo "==> Step 2: Install Calico CNI"
 kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
@@ -71,7 +79,9 @@ fi
 echo "==> Step 4: Delete SREGym cluster baseline cache"
 # SREGym caches the cluster baseline state after first deployment.
 # Deleting it forces SREGym to capture a fresh baseline with Calico installed.
-rm -f ~/cache_dir/cluster_baseline_state.json
+# Honours SREGYM_CACHE_DIR (see sregym/paths.py) so clearing one run's baseline
+# does not clear another's.
+rm -f "${SREGYM_CACHE_DIR:-$HOME/cache_dir}/cluster_baseline_state.json"
 
 echo ""
 echo "✅ Cluster setup complete!"
