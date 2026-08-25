@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from sregym.paths import real_kubeconfig_path
+
 logger = logging.getLogger("all.sregym.container_runner")
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -256,8 +258,11 @@ class ContainerRunner:
             args.extend(["-e", "KUBECONFIG=/root/.kube/config"])
 
         # Mount the real (unproxied) kubeconfig so that workload oracles
-        # running inside the container can bypass the filtering proxy.
-        real_kubeconfig = Path(os.path.expanduser("~/.kube/config"))
+        # running inside the container can bypass the filtering proxy. Resolved
+        # rather than hardcoded to ~/.kube/config, or a run whose cluster lives
+        # in its own kubeconfig would silently skip this mount and leave the
+        # in-container oracle with no unproxied config to fall back to.
+        real_kubeconfig = Path(real_kubeconfig_path())
         if real_kubeconfig.exists():
             args.extend(["-v", f"{real_kubeconfig.resolve()}:/root/.kube/real-config:ro"])
             args.extend(["-e", "SREGYM_REAL_KUBECONFIG=/root/.kube/real-config"])

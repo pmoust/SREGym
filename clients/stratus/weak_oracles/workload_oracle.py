@@ -1,5 +1,4 @@
 import logging
-import os
 import time
 
 import yaml
@@ -10,7 +9,7 @@ from pydantic import ConfigDict, Field
 from clients.stratus.weak_oracles.base_oracle import BaseOracle, OracleResult
 
 # from aiopslab.generators.workload.wrk import Wrk
-from sregym.paths import BASE_DIR, TARGET_MICROSERVICES
+from sregym.paths import BASE_DIR, TARGET_MICROSERVICES, real_kubeconfig_path
 from sregym.service.apps.base import Application
 from sregym.service.kubectl import KubeCtl
 
@@ -25,19 +24,18 @@ def _make_real_api_client() -> client.ApiClient:
     mirrors the approach used by KubernetesAPIProxy itself and by the Resolve driver.
 
     Inside containers, the real kubeconfig is mounted at a separate path and
-    advertised via SREGYM_REAL_KUBECONFIG. On the host, ~/.kube/config is used.
+    advertised via SREGYM_REAL_KUBECONFIG. On the host it is the kubeconfig
+    naming this run's own cluster.
     """
     try:
         config.load_incluster_config()
         return client.ApiClient()
     except config.ConfigException:
-        # Running outside the cluster — load from the real kubeconfig path,
-        # ignoring the KUBECONFIG env var which may point to the filtering proxy.
-        # In containers, SREGYM_REAL_KUBECONFIG points to the unproxied config.
-        real_kubeconfig = os.environ.get(
-            "SREGYM_REAL_KUBECONFIG",
-            os.path.expanduser("~/.kube/config"),
-        )
+        # Running outside the cluster — load from the real kubeconfig path.
+        # In a container SREGYM_REAL_KUBECONFIG points at the unproxied mount,
+        # which is why it wins over KUBECONFIG there. On the host it is unset
+        # and KUBECONFIG names this run's cluster, which is the one to read.
+        real_kubeconfig = real_kubeconfig_path()
         cfg = client.Configuration()
         config.load_kube_config(config_file=real_kubeconfig, client_configuration=cfg)
         return client.ApiClient(configuration=cfg)

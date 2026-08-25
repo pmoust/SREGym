@@ -28,6 +28,8 @@ from urllib.parse import urlparse
 import urllib3
 from kubernetes import config
 
+from sregym.paths import real_kubeconfig_path
+
 logger = logging.getLogger("all.infra.k8s_proxy")
 logger.propagate = True
 logger.setLevel(logging.DEBUG)
@@ -80,13 +82,18 @@ class KubernetesAPIProxy:
             self.api_host = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
             self.api_port = int(os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
         else:
-            # Running outside the cluster — load from kubeconfig
-            # Always load from the default kubeconfig path, ignoring KUBECONFIG env var
-            # This prevents circular dependency if KUBECONFIG points to our proxy
-            default_kubeconfig = os.path.expanduser("~/.kube/config")
-            config.load_kube_config(config_file=default_kubeconfig)
+            # Running outside the cluster — load from kubeconfig.
+            # This must resolve the real cluster and never this proxy, or the
+            # proxy would forward to itself. It used to hardcode ~/.kube/config
+            # for that reason, but that breaks once runs share a host, since
+            # each run's cluster lives in its own kubeconfig. The generated
+            # agent kubeconfig that points here is only ever handed to
+            # subprocesses and containers, never exported into this process's
+            # own KUBECONFIG, so honouring it does not reintroduce the loop.
+            upstream_kubeconfig = real_kubeconfig_path()
+            config.load_kube_config(config_file=upstream_kubeconfig)
             self.api_host, self.api_port, self.ca_cert, self.client_cert, self.client_key = self._load_cluster_config(
-                kubeconfig_path=default_kubeconfig
+                kubeconfig_path=upstream_kubeconfig
             )
 
     def _load_cluster_config(self, kubeconfig_path: str | None = None):
