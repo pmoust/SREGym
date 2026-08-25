@@ -56,11 +56,12 @@ API_HOSTNAME = os.environ.get("API_HOSTNAME", "localhost")
 API_PORT = os.environ.get("API_PORT", "8000")
 CONDUCTOR_URL = f"http://{API_HOSTNAME}:{API_PORT}"
 
-# Raised from the brain driver's 120s because brain-go sends no SSE keepalive
-# (NOFireAI/brain-go#2249), so a slow tool call or a long model turn is
-# indistinguishable from a dead connection. The harness enforces its own agent
-# timeout as the real backstop. Drop the override once that lands.
-SSE_READ_TIMEOUT = int(os.environ.get("BRAIN_SSE_READ_TIMEOUT", "900"))
+# brain-go sends a ": keepalive" comment every 15s on an idle stream
+# (NOFireAI/brain-go#2250), so a gap this long means the connection is
+# actually dead, not just a slow tool call or a long model turn. 6x the
+# keepalive interval leaves margin for network jitter or a GC pause without
+# giving up minutes late on a genuinely stuck run.
+SSE_READ_TIMEOUT = int(os.environ.get("BRAIN_SSE_READ_TIMEOUT", "90"))
 SSE_CONNECT_TIMEOUT = 30
 
 MAX_TOOL_RESULT_CHARS = 100_000
@@ -105,10 +106,10 @@ def brain_headers() -> dict[str, str]:
 def _timeout_message(where: str) -> str:
     """Explain why a timeout is fatal rather than retried. See run_turn."""
     return (
-        f"no data for {SSE_READ_TIMEOUT}s ({where}). Not retrying: the turn is already "
-        f"persisted server-side, so a retry would resume partial state with a duplicated "
-        f"message rather than redoing the turn. If this fires often, brain-go is likely "
-        f"still missing its SSE keepalive (NOFireAI/brain-go#2249)."
+        f"no data for {SSE_READ_TIMEOUT}s ({where}), well past brain-go's 15s keepalive "
+        f"cadence, so the connection is dead. Not retrying: the turn is already persisted "
+        f"server-side, so a retry would resume partial state with a duplicated message "
+        f"rather than redoing the turn."
     )
 
 

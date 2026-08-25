@@ -121,15 +121,13 @@ uv run python "$(cd "$(dirname "$0")" && pwd)/seed_connections.py" \
   --session-id "sregym-${CUSTOMER}"
 
 # --- hand the driver what it needs -------------------------------------------
-# BRAIN_SSE_READ_TIMEOUT is raised from the driver's 120s default because
-# brain-go sends no SSE keepalive (NOFireAI/brain-go#2249): a slow tool call or a
-# long model turn is indistinguishable from a dead connection. The harness's own
-# agent timeout is the real backstop. Drop this override once #2249 lands.
+# No BRAIN_SSE_READ_TIMEOUT override: brain-go now sends an SSE keepalive
+# every 15s (NOFireAI/brain-go#2250), so the driver's own default is already
+# tuned for that and needs no deployment-level override.
 install -m 0600 /dev/null "$ENV_OUT"
 cat >"$ENV_OUT" <<ENVEOF
 export BRAIN_API_URL="${BRAIN_CHAT_URL}"
 export BRAIN_API_KEY="${DEV_API_KEY}"
-export BRAIN_SSE_READ_TIMEOUT="${BRAIN_SSE_READ_TIMEOUT:-900}"
 ENVEOF
 
 log "ready. BRAIN_API_URL=$BRAIN_CHAT_URL, credentials in $ENV_OUT"
