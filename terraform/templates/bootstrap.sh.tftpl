@@ -115,12 +115,27 @@ uv sync
 # minting the CLI key is NOFireAI/brain-go#2219's job. Until that lands this
 # shard cannot run, so fail loudly rather than burning an hour looking healthy.
 if [ ! -x "$WORKDIR/scripts/benchmark/setup_brain_go.sh" ]; then
-  echo "[bootstrap] scripts/benchmark/setup_brain_go.sh is missing."
-  echo "[bootstrap] That script is NOFireAI/brain-go#2219. Nothing to run without it."
-  terminate "brain-go setup not implemented yet"
+  echo "[bootstrap] scripts/benchmark/setup_brain_go.sh is missing on ref ${sregym_ref}."
+  terminate "brain-go setup script not present"
   exit 1
 fi
-"$WORKDIR/scripts/benchmark/setup_brain_go.sh"
+
+# brain-go runs on this box beside the harness, so it has to be checked out
+# here. setup_brain_go.sh brings up its compose stack and seeds it.
+BRAIN_GO_DIR=/opt/brain-go
+if [ ! -d "$BRAIN_GO_DIR" ]; then
+  git clone --depth 1 --branch "${brain_go_ref}" \
+    "https://x-access-token:$GH_TOKEN@github.com/NOFireAI/brain-go.git" "$BRAIN_GO_DIR" \
+    || { terminate "could not clone brain-go"; exit 1; }
+fi
+
+BRAIN_GO_DIR="$BRAIN_GO_DIR" \
+BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX" \
+  "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
+
+# setup_brain_go.sh writes BRAIN_API_URL, BRAIN_API_KEY and the SSE timeout here.
+# shellcheck disable=SC1091
+. /etc/profile.d/sregym-brain-go.sh
 
 # --- resume -----------------------------------------------------------------
 # Pull whatever this shard already finished. main.py --resume counts attempts
