@@ -84,9 +84,11 @@ def test_non_ok_response_fails_without_reading_the_stream():
     resp.status_code = 401
     resp.text = "unauthorized"
 
-    with mock.patch.object(driver.requests, "post", return_value=resp):
-        with pytest.raises(driver.TurnFailed, match="401"):
-            driver.run_turn("diagnose", "cli:t1", set())
+    with (
+        mock.patch.object(driver.requests, "post", return_value=resp),
+        pytest.raises(driver.TurnFailed, match="401"),
+    ):
+        driver.run_turn("diagnose", "cli:t1", set())
 
 
 def test_diagnosis_phase_refuses_local_tools():
@@ -103,12 +105,14 @@ def test_diagnosis_phase_refuses_local_tools():
 
         return resp
 
-    with mock.patch.object(driver.requests, "post", side_effect=fake_post):
-        with mock.patch.object(driver.subprocess, "run") as run:
-            driver.execute_local_tool(
-                {"tool_call_id": "t1", "command": "kubectl get pods", "tool_type": "kubectl"},
-                allowed_tools=set(),
-            )
+    with (
+        mock.patch.object(driver.requests, "post", side_effect=fake_post),
+        mock.patch.object(driver.subprocess, "run") as run,
+    ):
+        driver.execute_local_tool(
+            {"tool_call_id": "t1", "command": "kubectl get pods", "tool_type": "kubectl"},
+            allowed_tools=set(),
+        )
 
     run.assert_not_called()
     assert posted["exit_code"] == 1
@@ -128,12 +132,14 @@ def test_mitigation_phase_runs_an_allowed_tool():
 
     completed = subprocess.CompletedProcess(args="", returncode=0, stdout="pod/x patched", stderr="")
 
-    with mock.patch.object(driver.requests, "post", side_effect=fake_post):
-        with mock.patch.object(driver.subprocess, "run", return_value=completed):
-            driver.execute_local_tool(
-                {"tool_call_id": "t2", "command": "kubectl patch x", "tool_type": "kubectl"},
-                allowed_tools={"kubectl", "helm"},
-            )
+    with (
+        mock.patch.object(driver.requests, "post", side_effect=fake_post),
+        mock.patch.object(driver.subprocess, "run", return_value=completed),
+    ):
+        driver.execute_local_tool(
+            {"tool_call_id": "t2", "command": "kubectl patch x", "tool_type": "kubectl"},
+            allowed_tools={"kubectl", "helm"},
+        )
 
     assert posted["exit_code"] == 0
     assert posted["result"] == "pod/x patched"
@@ -152,14 +158,14 @@ def test_local_tool_timeout_is_reported_not_raised():
 
         return resp
 
-    with mock.patch.object(driver.requests, "post", side_effect=fake_post):
-        with mock.patch.object(
-            driver.subprocess, "run", side_effect=subprocess.TimeoutExpired("cmd", 120)
-        ):
-            driver.execute_local_tool(
-                {"tool_call_id": "t3", "command": "sleep 999", "tool_type": "kubectl"},
-                allowed_tools={"kubectl"},
-            )
+    with (
+        mock.patch.object(driver.requests, "post", side_effect=fake_post),
+        mock.patch.object(driver.subprocess, "run", side_effect=subprocess.TimeoutExpired("cmd", 120)),
+    ):
+        driver.execute_local_tool(
+            {"tool_call_id": "t3", "command": "sleep 999", "tool_type": "kubectl"},
+            allowed_tools={"kubectl"},
+        )
 
     assert posted["exit_code"] == 124
     assert "timed out" in posted["error"]
@@ -167,18 +173,16 @@ def test_local_tool_timeout_is_reported_not_raised():
 
 def test_tool_result_post_failure_does_not_kill_the_turn():
     """The model can proceed without the result; raising here would abandon the stream."""
-    with mock.patch.object(
-        driver.requests, "post", side_effect=requests.ConnectionError("refused")
+    with (
+        mock.patch.object(driver.requests, "post", side_effect=requests.ConnectionError("refused")),
+        mock.patch.object(driver.subprocess, "run") as run,
     ):
-        with mock.patch.object(driver.subprocess, "run") as run:
-            driver.execute_local_tool(
-                {"tool_call_id": "t4", "command": "x", "tool_type": "nope"}, allowed_tools=set()
-            )
+        driver.execute_local_tool({"tool_call_id": "t4", "command": "x", "tool_type": "nope"}, allowed_tools=set())
 
     run.assert_not_called()
 
 
 def test_default_diagnosis_tools_are_empty():
     """Track B by default: diagnosis from the graph alone, no cluster access."""
-    assert driver.DIAGNOSIS_LOCAL_TOOLS == set()
+    assert set() == driver.DIAGNOSIS_LOCAL_TOOLS
     assert "kubectl" in driver.MITIGATION_LOCAL_TOOLS

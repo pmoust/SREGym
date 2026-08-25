@@ -185,8 +185,9 @@ variable "brain_go_ref" {
 
 variable "github_token_ssm_path" {
   description = <<-EOT
-    SSM SecureString holding a token that can clone the private mirror. The
-    instance role is scoped to read only this parameter.
+    SSM SecureString holding a token that can clone both this private mirror
+    and NOFireAI/brain-go (the bootstrap checks out brain_go_ref with the same
+    token). The instance role is scoped to read only this parameter.
   EOT
   type        = string
   default     = "/sregym/benchmark/github-token"

@@ -17,7 +17,7 @@ than whole sweeps.
 One-time, per account:
 
 ```bash
-# A token that can clone this private mirror
+# A token that can clone both this private mirror and NOFireAI/brain-go
 aws ssm put-parameter --region us-east-1 \
   --name /sregym/benchmark/github-token \
   --type SecureString --value "ghp_..."
@@ -97,19 +97,20 @@ the k8s proxy, 8000 for the conductor API. Two harness processes cannot share a
 host until NOFireAI/brain-go#2219 parameterises them. One cluster per run is a
 hard constraint; one host per run is not.
 
-## Not done yet
+## brain-go
 
-`scripts/benchmark/setup_brain_go.sh` does not exist. `BRAIN_API_URL` defaults to
-`localhost:8001`, so brain-go runs on the box beside the harness, and standing it
-up, seeding the account and the four CUSTOM_MCP connection rows, and minting the
-CLI key is NOFireAI/brain-go#2219. The bootstrap checks for that script and exits
-loudly rather than burning an hour looking healthy.
+`scripts/benchmark/setup_brain_go.sh` stands up brain-go on the box, seeds the
+account and the four CUSTOM_MCP connection rows, and mints the CLI key
+(NOFireAI/brain-go#2219). The bootstrap clones brain-go at `brain_go_ref`
+(default `main`) with the same token as the sregym checkout, then runs the
+script; a missing or failed clone exits loudly rather than burning an hour
+looking healthy. `BRAIN_API_URL` defaults to `localhost:8001`, so brain-go runs
+on the box beside the harness rather than centrally.
 
-Two things it should also carry when written: the MCP server has to be addressed
-by the instance's RFC1918 address with `allow_private_endpoint` set per
-connection row, because brain-go's SSRF guard blocks loopback with no flag that
-lifts it, and that allowance is honoured only on the in-process CUSTOM_MCP path,
-not the Temporal MCP activity path.
+The MCP server is addressed by the instance's RFC1918 address with
+`allow_private_endpoint` set per connection row, because brain-go's SSRF guard
+blocks loopback with no flag that lifts it, and that allowance is honoured
+only on the in-process CUSTOM_MCP path, not the Temporal MCP activity path.
 
 ## Cost
 

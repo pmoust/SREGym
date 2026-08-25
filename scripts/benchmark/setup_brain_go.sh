@@ -125,11 +125,11 @@ uv run python "$(cd "$(dirname "$0")" && pwd)/seed_connections.py" \
 # brain-go sends no SSE keepalive (NOFireAI/brain-go#2249): a slow tool call or a
 # long model turn is indistinguishable from a dead connection. The harness's own
 # agent timeout is the real backstop. Drop this override once #2249 lands.
+install -m 0600 /dev/null "$ENV_OUT"
 cat >"$ENV_OUT" <<ENVEOF
 export BRAIN_API_URL="${BRAIN_CHAT_URL}"
 export BRAIN_API_KEY="${DEV_API_KEY}"
 export BRAIN_SSE_READ_TIMEOUT="${BRAIN_SSE_READ_TIMEOUT:-900}"
 ENVEOF
-chmod 0600 "$ENV_OUT"
 
 log "ready. BRAIN_API_URL=$BRAIN_CHAT_URL, credentials in $ENV_OUT"

@@ -12,9 +12,7 @@ def frames(*lines: str):
 
 
 def test_parses_a_named_event():
-    assert frames("event: token", 'data: {"accumulated":"hi"}', "") == [
-        ("token", {"accumulated": "hi"})
-    ]
+    assert frames("event: token", 'data: {"accumulated":"hi"}', "") == [("token", {"accumulated": "hi"})]
 
 
 def test_skips_keepalive_comments():
@@ -28,9 +26,7 @@ def test_skips_keepalive_comments():
 
 
 def test_keepalive_between_frames_does_not_split_them():
-    assert frames("event: token", ": keepalive", 'data: {"accumulated":"x"}', "") == [
-        ("token", {"accumulated": "x"})
-    ]
+    assert frames("event: token", ": keepalive", 'data: {"accumulated":"x"}', "") == [("token", {"accumulated": "x"})]
 
 
 def test_multiple_frames_in_one_stream():
@@ -51,9 +47,7 @@ def test_data_only_frame_defaults_to_message():
 
 
 def test_multiline_data_is_joined():
-    assert frames("event: response", 'data: {"content":', 'data: "split"}', "") == [
-        ("response", {"content": "split"})
-    ]
+    assert frames("event: response", 'data: {"content":', 'data: "split"}', "") == [("response", {"content": "split"})]
 
 
 def test_unparseable_data_is_preserved_not_dropped():
@@ -71,9 +65,7 @@ def test_trailing_carriage_returns_are_stripped():
 
 def test_truncated_stream_still_yields_what_arrived():
     """No trailing blank line, e.g. a connection cut mid-frame."""
-    assert frames("event: token", 'data: {"accumulated":"partial"}') == [
-        ("token", {"accumulated": "partial"})
-    ]
+    assert frames("event: token", 'data: {"accumulated":"partial"}') == [("token", {"accumulated": "partial"})]
 
 
 def test_none_lines_are_ignored():
