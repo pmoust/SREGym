@@ -73,6 +73,27 @@ rediscover:
   the entity graph and the benchmark leaks its own ground truth to the agent
   under test. Verify with `kubectl auth can-i list podchaos.chaos-mesh.org -A
   --as system:serviceaccount:monitoring:nofire-edge` — it must print `no`.
+- **MCP tool access already existed in the Python run — it is not new to
+  brain-go.** `seed_connections.py` creates `Connection` rows with
+  `kind=ConnectionKind.CUSTOM_MCP`, `service=DataSourceService.MCP`, pointing
+  at the same four SREGym MCP endpoints brain-go seeds today
+  (`sregym-kubectl` / `sregym-prometheus` / `sregym-jaeger` / `sregym-loki`,
+  same bucket split: kubectl to `state`, telemetry to `observation`). What is
+  new is not the mechanism, it is that brain-go's own tool-resolution path
+  for CUSTOM_MCP tools was broken end to end
+  ([NOFireAI/brain-go#2277](https://github.com/NOFireAI/brain-go/issues/2277)),
+  which Python's differently-shaped resolution code never hit. Verified
+  live 2026-08-26: with the fix, every seeded CUSTOM_MCP tool (including
+  `exec_kubectl_cmd_safely`) resolves and executes; without it, every call
+  failed `UnknownTool`.
+- **`host.docker.internal:9954` is the correct MCP base address, not a
+  workaround.** Python's `seed_connections.py` defaults `--mcp-base` to
+  `http://host.docker.internal:9954`. brain-go's seeded connections had
+  instead been pointed at a literal LAN IP, which went stale the moment the
+  host's address changed (a VPN/Tailscale reconnect, observed 2026-08-26 as
+  `dial tcp ...: i/o timeout` against the stale IP). Point at
+  `host.docker.internal` from the start; it survives host IP churn that a
+  literal IP does not.
 - **Seed connections directly in the database, not over HTTP.** Python's
   `seed_connections.py` ran via `docker exec` inside the brain container and
   wrote the `Connection` table directly with SQLAlchemy, which is why it never
