@@ -54,6 +54,46 @@ path:
   environment that lets runs share a host (`run_slot_env.sh`).
 - `terraform/` — the ephemeral spot fleet the suite runs on.
 
+## Lessons carried over from the Python brain SREGym runbook
+
+The original SREGym run against Python `brain` (unmerged,
+[NOFireAI/brain#1119](https://github.com/NOFireAI/brain/pull/1119):
+`scripts/sregym/RUNBOOK.md`, `run.sh`, `seed.sh`, `seed_connections.py`)
+settled a few things the brain-go benchmark setup should keep rather than
+rediscover:
+
+- **Deploy a real in-cluster edge agent.** The Python run deployed
+  `NOFireAI/edge` (`make helm-local` / `make docker-kind`) into the
+  `monitoring` namespace, so the entity graph fed to brain came from the same
+  live cluster the fault was injected into, not a fixture. brain-go's
+  benchmark setup should do the same rather than seed the graph by hand.
+- **RBAC exclusion for chaos-mesh is a correctness rule, not hygiene.** If the
+  edge agent's ServiceAccount can read chaos-mesh CRDs
+  (`podchaos.chaos-mesh.org` etc.), the injected fault shows up verbatim in
+  the entity graph and the benchmark leaks its own ground truth to the agent
+  under test. Verify with `kubectl auth can-i list podchaos.chaos-mesh.org -A
+  --as system:serviceaccount:monitoring:nofire-edge` — it must print `no`.
+- **Seed connections directly in the database, not over HTTP.** Python's
+  `seed_connections.py` ran via `docker exec` inside the brain container and
+  wrote the `Connection` table directly with SQLAlchemy, which is why it never
+  hit brain's CSRF double-submit check. brain-go's
+  `scripts/benchmark/seed_connections.py` currently seeds over `POST
+  /api/connections` and works around brain-go's CSRF cookie (`Secure`, so no
+  standards-compliant client sends it back over plain HTTP) by hand-attaching
+  the cookie to the request — a workaround, not a fix. A direct-DB seed,
+  matching brain-go's own `brainctl seed dev-stack`, avoids the problem
+  entirely and is the better long-term shape.
+- **`FORCE_RCI_FOR_CLI` semantics are validated.** Python's
+  `force_rci_for_cli = cli_mode AND FORCE_RCI_FOR_CLI` routing to `rci` matches
+  brain-go's port of the same behavior
+  ([NOFireAI/brain-go#1698](https://github.com/NOFireAI/brain-go/issues/1698)).
+- **brain-go does not need `claude_cli` as the LLM provider the way the Python
+  runbook recommends.** Python preferred it over Bedrock because
+  `AWS_BEARER_TOKEN_BEDROCK` expires in <=12h and botocore prefers a stale
+  bearer token over valid SigV4 credentials, silently failing every call.
+  brain-go uses the standard AWS credential chain (`LoadDefaultConfig`), not a
+  bearer token, so this failure mode does not apply.
+
 ## Syncing from upstream
 
 ```bash
