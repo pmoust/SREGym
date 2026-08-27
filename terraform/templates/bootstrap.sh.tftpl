@@ -18,7 +18,13 @@ REGION="${region}"
 BUCKET="${bucket}"
 S3_PREFIX="s3://${bucket}/${run_id}/shard-${shard_index}"
 WORKDIR=/opt/sregym
-RESULTS_DIR="$WORKDIR/results"
+# Each slot writes its own results tree at slots/<slot>/results (main.py
+# resolves "results" relative to the slot's own working directory -- see the
+# slot-workers section below). Syncing the whole slots/ tree in one call is
+# simpler and correct where a per-slot sync would just be this in a loop:
+# S3 sync only transfers what changed, so one call covers every slot's
+# progress without knowing how many there are.
+SLOTS_DIR="$WORKDIR/slots"
 
 echo "[bootstrap] run=$RUN_ID shard=$SHARD_INDEX/$SHARD_COUNT region=$REGION"
 echo "[bootstrap] results -> $S3_PREFIX"
@@ -39,8 +45,8 @@ terminate() {
 }
 
 sync_results() {
-  [ -d "$RESULTS_DIR" ] || return 0
-  aws s3 sync "$RESULTS_DIR" "$S3_PREFIX/results/" --region "$REGION" --only-show-errors
+  [ -d "$SLOTS_DIR" ] || return 0
+  aws s3 sync "$SLOTS_DIR" "$S3_PREFIX/slots/" --region "$REGION" --only-show-errors
 }
 
 # --- hard runtime cap -------------------------------------------------------
@@ -129,29 +135,35 @@ if [ ! -d "$BRAIN_GO_DIR" ]; then
     || { terminate "could not clone brain-go"; exit 1; }
 fi
 
+# One brain-go stack per instance, shared by every slot on it: the compose
+# stack (postgres, temporal, api, chat, tworker) is the expensive part and it
+# is multi-tenant already. Slot 0 brings it up via setup_brain_go.sh, which
+# also seeds slot 0's own tenant; each additional slot seeds only its own
+# tenant against the running stack via seed_slot.sh. What must NOT be shared
+# is the tenant: one account per concurrent run, or two slots investigating
+# different problems would see each other's connections and entity graph and
+# the results would be quietly wrong rather than obviously broken.
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
-BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX" \
+BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX-slot-0" \
+SREGYM_MCP_PORT="9954" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
 
 # setup_brain_go.sh writes BRAIN_API_URL, BRAIN_API_KEY and the SSE timeout here.
+# Slot 0's key; every other slot mints its own below.
 # shellcheck disable=SC1091
 . /etc/profile.d/sregym-brain-go.sh
+SLOT0_BRAIN_API_KEY="$BRAIN_API_KEY"
 
 # --- resume -----------------------------------------------------------------
-# Pull whatever this shard already finished. main.py --resume counts attempts
-# per problem_id and skips any problem that already has n_attempts rows, so a
-# replacement instance costs the in-flight problem and nothing more.
-mkdir -p "$RESULTS_DIR"
-aws s3 sync "$S3_PREFIX/results/" "$RESULTS_DIR" --region "$REGION" --only-show-errors || true
-
-RESUME_CSV=$(find "$RESULTS_DIR" -name '*_ALL_results.csv' -print -quit 2>/dev/null || true)
-RESUME_ARG=""
-if [ -n "$RESUME_CSV" ]; then
-  echo "[bootstrap] resuming from $RESUME_CSV ($(wc -l <"$RESUME_CSV") rows)"
-  RESUME_ARG="--resume $RESUME_CSV"
-else
-  echo "[bootstrap] no prior results for this shard, starting clean"
-fi
+# Pull whatever this shard already finished, for every slot at once: slot
+# assignment below is deterministic (same sorted problem list, same fixed
+# runs_per_instance), so a replacement instance redivides problems into the
+# same slots as before it died -- one sync call up front is simpler than N,
+# and S3 sync only transfers what changed either way. main.py --resume counts
+# attempts per problem_id and skips any problem that already has n_attempts
+# rows, so a replacement instance costs the in-flight problem and nothing more.
+mkdir -p "$SLOTS_DIR"
+aws s3 sync "$S3_PREFIX/slots/" "$SLOTS_DIR" --region "$REGION" --only-show-errors || true
 
 # --- shard ------------------------------------------------------------------
 # Static sharding: problem index % shard_count. No queue and no coordinator,
@@ -203,18 +215,119 @@ NOISE_FLAG=""
 NOISE_FLAG="--noise"
 %{ endif }
 
-for pid in $PROBLEMS; do
-  echo "[run] === $pid ==="
-  uv run main.py \
-    --agent brain_go \
-    --problem "$pid" \
-    --model "${agent_model}" \
-    --judge-model "${judge_model}" \
-    --n-attempts ${n_attempts} \
-    --agent-timeout ${agent_timeout_seconds} \
-    $NOISE_FLAG $RESUME_ARG || echo "[run] $pid failed, continuing"
-  sync_results || true
+RUNS_PER_INSTANCE=${runs_per_instance}
+
+# --- slot workers -----------------------------------------------------------
+# Each slot is one concurrent SREGym run on this instance, and needs four
+# things kept to itself. run_slot_env.sh supplies the first three (its own kind
+# cluster name, its own KUBECONFIG, its own cache dir, and the API/MCP/k8s-proxy
+# host ports); the fourth is its brain-go tenant, seeded per slot below.
+#
+# A fifth is this function's own doing: main.py writes results to
+# `Path("results")` relative to the *current directory*, and
+# `results/traces.db` is shared by every run under one results tree. Two slots
+# in one directory would interleave into the same tree and contend on that one
+# SQLite file, so each slot runs with its own CWD and gets its own results tree.
+# main.py resolves its own module paths absolutely, so running it by absolute
+# path from elsewhere is safe (verified).
+run_slot() {
+  local slot="$1"
+  shift
+  local problems="$*"
+
+  local slot_dir="$WORKDIR/slots/$slot"
+  local slot_log="/var/log/sregym-slot-$slot.log"
+  mkdir -p "$slot_dir"
+
+  {
+    echo "[slot $slot] starting with $(echo $problems | wc -w) problems"
+
+    # Ports, cluster name, kubeconfig and cache dir for this slot.
+    eval "$(SREGYM_SLOT_ROOT="$WORKDIR/slot-state" "$WORKDIR/scripts/benchmark/run_slot_env.sh" "$slot")"
+
+    # Each slot needs its own kind cluster. Nothing else creates it: main.py
+    # exits with "Missing kubeconfig. Please set up a cluster." if it is absent,
+    # and the bootstrap installs kind without ever calling it.
+    echo "[slot $slot] creating kind cluster $KIND_CLUSTER_NAME"
+    if ! bash "$WORKDIR/kind/setup_kind_cluster.sh" x86; then
+      echo "[slot $slot] cluster creation failed, slot aborted"
+      return 1
+    fi
+
+    # Slot 0's tenant is already seeded by setup_brain_go.sh, which had to run
+    # first anyway to bring the shared stack up. Every other slot seeds its own
+    # against that running stack.
+    if [ "$slot" = "0" ]; then
+      export BRAIN_API_KEY="$SLOT0_BRAIN_API_KEY"
+    else
+      echo "[slot $slot] seeding its own brain-go tenant"
+      if ! eval "$(BRAIN_GO_DIR="$BRAIN_GO_DIR" "$WORKDIR/scripts/benchmark/seed_slot.sh" \
+             "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT")"; then
+        echo "[slot $slot] tenant seeding failed, slot aborted"
+        return 1
+      fi
+    fi
+
+    cd "$slot_dir" || return 1
+
+    # This slot's own prior results, pulled above as part of the whole
+    # slots/ tree. Each slot resumes from its own CSV, not a shared one --
+    # results is a name reused per slot working directory, not one file.
+    local resume_csv resume_arg
+    resume_csv=$(find "$slot_dir/results" -name '*_ALL_results.csv' -print -quit 2>/dev/null || true)
+    resume_arg=""
+    if [ -n "$resume_csv" ]; then
+      echo "[slot $slot] resuming from $resume_csv ($(wc -l <"$resume_csv") rows)"
+      resume_arg="--resume $resume_csv"
+    else
+      echo "[slot $slot] no prior results, starting clean"
+    fi
+
+    for pid in $problems; do
+      echo "[slot $slot] === $pid ==="
+      uv run --project "$WORKDIR" python "$WORKDIR/main.py" \
+        --agent brain_go \
+        --problem "$pid" \
+        --model "${agent_model}" \
+        --judge-model "${judge_model}" \
+        --n-attempts ${n_attempts} \
+        --agent-timeout ${agent_timeout_seconds} \
+        $NOISE_FLAG $resume_arg || echo "[slot $slot] $pid failed, continuing"
+      sync_results || true
+    done
+
+    echo "[slot $slot] complete"
+  } >>"$slot_log" 2>&1
+}
+
+# Split this shard's problems across the slots the same way the shard itself
+# was split across instances: static, index-based, no coordinator. A slot that
+# draws no problems simply never starts.
+SLOT_PIDS=""
+for slot in $(seq 0 $(( RUNS_PER_INSTANCE - 1 ))); do
+  slot_problems=""
+  i=0
+  for pid in $PROBLEMS; do
+    if [ $(( i % RUNS_PER_INSTANCE )) -eq "$slot" ]; then
+      slot_problems="$slot_problems $pid"
+    fi
+    i=$(( i + 1 ))
+  done
+
+  if [ -z "$slot_problems" ]; then
+    echo "[bootstrap] slot $slot drew no problems, skipping"
+    continue
+  fi
+
+  run_slot "$slot" $slot_problems &
+  SLOT_PIDS="$SLOT_PIDS $!"
 done
 
-echo "[bootstrap] shard $SHARD_INDEX complete"
+# Wait on the slots by pid rather than a bare `wait`, which would also wait on
+# the sync watcher and the runtime-cap timer and never return.
+for p in $SLOT_PIDS; do
+  wait "$p" || echo "[bootstrap] a slot exited non-zero"
+done
+
+echo "[bootstrap] shard $SHARD_INDEX complete (all $RUNS_PER_INSTANCE slots)"
 terminate "shard complete"
