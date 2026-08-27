@@ -218,6 +218,19 @@ variable "results_bucket" {
   default     = ""
 }
 
+variable "instance_profile_name" {
+  description = <<-EOT
+    Existing instance profile name to launch instances with. Empty creates a
+    fresh role, inline policy and profile per run (iam.tf), which needs a wide
+    IAM grant on whoever runs terraform apply/destroy. Setting this skips all
+    of that: an admin creates one static role/profile by hand, using the
+    policy document in iam.tf (data.aws_iam_policy_document.bench) verbatim,
+    and the caller only needs iam:PassRole scoped to that one role's ARN.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Extra tags merged onto everything."
   type        = map(string)

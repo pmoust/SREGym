@@ -16,7 +16,7 @@ resource "aws_instance" "bench" {
   subnet_id     = element(data.aws_subnets.default.ids, count.index)
 
   vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
+  iam_instance_profile   = local.instance_profile_name
 
   instance_market_options {
     market_type = "spot"
