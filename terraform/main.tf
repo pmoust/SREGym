@@ -29,6 +29,8 @@ locals {
 
   bucket = var.results_bucket != "" ? var.results_bucket : aws_s3_bucket.results[0].id
 
+  instance_profile_name = var.instance_profile_name != "" ? var.instance_profile_name : aws_iam_instance_profile.bench[0].name
+
   # The judge grading output from the same model that produced it is not a
   # measurement. Two judges agreeing is also weaker evidence than one good
   # judge: SREGym's own inter-rater table has GPT-5.4 and K2.5 agreeing with

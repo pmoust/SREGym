@@ -26,6 +26,17 @@ aws ssm put-parameter --region us-east-1 \
 Bedrock model access must be enabled in the region for both the agent and judge
 models.
 
+By default this config creates and destroys an instance role per run
+(`iam.tf`), which needs a wide IAM grant on whoever runs `apply`/`destroy`:
+`CreateRole`, `PutRolePolicy`, `AttachRolePolicy`,
+`ListInstanceProfilesForRole` (required at delete, not just create), and more
+-- see `iam.tf`'s own comment for the full list and why. If that grant isn't
+available, set `-var instance_profile_name=<name>` instead: have an admin
+create one static role and instance profile by hand, using the policy
+document in `iam.tf` (`data.aws_iam_policy_document.bench`) verbatim, and the
+only permission the caller then needs is `iam:PassRole` scoped to that one
+role's ARN.
+
 ## Running
 
 ```bash
@@ -52,8 +63,10 @@ terraform output progress   # prints an S3 command that counts finished problems
 ```
 
 Instances terminate themselves when their shard finishes. `terraform destroy`
-then removes the bucket, role and security group. It does not need to remove the
-instances, and if you run it early it will.
+then removes the bucket, security group, and the role (unless
+`instance_profile_name` pointed at a pre-existing one, which this never
+touches). It does not need to remove the instances, and if you run it early
+it will.
 
 ## How the pieces fit
 

@@ -1,5 +1,15 @@
 # Least privilege: read the clone token, read and write this run's results,
 # invoke Bedrock, and be reachable over SSM. Nothing else.
+#
+# All four resources below are skipped when var.instance_profile_name is set
+# (the same bring-your-own pattern as results_bucket in s3.tf). Creating and
+# destroying this role on every run needs a wide IAM grant on the caller
+# (CreateRole, PutRolePolicy, AttachRolePolicy, ListInstanceProfilesForRole
+# for delete, ...); passing an existing profile by name needs only a single
+# iam:PassRole statement scoped to that one role's ARN, since aws_instance
+# makes no IAM API calls of its own -- it hands RunInstances the profile name
+# as a plain string. An admin who pre-creates the role once should give it
+# exactly the policy document below (data.aws_iam_policy_document.bench).
 
 data "aws_iam_policy_document" "assume" {
   statement {
@@ -13,6 +23,7 @@ data "aws_iam_policy_document" "assume" {
 }
 
 resource "aws_iam_role" "bench" {
+  count              = var.instance_profile_name == "" ? 1 : 0
   name               = "${local.name}-role"
   assume_role_policy = data.aws_iam_policy_document.assume.json
 }
@@ -20,7 +31,8 @@ resource "aws_iam_role" "bench" {
 # SSM Session Manager instead of SSH. No keys to distribute, no inbound rules,
 # and every session is audited.
 resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.bench.name
+  count      = var.instance_profile_name == "" ? 1 : 0
+  role       = aws_iam_role.bench[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
@@ -81,12 +93,14 @@ data "aws_iam_policy_document" "bench" {
 }
 
 resource "aws_iam_role_policy" "bench" {
+  count  = var.instance_profile_name == "" ? 1 : 0
   name   = "${local.name}-policy"
-  role   = aws_iam_role.bench.id
+  role   = aws_iam_role.bench[0].id
   policy = data.aws_iam_policy_document.bench.json
 }
 
 resource "aws_iam_instance_profile" "bench" {
-  name = "${local.name}-profile"
-  role = aws_iam_role.bench.name
+  count = var.instance_profile_name == "" ? 1 : 0
+  name  = "${local.name}-profile"
+  role  = aws_iam_role.bench[0].name
 }
