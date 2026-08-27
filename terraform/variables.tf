@@ -70,11 +70,15 @@ variable "noise" {
 
 variable "agent_model" {
   description = <<-EOT
-    Model brain-go answers with. Start cheap: the first run exists to produce a
-    cost projection, not a score. Bedrock ids take an anthropic. prefix.
+    Model brain-go answers with. Read by setup_brain_go.sh as LLM_MODEL for
+    brain-go's own Go bedrockProvider, which calls bedrockruntime.Converse
+    directly: a raw Bedrock model/inference-profile id, no provider prefix.
+    Also passed to main.py's --model, which main.py does not use for brain_go's
+    own answering (cosmetic logging and the --judge-model fallback only), so
+    its format there does not matter.
   EOT
   type        = string
-  default     = "anthropic.claude-haiku-4-5-20251001-v1:0"
+  default     = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 }
 
 variable "judge_model" {
@@ -82,9 +86,13 @@ variable "judge_model" {
     Model the checklist judge uses. Must differ from agent_model: two judges
     agreeing is weaker evidence than one good judge, and a model grading its own
     output is not a measurement. Enforced below.
+
+    Passed to main.py's --judge-model, which hands it to LiteLLM directly: needs
+    the bedrock/ provider prefix (unlike agent_model above) or LiteLLM routes to
+    a direct Anthropic API key this fleet does not have.
   EOT
   type        = string
-  default     = "anthropic.claude-sonnet-5"
+  default     = "bedrock/us.anthropic.claude-sonnet-5"
 }
 
 variable "agent_timeout_seconds" {

@@ -143,9 +143,16 @@ fi
 # is the tenant: one account per concurrent run, or two slots investigating
 # different problems would see each other's connections and entity graph and
 # the results would be quietly wrong rather than obviously broken.
+#
+# AGENT_MODEL_ID and the region are passed here rather than relying on the
+# exports further down (AGENT_MODEL_ID, AWS_DEFAULT_REGION): this call runs
+# before that export block, and setup_brain_go.sh requires AGENT_MODEL_ID to
+# be set already.
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
 BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX-slot-0" \
 SREGYM_MCP_PORT="9954" \
+AGENT_MODEL_ID="${agent_model}" \
+AWS_DEFAULT_REGION="${region}" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
 
 # setup_brain_go.sh writes BRAIN_API_URL, BRAIN_API_KEY and the SSE timeout here.
