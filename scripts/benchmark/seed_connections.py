@@ -101,12 +101,34 @@ def build_config(
     return config
 
 
+def csrf_token(brain_url: str, session_cookie: str) -> str:
+    """Prime and return the double-submit CSRF token every POST needs.
+
+    brain-go's csrfCookie middleware sets CSRF-TOKEN on the first response to
+    any client that does not already carry one, so a plain GET is enough to
+    receive it. The cookie is Secure (internal/api/router/middleware.go), so a
+    standards-compliant client correctly refuses to echo it back over plain
+    HTTP -- this instance sits behind an http:// URL, not https://, since the
+    benchmark reaches it over the box's own private address. requests' cookie
+    jar respects Secure/scheme the same way a browser would, so the token has
+    to be attached by hand on every subsequent request rather than left to the
+    session's jar (see create_connection).
+    """
+    resp = requests.get(urljoin(brain_url, "/health"), cookies={"session": session_cookie}, timeout=30)
+    token = resp.cookies.get("CSRF-TOKEN")
+
+    if not token:
+        raise SystemExit(f"no CSRF-TOKEN cookie in the /health response ({resp.status_code}); cannot seed connections")
+
+    return token
+
+
 def create_connection(
-    brain_url: str, session_cookie: str, name: str, config: dict[str, Any], buckets: list[str]
+    brain_url: str, session_cookie: str, csrf: str, name: str, config: dict[str, Any], buckets: list[str]
 ) -> None:
     """POST one connection, treating an existing one as success."""
     resp = requests.post(
-        urljoin(brain_url, "/connections"),
+        urljoin(brain_url, "/api/connections"),
         json={
             "name": name,
             "kind": "CUSTOM_MCP",
@@ -115,7 +137,11 @@ def create_connection(
             "bucket": buckets,
             "enabled": True,
         },
-        cookies={"session": session_cookie},
+        headers={"X-CSRF-Token": csrf},
+        # Set by hand rather than via `cookies=`: requests' jar will not
+        # attach a Secure cookie to a plain http:// request, which is exactly
+        # what CSRF-TOKEN is (see csrf_token's docstring).
+        cookies={"session": session_cookie, "CSRF-TOKEN": csrf},
         timeout=30,
     )
 
@@ -151,6 +177,7 @@ def main() -> int:
         )
 
     failures = 0
+    csrf = csrf_token(args.brain_url, args.session)
 
     for name, path, buckets, needs_session in ENDPOINTS:
         url = f"{args.mcp_base.rstrip('/')}/{path}/sse"
@@ -173,6 +200,7 @@ def main() -> int:
         create_connection(
             args.brain_url,
             args.session,
+            csrf,
             name,
             build_config(args.mcp_base, path, needs_session, args.session_id, tools),
             buckets,

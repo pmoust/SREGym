@@ -127,15 +127,32 @@ if ! docker compose --env-file deploy/.env logs seed 2>/dev/null | grep -q "Dev 
 fi
 
 # --- register the MCP connections --------------------------------------------
+# /kubectl/sse is a Server-Sent Events endpoint: it holds the connection open
+# to stream rather than answering and closing. `curl -s -o /dev/null
+# --max-time 3` in an until loop can never succeed once the server is
+# actually up: curl reads the 200 status line promptly, then blocks on the
+# body, which never ends, so --max-time always fires and curl's own exit code
+# is always 28 (timeout) regardless of server health -- confirmed directly,
+# five consecutive attempts against a server already proven reachable by a
+# plain manual curl all returned http_code=200 and exit 28. The fix reads the
+# status curl captured rather than trusts its exit code.
 log "waiting for the SREGym MCP server at $MCP_BASE"
 deadline=$(( $(date +%s) + 300 ))
-until curl -s -o /dev/null --max-time 3 "${MCP_BASE}/kubectl/sse" 2>/dev/null; do
+until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${MCP_BASE}/kubectl/sse" 2>/dev/null)" = "200" ]; do
   [ "$(date +%s)" -lt "$deadline" ] || die "SREGym MCP server not reachable at $MCP_BASE"
   sleep 5
 done
 
 log "registering four CUSTOM_MCP connections"
-uv run python "$(cd "$(dirname "$0")" && pwd)/seed_connections.py" \
+# --project, not a bare `uv run`: this script cd'd into $BRAIN_GO_DIR (a Go
+# repo, no pyproject.toml) above and never returns to the sregym checkout, so
+# a plain `uv run` resolves its project from the wrong directory and silently
+# falls back to a Python with none of this repo's dependencies installed --
+# confirmed directly (ModuleNotFoundError: requests, a real, declared
+# dependency that uv sync had already installed).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SREGYM_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \
   --brain-url "$BRAIN_API_URL" \
   --mcp-base "$MCP_BASE" \
   --session "$DEV_SESSION" \
