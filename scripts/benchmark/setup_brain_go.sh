@@ -73,6 +73,21 @@ log "private address $PRIVATE_IP, MCP base $MCP_BASE"
 set_env_key DEV_CUSTOMER "${CUSTOMER}"
 log "tenant: $CUSTOMER"
 
+# Point brain-go's own answering model at Bedrock. deploy/.env.sample defaults
+# to LLM_PROVIDER=anthropic with an empty ANTHROPIC_API_KEY, which leaves the
+# stack with no working LLM credential on a fresh instance: this fleet has no
+# first-party Anthropic key to hand out, only the instance role's Bedrock
+# access (terraform/iam.tf's Bedrock statement). AGENT_MODEL_ID is exported by
+# the bootstrap template from the agent_model Terraform variable; without this
+# it was set but never read, so brain-go answered on whatever LLM_PROVIDER
+# .env.sample happened to default to rather than the model the run was
+# actually configured for.
+AGENT_MODEL_ID="${AGENT_MODEL_ID:?AGENT_MODEL_ID must be set; brain-go has no other source for which model to answer with}"
+set_env_key LLM_PROVIDER bedrock
+set_env_key LLM_MODEL "${AGENT_MODEL_ID}"
+set_env_key BEDROCK_REGION "${AWS_DEFAULT_REGION:-us-east-1}"
+log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-east-1})"
+
 # Force every cli_mode turn onto the RCI path (NOFireAI/brain-go#1547, merged as
 # #1698). The flag is opt-in and off by default, so merging it was not enough:
 # without this the supervisor's createPlan decides per turn whether to
