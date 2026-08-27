@@ -6,9 +6,17 @@
 #   eval "$(scripts/benchmark/run_slot_env.sh 0)"
 #   uv run python main.py ...
 #
-# Slot 0 reproduces the default ports exactly (8000, 9954, 16443), so adopting
-# this changes no port for an existing single-run host. The cluster name and the
-# two paths are per-slot at every slot including 0, which is the point of them.
+# Slot 0 reproduces the MCP and k8s-proxy defaults exactly (9954, 16443), so
+# adopting this changes no port for an existing single-run host on those two.
+# API_PORT is the one exception, at every slot including 0: main.py's own
+# default (8000) collides with brain-go's own `api` compose service, which
+# also binds host port 8000, and slot 1 would collide with brain-go's `chat`
+# service on 8001 the same way. Since brain-go runs on this same host beside
+# the harness (setup_brain_go.sh), the conductor's own API -- a completely
+# separate, harness-internal service nothing external depends on the exact
+# port of -- moves out of that range instead of brain-go's fixed ports. The
+# cluster name and the two paths are per-slot at every slot including 0,
+# which is the point of them.
 #
 # Creates the slot directory as a side effect, since kind will not create the
 # parent of the kubeconfig it is told to write.
@@ -28,7 +36,11 @@
 #   SREGYM_CACHE_DIR   cluster_baseline_state.json is captured per cluster.
 #                      Sharing it lets one run compare against another cluster's
 #                      baseline, which fails silently rather than loudly.
-#   API_PORT           conductor API, host-bound.
+#   API_PORT           conductor API, host-bound. Based at 18000, not 8000
+#                      (main.py's own default): 8000/8001 are brain-go's own
+#                      api/chat ports on this same host, and the conductor's
+#                      own API has no other claimant on its exact port to
+#                      preserve.
 #   MCP_SERVER_PORT    host side of the MCP port-forward. The in-cluster service
 #                      port stays 9954.
 #   K8S_PROXY_PORT     the conductor's filtering proxy, host-bound.
@@ -54,7 +66,7 @@ esac
 # Strip any leading zeros so "08" is 8 rather than an invalid octal literal.
 SLOT=$((10#$SLOT))
 
-# The three port families are 8000, 9954 and 16443. They stay disjoint well
+# The three port families are 18000, 9954 and 16443. They stay disjoint well
 # past any workable slot count; the cap is here so a typo cannot silently
 # collide one family with the next.
 if [ "$SLOT" -gt 500 ]; then
@@ -71,7 +83,7 @@ cat <<EOF
 export KIND_CLUSTER_NAME="sregym-${SLOT}"
 export KUBECONFIG="${SLOT_DIR}/kubeconfig"
 export SREGYM_CACHE_DIR="${SLOT_DIR}/cache"
-export API_PORT="$((8000 + SLOT))"
+export API_PORT="$((18000 + SLOT))"
 export MCP_SERVER_PORT="$((9954 + SLOT))"
 export K8S_PROXY_PORT="$((16443 + SLOT))"
 EOF
