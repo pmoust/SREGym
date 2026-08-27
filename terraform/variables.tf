@@ -5,8 +5,11 @@
 variable "instance_count" {
   description = <<-EOT
     How many instances share the suite. Problems are sharded statically by
-    index % instance_count, so this is the only parallelism dial until the
-    harness host ports are parameterised (NOFireAI/brain-go#2219).
+    index % instance_count, then split again across each instance's slots by
+    runs_per_instance. Prefer raising runs_per_instance and keeping this small:
+    the target shape is 3 to 4 large instances running many slots each, not many
+    instances running one apiece, which costs roughly ten times as much for a
+    similar wall clock. See NOFireAI/brain-go#2218's fleet-shape table.
   EOT
   type        = number
   default     = 1
@@ -19,19 +22,27 @@ variable "instance_count" {
 
 variable "runs_per_instance" {
   description = <<-EOT
-    Concurrent problems per instance. Must stay at 1 until
-    NOFireAI/brain-go#2219 parameterises the harness host ports: the MCP server
-    pins 9954, the observe port-forwards pin 9090 and 3100, the k8s proxy pins
-    16443, and the conductor API pins 8000, so two harness processes cannot
-    share a host. Raise this once that lands and lower instance_count instead,
-    since one cluster per run is a hard constraint but one host per run is not.
+    Concurrent problems per instance. Each slot gets its own kind cluster, its
+    own brain-go tenant, its own results tree, and its own API/MCP/k8s-proxy
+    host ports (scripts/benchmark/run_slot_env.sh). This is the dial that
+    matters for cost: the target shape is a handful of large instances each
+    running many slots, not many instances running one apiece. See
+    NOFireAI/brain-go#2218's fleet-shape table.
+
+    Sizing is not yet measured on a real instance. #2218 estimates roughly 12 GB
+    and 4 to 6 vCPU per concurrent run and flags that figure as known-low, since
+    each instance also carries the shared brain-go stack with its Postgres and
+    Temporal. On an r7a.24xlarge (96 vCPU, 768 GB) that suggests somewhere
+    around 12 to 19, but the first real deploy is what replaces the estimate.
+    The cap below is a guard against a typo costing a fleet, not a measured
+    ceiling.
   EOT
   type        = number
   default     = 1
 
   validation {
-    condition     = var.runs_per_instance == 1
-    error_message = "runs_per_instance must be 1 until NOFireAI/brain-go#2219 parameterises the harness host ports."
+    condition     = var.runs_per_instance >= 1 && var.runs_per_instance <= 32
+    error_message = "runs_per_instance must be between 1 and 32."
   }
 }
 

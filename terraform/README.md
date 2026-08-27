@@ -31,11 +31,17 @@ models.
 ```bash
 terraform init
 
-# One box, one attempt per problem, no noise. The first sweep.
+# One box, one slot, one attempt per problem, no noise. The first sweep.
 terraform apply -var instance_count=1
 
 # The paper's protocol on Lite: 21 problems x 3 attempts x 2 noise conditions.
 terraform apply -var instance_count=2 -var n_attempts=3 -var noise=true
+
+# The target shape once sizing is measured: few large instances, many
+# concurrent slots each, rather than many instances running one apiece.
+# See NOFireAI/brain-go#2218's fleet-shape table for where these numbers
+# come from.
+terraform apply -var instance_count=3 -var runs_per_instance=12
 ```
 
 Watch it, and check progress:
@@ -51,15 +57,20 @@ instances, and if you run it early it will.
 
 ## How the pieces fit
 
-**Sharding is static**: problem index modulo `instance_count`. No queue and no
-coordinator, which is the right trade for 90 to 540 runs where the only failure
-mode that matters is losing an instance.
+**Sharding is static, twice over**: problem index modulo `instance_count`
+picks this instance's problems, then that list is split again by index modulo
+`runs_per_instance` across the instance's own concurrent slots. No queue and
+no coordinator at either level, which is the right trade for 90 to 540 runs
+where the only failure mode that matters is losing an instance.
 
-**Spot, and losing one is cheap.** `main.py --resume` counts attempts per
-`problem_id` and skips any problem that already has `n_attempts` rows, and each
-problem's CSV is written as it completes. The bootstrap syncs `results/` to S3
-after every problem and pulls it back on boot, so a replacement resumes where the
-dead instance stopped. Losing a box costs the in-flight problem.
+**Spot, and losing one is cheap.** Each slot writes its own results tree
+(`slots/<slot>/results/`, since two slots sharing one directory would
+interleave into the same SQLite trace store) and its own `main.py --resume`
+counts attempts per `problem_id` there, skipping any problem that already has
+`n_attempts` rows. The bootstrap syncs the whole `slots/` tree to S3 after
+every problem and pulls it all back on boot, so a replacement instance
+resumes every slot where the dead instance stopped. Losing a box costs each
+slot its own in-flight problem, not the whole shard.
 
 To replace a killed instance, `terraform apply` again.
 
@@ -91,11 +102,14 @@ laptop and they are why engineering#799's numbers cannot be read. `SETTLE_SECOND
 defaults to 180, so the bootstrap sets it to `0` explicitly rather than leaving it
 unset.
 
-**`runs_per_instance` is pinned at 1.** The harness hardcodes its host ports:
-9954 for the MCP server, 9090 and 3100 for the observe port-forwards, 16443 for
-the k8s proxy, 8000 for the conductor API. Two harness processes cannot share a
-host until NOFireAI/brain-go#2219 parameterises them. One cluster per run is a
-hard constraint; one host per run is not.
+**`runs_per_instance` can now be raised past 1.** Each slot gets its own kind
+cluster, its own API/MCP/k8s-proxy host ports
+(`scripts/benchmark/run_slot_env.sh`), and its own brain-go tenant
+(`scripts/benchmark/seed_slot.sh`) seeded against the one brain-go stack the
+instance shares across all its slots. One cluster per run is still a hard
+constraint; one host per run is not. Sizing is not yet measured on a real
+instance -- see NOFireAI/brain-go#2218's fleet-shape table for the current
+estimate and why 3 to 4 large instances beats many small ones on cost.
 
 ## brain-go
 
