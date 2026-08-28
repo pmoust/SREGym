@@ -376,9 +376,19 @@ run_slot() {
     # seeded by setup_brain_go.sh while that script brought the shared stack up,
     # but that ran before any cluster existed and so before any MCP server did:
     # the connection registration inside it could never succeed on a fresh box.
+    #
+    # The api URL is passed explicitly. Without it seed_slot.sh falls back to
+    # $BRAIN_API_URL, which the profile file sourced above sets to the CHAT
+    # service (8001) because that is what the driver talks to. Connections are
+    # an api-service concern: POST /api/connections lives there, and so does
+    # the csrfCookie middleware. Chat answers GET /health with a 200 and no
+    # CSRF-TOKEN, so seeding failed with a message that pointed at cookies
+    # rather than at the wrong port:
+    #   no CSRF-TOKEN cookie in the /health response (200)
     echo "[slot $slot] seeding its own brain-go tenant"
     if ! eval "$(BRAIN_GO_DIR="$BRAIN_GO_DIR" "$WORKDIR/scripts/benchmark/seed_slot.sh" \
-           "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT")"; then
+           "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT" \
+           "http://127.0.0.1:8000")"; then
       echo "[slot $slot] tenant seeding failed, slot aborted"
       return 1
     fi
