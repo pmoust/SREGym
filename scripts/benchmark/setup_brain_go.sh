@@ -30,7 +30,6 @@ BRAIN_GO_DIR="${BRAIN_GO_DIR:-/opt/brain-go}"
 BRAIN_API_URL="${BRAIN_API_URL:-http://127.0.0.1:8000}"
 BRAIN_CHAT_URL="${BRAIN_CHAT_URL:-http://127.0.0.1:8001}"
 CUSTOMER="${BRAIN_GO_CUSTOMER:-sregym-bench}"
-MCP_PORT="${SREGYM_MCP_PORT:-9954}"
 READY_TIMEOUT="${BRAIN_GO_READY_TIMEOUT:-600}"
 ENV_OUT="${BRAIN_GO_ENV_OUT:-/etc/profile.d/sregym-brain-go.sh}"
 
@@ -51,20 +50,6 @@ set_env_key() {
 
 [ -d "$BRAIN_GO_DIR" ] || die "brain-go checkout not found at $BRAIN_GO_DIR"
 cd "$BRAIN_GO_DIR"
-
-# --- the private address the MCP connections must use ------------------------
-# brain-go's SSRF guard blocks loopback outright. allow_private_endpoint lifts
-# RFC1918 and ULA only, and no flag lifts loopback. brain-go also dials from
-# inside a container, where localhost is the container's own loopback, so the
-# host's private address is required on both counts.
-PRIVATE_IP="${SREGYM_PRIVATE_IP:-$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)}"
-[ -n "$PRIVATE_IP" ] || die "could not determine a private IPv4 address; set SREGYM_PRIVATE_IP"
-case "$PRIVATE_IP" in
-  10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
-  *) die "resolved '$PRIVATE_IP', which is not RFC1918; allow_private_endpoint would not cover it" ;;
-esac
-MCP_BASE="http://${PRIVATE_IP}:${MCP_PORT}"
-log "private address $PRIVATE_IP, MCP base $MCP_BASE"
 
 # --- select the LLM provider before anything reads it ------------------------
 # This has to happen before dev-env.sh runs, not after. dev-env.sh requires an
@@ -152,46 +137,34 @@ if ! docker compose --env-file deploy/.env logs seed 2>/dev/null | grep -q "Dev 
     || die "brainctl seed dev-stack failed"
 fi
 
-# --- register the MCP connections --------------------------------------------
-# /kubectl/sse is a Server-Sent Events endpoint: it holds the connection open
-# to stream rather than answering and closing. `curl -s -o /dev/null
-# --max-time 3` in an until loop can never succeed once the server is
-# actually up: curl reads the 200 status line promptly, then blocks on the
-# body, which never ends, so --max-time always fires and curl's own exit code
-# is always 28 (timeout) regardless of server health -- confirmed directly,
-# five consecutive attempts against a server already proven reachable by a
-# plain manual curl all returned http_code=200 and exit 28. The fix reads the
-# status curl captured rather than trusts its exit code.
-log "waiting for the SREGym MCP server at $MCP_BASE"
-deadline=$(( $(date +%s) + 300 ))
-until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${MCP_BASE}/kubectl/sse" 2>/dev/null)" = "200" ]; do
-  [ "$(date +%s)" -lt "$deadline" ] || die "SREGym MCP server not reachable at $MCP_BASE"
-  sleep 5
-done
-
-log "registering four CUSTOM_MCP connections"
-# --project, not a bare `uv run`: this script cd'd into $BRAIN_GO_DIR (a Go
-# repo, no pyproject.toml) above and never returns to the sregym checkout, so
-# a plain `uv run` resolves its project from the wrong directory and silently
-# falls back to a Python with none of this repo's dependencies installed --
-# confirmed directly (ModuleNotFoundError: requests, a real, declared
-# dependency that uv sync had already installed).
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SREGYM_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \
-  --brain-url "$BRAIN_API_URL" \
-  --mcp-base "$MCP_BASE" \
-  --session "$DEV_SESSION" \
-  --session-id "sregym-${CUSTOMER}"
-
 # --- hand the driver what it needs -------------------------------------------
+# The URL only. Connections are not registered here any more, and no per-slot
+# API key is minted here either.
+#
+# Registering them means discovering each endpoint's tool schemas from a live
+# SREGym MCP server, because brain-go never populates tools_cache itself (see
+# seed_connections.py). That server is deployed by the conductor's deploy_app(),
+# which runs per problem from start_problem(), so on a fresh cluster it does not
+# exist yet. This script used to wait 300s for it and then die:
+#
+#   [setup-brain-go] waiting for the SREGym MCP server at http://10.0.0.1:9954
+#   [setup-brain-go] ERROR: SREGym MCP server not reachable
+#
+# It only ever appeared to work on a developer box, where an earlier run had
+# left the server deployed and its port-forward alive.
+#
+# Seeding now happens per slot, after that slot's cluster exists and
+# deploy_mcp.py has put a server in it. Every slot calls seed_slot.sh, slot 0
+# included, which also removes slot 0's special case -- the only reason this
+# script ever needed to know about MCP ports.
+#
 # No BRAIN_SSE_READ_TIMEOUT override: brain-go now sends an SSE keepalive
 # every 15s (NOFireAI/brain-go#2250), so the driver's own default is already
 # tuned for that and needs no deployment-level override.
 install -m 0600 /dev/null "$ENV_OUT"
 cat >"$ENV_OUT" <<ENVEOF
 export BRAIN_API_URL="${BRAIN_CHAT_URL}"
-export BRAIN_API_KEY="${DEV_API_KEY}"
 ENVEOF
 
-log "ready. BRAIN_API_URL=$BRAIN_CHAT_URL, credentials in $ENV_OUT"
+log "stack ready. BRAIN_API_URL=$BRAIN_CHAT_URL, written to $ENV_OUT"
+log "connections are seeded per slot, once each slot's cluster is up"

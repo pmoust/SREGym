@@ -220,11 +220,10 @@ AWS_DEFAULT_REGION="${region}" \
 MINER_REPO_PULL_TOKEN="$GH_TOKEN" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
 
-# setup_brain_go.sh writes BRAIN_API_URL, BRAIN_API_KEY and the SSE timeout here.
-# Slot 0's key; every other slot mints its own below.
+# setup_brain_go.sh writes BRAIN_API_URL here. No key: every slot mints its own
+# when it seeds its own tenant, slot 0 included.
 # shellcheck disable=SC1091
 . /etc/profile.d/sregym-brain-go.sh
-SLOT0_BRAIN_API_KEY="$BRAIN_API_KEY"
 
 # --- resume -----------------------------------------------------------------
 # Pull whatever this shard already finished, for every slot at once: slot
@@ -326,18 +325,28 @@ run_slot() {
       return 1
     fi
 
-    # Slot 0's tenant is already seeded by setup_brain_go.sh, which had to run
-    # first anyway to bring the shared stack up. Every other slot seeds its own
-    # against that running stack.
-    if [ "$slot" = "0" ]; then
-      export BRAIN_API_KEY="$SLOT0_BRAIN_API_KEY"
-    else
-      echo "[slot $slot] seeding its own brain-go tenant"
-      if ! eval "$(BRAIN_GO_DIR="$BRAIN_GO_DIR" "$WORKDIR/scripts/benchmark/seed_slot.sh" \
-             "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT")"; then
-        echo "[slot $slot] tenant seeding failed, slot aborted"
-        return 1
-      fi
+    # Put an MCP server in the cluster before seeding. The conductor deploys one
+    # itself, but from deploy_app(), which runs per problem inside
+    # start_problem() -- too late, because seeding has to discover the tool
+    # schemas from a live server first (brain-go does not populate tools_cache
+    # itself). Deploying here is not duplicative: MCPServer.deploy() skips the
+    # apply when the deployment is already ready and only revives a stale
+    # port-forward, so the conductor's later call is a no-op.
+    echo "[slot $slot] deploying the MCP server into $KIND_CLUSTER_NAME"
+    if ! uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/deploy_mcp.py"; then
+      echo "[slot $slot] MCP server deploy failed, slot aborted"
+      return 1
+    fi
+
+    # Every slot seeds its own tenant, slot 0 included. It used to be special,
+    # seeded by setup_brain_go.sh while that script brought the shared stack up,
+    # but that ran before any cluster existed and so before any MCP server did:
+    # the connection registration inside it could never succeed on a fresh box.
+    echo "[slot $slot] seeding its own brain-go tenant"
+    if ! eval "$(BRAIN_GO_DIR="$BRAIN_GO_DIR" "$WORKDIR/scripts/benchmark/seed_slot.sh" \
+           "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT")"; then
+      echo "[slot $slot] tenant seeding failed, slot aborted"
+      return 1
     fi
 
     cd "$slot_dir" || return 1
