@@ -161,6 +161,21 @@ if [ ! -d "$BRAIN_GO_DIR" ]; then
     || { terminate "could not clone brain-go"; exit 1; }
 fi
 
+# The benchmark never opens the dashboard, but brain-go cannot start without
+# the checkout present: dev-env.sh gates on it as a sibling of brain-go
+# ("$MAIN_ROOT/../dashboard") and exits 1 when it is missing, and
+# docker-compose.yml's dashboard service bind-mounts ../dashboard into the
+# container. So `make up` fails on a box that does not have it. Cloned only to
+# satisfy that. The service it feeds costs a pnpm install we get no value
+# from, but it starts after api and chat are healthy and nothing below waits
+# on it.
+DASHBOARD_DIR="$(dirname "$BRAIN_GO_DIR")/dashboard"
+if [ ! -d "$DASHBOARD_DIR" ]; then
+  git clone --depth 1 \
+    "https://x-access-token:$GH_TOKEN@github.com/NOFireAI/dashboard.git" "$DASHBOARD_DIR" \
+    || { terminate "could not clone dashboard"; exit 1; }
+fi
+
 # One brain-go stack per instance, shared by every slot on it: the compose
 # stack (postgres, temporal, api, chat, tworker) is the expensive part and it
 # is multi-tenant already. Slot 0 brings it up via setup_brain_go.sh, which
