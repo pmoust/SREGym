@@ -108,7 +108,12 @@ sysctl --system
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg git jq unzip make
+# openssh-client is listed explicitly for ssh-agent, not for ssh. The brain-go
+# image build needs a keyless agent running before compose will resolve its
+# build config at all (see the brain-go section below). Ubuntu's server image
+# ships it, but naming it here means a base-image change cannot quietly remove
+# the one binary that gates the build.
+apt-get install -y ca-certificates curl gnupg git jq unzip make openssh-client
 
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -189,11 +194,30 @@ fi
 # exports further down (AGENT_MODEL_ID, AWS_DEFAULT_REGION): this call runs
 # before that export block, and setup_brain_go.sh requires AGENT_MODEL_ID to
 # be set already.
+# brain-go's image build fetches the private nofire-code-miner module, and it
+# needs both of the following on a box like this one. See NOFireAI/brain-go#2354.
+#
+# 1. A keyless ssh-agent. deploy/docker-compose.yml's build block declares
+#    `ssh: [default]`, which compose resolves before any Dockerfile step runs.
+#    With no agent at all it fails there, whatever credential you supplied:
+#      failed to convert agent config {default [] false}:
+#      invalid empty ssh agent socket: make sure SSH_AUTH_SOCK is set
+#    An agent holding zero keys satisfies that check and is then never used,
+#    because the build prefers the token below. There is no key to give it:
+#    the instance role can read exactly one SSM parameter, the clone token.
+#
+# 2. MINER_REPO_PULL_TOKEN, the credential the build actually uses. Same token
+#    already fetched above for the clones, which has read access to the module.
+#    Deliberately not named GITHUB_TOKEN: that name is repo-scoped in most
+#    tooling and would 403 against nofireai/nofire-code-miner.
+eval "$(ssh-agent -s)" >/dev/null || { terminate "could not start an ssh-agent"; exit 1; }
+
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
 BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX-slot-0" \
 SREGYM_MCP_PORT="9954" \
 AGENT_MODEL_ID="${agent_model}" \
 AWS_DEFAULT_REGION="${region}" \
+MINER_REPO_PULL_TOKEN="$GH_TOKEN" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
 
 # setup_brain_go.sh writes BRAIN_API_URL, BRAIN_API_KEY and the SSE timeout here.
