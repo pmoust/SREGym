@@ -66,6 +66,23 @@ esac
 MCP_BASE="http://${PRIVATE_IP}:${MCP_PORT}"
 log "private address $PRIVATE_IP, MCP base $MCP_BASE"
 
+# --- select the LLM provider before anything reads it ------------------------
+# This has to happen before dev-env.sh runs, not after. dev-env.sh requires an
+# Anthropic credential and exits 1 without one, and the only thing that waives
+# that requirement is LLM_PROVIDER resolving to "bedrock". It resolves it from
+# THIS environment variable: set_key_force writes the exported value into
+# deploy/.env, then it reads the value back out of the file and gates on it
+# (scripts/dev-env.sh). Writing LLM_PROVIDER into deploy/.env afterwards is too
+# late, because the gate has already run and taken the process with it. That is
+# what killed the first EC2 fleet: "dev-env: set ANTHROPIC_AUTH_TOKEN or
+# ANTHROPIC_API_KEY (env var or deploy/.env) and re-run" on a box that was
+# always meant to use Bedrock and has no Anthropic credential to give.
+#
+# This fleet has no first-party Anthropic key at all, only the instance role's
+# Bedrock access (the Bedrock statement on sregym-benchmark-instance-role).
+AGENT_MODEL_ID="${AGENT_MODEL_ID:?AGENT_MODEL_ID must be set; brain-go has no other source for which model to answer with}"
+export LLM_PROVIDER=bedrock
+
 # --- pin the tenant and the feature flags before the stack starts -------------
 # A distinct customer gives a distinct account, which is what keeps concurrent
 # runs from sharing a tenant.
@@ -73,16 +90,10 @@ log "private address $PRIVATE_IP, MCP base $MCP_BASE"
 set_env_key DEV_CUSTOMER "${CUSTOMER}"
 log "tenant: $CUSTOMER"
 
-# Point brain-go's own answering model at Bedrock. deploy/.env.sample defaults
-# to LLM_PROVIDER=anthropic with an empty ANTHROPIC_API_KEY, which leaves the
-# stack with no working LLM credential on a fresh instance: this fleet has no
-# first-party Anthropic key to hand out, only the instance role's Bedrock
-# access (terraform/iam.tf's Bedrock statement). AGENT_MODEL_ID is exported by
-# the bootstrap template from the agent_model Terraform variable; without this
-# it was set but never read, so brain-go answered on whatever LLM_PROVIDER
-# .env.sample happened to default to rather than the model the run was
-# actually configured for.
-AGENT_MODEL_ID="${AGENT_MODEL_ID:?AGENT_MODEL_ID must be set; brain-go has no other source for which model to answer with}"
+# dev-env.sh has already written LLM_PROVIDER from the export above; these two
+# have no such path and are set here. Kept alongside a redundant LLM_PROVIDER
+# write so the file's provider config is stated in one place rather than
+# depending on dev-env.sh's adoption behaviour staying as it is.
 set_env_key LLM_PROVIDER bedrock
 set_env_key LLM_MODEL "${AGENT_MODEL_ID}"
 set_env_key BEDROCK_REGION "${AWS_DEFAULT_REGION:-us-east-1}"
