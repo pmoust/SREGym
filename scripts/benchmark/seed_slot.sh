@@ -30,7 +30,15 @@ set -euo pipefail
 BRAIN_GO_DIR="${BRAIN_GO_DIR:-/opt/brain-go}"
 CUSTOMER="${1:?usage: seed_slot.sh <customer> <mcp-port> [brain-api-url]}"
 MCP_PORT="${2:?usage: seed_slot.sh <customer> <mcp-port> [brain-api-url]}"
-BRAIN_API_URL="${3:-${BRAIN_API_URL:-http://127.0.0.1:8000}}"
+# Deliberately does NOT fall back to $BRAIN_API_URL. That name is already taken
+# in this deployment: setup_brain_go.sh exports it pointing at the CHAT service
+# (8001), because that is what the driver talks to. Connections are an
+# api-service concern -- POST /api/connections and the csrfCookie middleware
+# both live there -- and chat answers GET /health with a 200 and no CSRF-TOKEN,
+# so inheriting it failed with "no CSRF-TOKEN cookie in the /health response
+# (200)", which points at cookies rather than at the wrong port. Take the URL
+# as an argument or use the api default; never guess from the environment.
+BRAIN_API_URL="${3:-http://127.0.0.1:8000}"
 READY_TIMEOUT="${BRAIN_GO_READY_TIMEOUT:-300}"
 
 log() { echo "[seed-slot:${CUSTOMER}] $*" >&2; }
@@ -75,11 +83,17 @@ DEV_SESSION="session_$(hex 16)_$(hex 15)"
 # --customer ...), which already established this is safe to run repeatedly
 # against an already-running stack. -T disables pseudo-TTY allocation, which
 # this needs for unattended/scripted use.
+# 1>&2 is not tidiness: this script's stdout is a contract. The caller runs
+# `eval "$(seed_slot.sh ...)"`, so anything on stdout other than the export
+# line at the end is executed as shell. brainctl's summary went to stdout and
+# eval choked on its parenthesis:
+#   eval: syntax error near unexpected token `('
+#   eval: `Dev stack ready: account 3 (created), ... 4 automation(s) seeded.'
 log "seeding tenant $CUSTOMER"
 docker compose --env-file deploy/.env run --rm -T --no-deps \
   -e DEV_API_KEY="$DEV_API_KEY" \
   -e DEV_SESSION="$DEV_SESSION" \
-  seed seed dev-stack --customer "$CUSTOMER" \
+  seed seed dev-stack --customer "$CUSTOMER" 1>&2 \
   || die "brainctl seed dev-stack failed for $CUSTOMER"
 
 # --- register the MCP connections --------------------------------------------
