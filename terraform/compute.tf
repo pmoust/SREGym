@@ -30,9 +30,18 @@ resource "aws_instance" "bench" {
     }
   }
 
-  # Belt to the user-data's braces: the shard script terminates the instance
-  # when it finishes, and this makes a plain `shutdown -h` fatal too.
-  instance_initiated_shutdown_behavior = "terminate"
+  # instance_initiated_shutdown_behavior is deliberately not set. It cannot be:
+  # EC2 rejects it on a spot instance, and since every instance here is spot,
+  # setting it failed the apply after the instance had already launched:
+  #
+  #   UnsupportedOperation: Modifying 'instanceInitiatedShutdownBehavior' is
+  #   not supported for spot instances
+  #
+  # Nothing is lost. Spot instances already terminate on an instance-initiated
+  # shutdown and the value cannot be anything else, so the belt this used to
+  # provide for the user-data's braces is there by default. Confirmed on two
+  # of this fleet's own instances: describe-instance-attribute reports
+  # "terminate" on both, neither of which ever had it set.
 
   root_block_device {
     volume_type           = "gp3"
