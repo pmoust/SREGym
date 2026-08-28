@@ -42,13 +42,23 @@ def main() -> int:
     log.info("deploying the MCP server (kubeconfig=%s, host port=%s)", kubeconfig, server.port)
     server.deploy()
 
-    # deploy() returns without raising even when the port-forward never came
-    # up, so confirm the endpoint actually answers rather than trusting it.
-    if not server._is_port_forward_healthy():
-        log.error("MCP server deployed but the port-forward on %s is not serving", server.port)
-        return 1
+    # deploy() also starts a port-forward, and that one dies with this process:
+    # start_port_forward holds it as a subprocess.Popen child, which the
+    # interpreter reaps on exit. The conductor never sees this because it keeps
+    # the MCPServer object alive for a whole run; this script exits in seconds.
+    #
+    # So the forward this script leaves behind is worthless, and confirming it
+    # here would confirm something about to disappear: the first run to get this
+    # far logged "MCP server ready on port 9954" and then every slot timed out
+    # waiting on that same port, with no kubectl port-forward process alive.
+    #
+    # Tear it down deliberately rather than leaving a doomed child around, and
+    # let the caller own a forward that outlives us. run_slot in
+    # terraform/templates/bootstrap.sh.tftpl starts one with nohup so it lives
+    # as long as the slot does.
+    server.stop_port_forward()
 
-    log.info("MCP server ready on port %s", server.port)
+    log.info("MCP server deployed; the caller owns the port-forward on %s", server.port)
 
     return 0
 
