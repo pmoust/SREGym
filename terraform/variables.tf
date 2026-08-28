@@ -163,8 +163,14 @@ variable "max_runtime_hours" {
 
 variable "keep_alive_on_failure" {
   description = <<-EOT
-    Skip self-termination so the box survives for debugging. Costs real money
-    per hour, so it is off by default and the max_runtime_hours cap still applies.
+    Skip self-termination so the box survives for interactive debugging. Costs
+    real money per hour, so it is off by default. The max_runtime_hours cap is
+    unaffected and still terminates the instance: it runs through hard_stop,
+    which this flag deliberately does not suppress.
+
+    Usually unnecessary. Both the bootstrap log and the per-slot logs are copied
+    to S3 under <results>/logs/ on every exit, including failures, so a run that
+    terminates itself can still be debugged after the fact.
   EOT
   type        = bool
   default     = false

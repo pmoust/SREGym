@@ -37,11 +37,24 @@ terminate() {
   local reason="$1"
   echo "[bootstrap] terminating: $reason"
   sync_results || true
+  sync_logs || true
   %{ if keep_alive_on_failure }
-  echo "[bootstrap] keep_alive_on_failure is set, staying up. The runtime cap still applies."
+  echo "[bootstrap] keep_alive_on_failure is set, staying up. hard_stop still terminates at the runtime cap."
   %{ else }
   aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" || shutdown -h now
   %{ endif }
+}
+
+# Unconditional kill, used only by the runtime cap below. keep_alive_on_failure
+# deliberately does not apply here: the cap exists so a wedged or forgotten run
+# cannot bill indefinitely, and a debug flag that silently disables the one
+# backstop against that defeats its purpose. Every other exit goes through
+# terminate() above, which the flag does suppress.
+hard_stop() {
+  echo "[bootstrap] $1"
+  sync_results || true
+  sync_logs || true
+  aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" || shutdown -h now
 }
 
 sync_results() {
@@ -49,9 +62,22 @@ sync_results() {
   aws s3 sync "$SLOTS_DIR" "$S3_PREFIX/slots/" --region "$REGION" --only-show-errors
 }
 
+# The bootstrap log and the per-slot logs live in /var/log, outside SLOTS_DIR,
+# so sync_results never carried them. Without this a self-terminating failure
+# takes the only record of why it failed down with the instance, which leaves
+# keep_alive_on_failure as the only way to debug one and that bills per hour
+# until someone remembers to kill the box.
+sync_logs() {
+  for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log; do
+    [ -f "$f" ] || continue
+    aws s3 cp "$f" "$S3_PREFIX/logs/$(basename "$f")" \
+      --region "$REGION" --only-show-errors || true
+  done
+}
+
 # --- hard runtime cap -------------------------------------------------------
 # Backstop against a wedged run. The normal exit is shard completion below.
-( sleep $(( ${max_runtime_hours} * 3600 )) && terminate "max_runtime_hours=${max_runtime_hours} elapsed" ) &
+( sleep $(( ${max_runtime_hours} * 3600 )) && hard_stop "max_runtime_hours=${max_runtime_hours} elapsed" ) &
 
 # --- spot interruption ------------------------------------------------------
 # EC2 gives two minutes' notice on IMDS. With per-problem syncing this is belt
