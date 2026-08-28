@@ -338,6 +338,40 @@ run_slot() {
       return 1
     fi
 
+    # The port-forward is ours, not the deploy script's. MCPServer starts one
+    # as a subprocess.Popen child, which dies when that script exits, so the
+    # script deliberately tears its own down and leaves this to us. Started
+    # with nohup under this slot's subshell so it lives as long as the slot.
+    #
+    # Bound to 0.0.0.0 because brain-go dials it from inside a container, where
+    # 127.0.0.1 is that container's own loopback: seed_slot.sh registers the
+    # connections against the host's private address, not localhost.
+    echo "[slot $slot] starting the MCP port-forward on $MCP_SERVER_PORT"
+    nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
+      -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
+    PF_PID=$!
+
+    # Confirm it is actually serving before handing off. Without this the slot
+    # runs on to seed_slot.sh, which waits 300s on an endpoint that will never
+    # answer and then aborts, which is precisely how the previous run failed.
+    pf_ok=0
+    pf_deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$pf_deadline" ]; do
+      if [ "$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 \
+              "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)" = "200" ]; then
+        pf_ok=1
+        break
+      fi
+      kill -0 "$PF_PID" 2>/dev/null || break
+      sleep 2
+    done
+    if [ "$pf_ok" != "1" ]; then
+      echo "[slot $slot] MCP port-forward never served on $MCP_SERVER_PORT, slot aborted"
+      kill "$PF_PID" 2>/dev/null || true
+      return 1
+    fi
+    echo "[slot $slot] MCP port-forward serving on $MCP_SERVER_PORT (pid $PF_PID)"
+
     # Every slot seeds its own tenant, slot 0 included. It used to be special,
     # seeded by setup_brain_go.sh while that script brought the shared stack up,
     # but that ran before any cluster existed and so before any MCP server did:
