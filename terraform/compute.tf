@@ -50,7 +50,18 @@ resource "aws_instance" "bench" {
 
   user_data_replace_on_change = true
 
-  user_data = templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
+  # Gzipped, not plain. EC2 caps user data at 16384 bytes and the bootstrap
+  # crossed it: 16905 bytes rendered, 521 over, and the apply failed with
+  # "expected length of user_data to be in the range (0 - 16384)" after the
+  # bucket and security group had already been created. cloud-init detects the
+  # gzip magic bytes and decompresses before running it, so this changes
+  # nothing about what executes.
+  #
+  # Preferred over deleting 521 bytes of comments: the script is mostly
+  # comments recording bugs that cost a fleet each to find, and trimming to
+  # just under the cap would put the next addition back over it. Compressed it
+  # is 6624 bytes, so there is room for the script to nearly triple.
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
     run_id                = local.run_id
     shard_index           = count.index
     shard_count           = var.instance_count
@@ -68,7 +79,7 @@ resource "aws_instance" "bench" {
     runs_per_instance     = var.runs_per_instance
     max_runtime_hours     = var.max_runtime_hours
     keep_alive_on_failure = var.keep_alive_on_failure
-  })
+  }))
 
   tags = {
     Name       = "${local.name}-${count.index}"
