@@ -137,11 +137,28 @@ variable "disk_throughput_mbps" {
   default     = 125
 }
 
+variable "use_spot" {
+  description = <<-EOT
+    Spot when true, on-demand when false. Spot stays the default: it is roughly
+    a quarter of the price and a run that resumes from S3 survives losing a box.
+
+    Turn it off while the pipeline itself is being debugged. A reclaim arrives
+    without warning and costs the whole run: two runs died that way, one of
+    them three hours in, and that one took its logs with it because the
+    interruption handler reached the box before terminate() did. While each
+    iteration is still finding a new bug, the price difference is worth less
+    than the lost iteration.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "spot_max_price" {
   description = <<-EOT
-    Empty means the on-demand price as the cap, which is the safe default: you
-    pay the spot rate, never more than on-demand. r7a.24xlarge spot has been
-    running around $1.43 against $7.30 on-demand in us-east-1.
+    Ignored when use_spot is false. Empty means the on-demand price as the cap,
+    which is the safe default: you pay the spot rate, never more than
+    on-demand. r7a.24xlarge spot has been running around $1.43 against $7.30
+    on-demand in us-east-1.
   EOT
   type        = string
   default     = ""
