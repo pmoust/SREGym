@@ -98,6 +98,64 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 
+# --- AWS credentials for the containers --------------------------------------
+# Without these every LLM call fails and the agent submits nothing:
+#
+#   node "hypothesis_gen_agent": llm: bedrock converse: 403
+#   UnrecognizedClientException: The security token included in the request is
+#   invalid
+#
+# deploy/docker-compose.yml falls back to AWS_ACCESS_KEY_ID=test and
+# AWS_SECRET_ACCESS_KEY=test unless the env file supplies real ones. Those are
+# LocalStack placeholders, and that file's own comment says a real pair is
+# expected to reach real AWS for everything except S3 and Secrets Manager.
+# Bedrock is one of those everything-elses, so it got the placeholders.
+#
+# AWS_SESSION_TOKEN is not named in that compose file at all, so it reaches the
+# containers purely through env_file: .env on x-app-common. It is required:
+# instance-role credentials are always temporary, and a key and secret without
+# the session token fail in exactly the same way.
+#
+# Read from IMDS on the host, not from inside a container. The metadata hop
+# limit stays at 1, so nothing in a container can reach the endpoint and lift
+# the instance role for itself. That matters here, where brain-go is driven by
+# a model reading logs and metrics out of a deliberately broken application,
+# and the instance role can read the SSM parameter holding the clone token.
+#
+# These expire. Instance-role credentials last about six hours and this is a
+# snapshot that never refreshes, so a longer run will start failing LLM calls
+# again. Acceptable under the current runtime cap; wants a refresh loop before
+# any longer sweep.
+IMDS_TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' 2>/dev/null || true)
+IMDS_ROLE=""
+if [ -n "$IMDS_TOKEN" ]; then
+  IMDS_ROLE=$(curl -sf -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null | head -1 || true)
+fi
+
+if [ -n "$IMDS_ROLE" ]; then
+  IMDS_CREDS=$(curl -sf -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    "http://169.254.169.254/latest/meta-data/iam/security-credentials/$IMDS_ROLE" 2>/dev/null || true)
+  AWS_KEY=$(printf '%s' "$IMDS_CREDS" | jq -r '.AccessKeyId // empty')
+  AWS_SECRET=$(printf '%s' "$IMDS_CREDS" | jq -r '.SecretAccessKey // empty')
+  AWS_TOKEN=$(printf '%s' "$IMDS_CREDS" | jq -r '.Token // empty')
+
+  [ -n "$AWS_KEY" ] && [ -n "$AWS_SECRET" ] && [ -n "$AWS_TOKEN" ] \
+    || die "IMDS returned incomplete credentials for role $IMDS_ROLE; every Bedrock call would 403"
+
+  set_env_key AWS_ACCESS_KEY_ID "$AWS_KEY"
+  set_env_key AWS_SECRET_ACCESS_KEY "$AWS_SECRET"
+  set_env_key AWS_SESSION_TOKEN "$AWS_TOKEN"
+  log "instance-role credentials written for $IMDS_ROLE, expiring $(printf '%s' "$IMDS_CREDS" | jq -r '.Expiration // "unknown"')"
+else
+  # Not fatal: on a developer box there is no instance role, and whatever
+  # credentials deploy/.env or the caller's environment already provides are
+  # the right ones. Said loudly because on an instance it means every LLM call
+  # is about to 403.
+  log "WARNING: no instance role via IMDS; leaving whatever credentials deploy/.env already has"
+fi
+
 # --- bring up the stack ------------------------------------------------------
 # Temporal is not optional. buildWorkflowChat is called unconditionally in
 # chatsvc/wiring.go and errors if the Temporal client cannot be built, so the
