@@ -90,6 +90,7 @@ sync_logs() {
          http://169.254.169.254/latest/meta-data/spot/instance-action >/dev/null 2>&1; then
       echo "[spot] interruption notice received, syncing before we lose the box"
       sync_results || true
+      sync_logs || true
       exit 0
     fi
     sleep 5
@@ -279,7 +280,15 @@ unset SREGYM_WAIT_FAULT_EVENT SREGYM_WAIT_EDGE_SYNC SREGYM_STELLARIZE \
 
 # Sync after every problem rather than at the end, so an interruption costs one
 # problem. The watcher is cheap and independent of the run's own exit path.
-( while true; do sleep 60; sync_results || true; done ) &
+#
+# Logs go up on the same tick, not only on exit. Syncing them only from
+# terminate() means any death that skips it -- a spot reclaim, a kernel OOM,
+# a hard kill -- takes the whole diagnostic trail with it. Run
+# run-20260828-2122 lost three hours that way: all three slots stopped
+# progressing right after "Deploying Loki", the box was reclaimed before
+# terminate() ran, and the only surviving record was helm's cache directory.
+# The per-slot logs, which had whatever error followed, died with the box.
+( while true; do sleep 60; sync_results || true; sync_logs || true; done ) &
 
 NOISE_FLAG=""
 %{ if noise }
