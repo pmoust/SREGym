@@ -213,8 +213,24 @@ fi
 #    tooling and would 403 against nofireai/nofire-code-miner.
 eval "$(ssh-agent -s)" >/dev/null || { terminate "could not start an ssh-agent"; exit 1; }
 
+# BRAIN_GO_CUSTOMER is deliberately not set, so setup_brain_go.sh keeps its own
+# default and `make up` seeds a tenant no slot will ever ask for.
+#
+# It used to be "sregym-shard-$SHARD_INDEX-slot-0", from when that script also
+# seeded slot 0's tenant. It has not done that since seeding moved per slot, and
+# leaving the name behind actively broke slot 0: `make up` seeded that customer
+# with dev-env's own token, then seed_slot.sh minted a fresh token for the same
+# customer. devseed keys on a fixed api_keys.name and EnsureAPIKey is ON
+# CONFLICT DO NOTHING, so the first hash stayed and the new token could never
+# authenticate. brain-go said exactly that, and the run carried on regardless:
+#
+#   warning: the stored dev-stack api key does not match DEV_API_KEY
+#   ...
+#   TurnFailed: POST /cli/chat returned 401: invalid or expired API token
+#
+# Slots 1 and 2 were unaffected, because their customers were new and their keys
+# were created rather than conflicting.
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
-BRAIN_GO_CUSTOMER="sregym-shard-$SHARD_INDEX-slot-0" \
 SREGYM_MCP_PORT="9954" \
 AGENT_MODEL_ID="${agent_model}" \
 AWS_DEFAULT_REGION="${region}" \
