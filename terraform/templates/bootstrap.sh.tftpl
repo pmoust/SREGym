@@ -68,7 +68,16 @@ sync_results() {
 # keep_alive_on_failure as the only way to debug one and that bills per hour
 # until someone remembers to kill the box.
 sync_logs() {
-  for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log; do
+  # Token counters first, so the file shipped below is current. brain-go
+  # exposes llm_tokens_total labelled by thread_id, which the driver sets per
+  # problem, and nothing else captures it: the first two full runs produced no
+  # token figure at all and cannot be priced. Counters are cumulative, so the
+  # last scrape before termination is the one that matters.
+  if [ -x "$WORKDIR/scripts/benchmark/scrape_tokens.sh" ]; then
+    "$WORKDIR/scripts/benchmark/scrape_tokens.sh" /var/log/sregym-tokens.prom || true
+  fi
+
+  for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log /var/log/sregym-tokens.prom; do
     [ -f "$f" ] || continue
     aws s3 cp "$f" "$S3_PREFIX/logs/$(basename "$f")" \
       --region "$REGION" --only-show-errors || true
