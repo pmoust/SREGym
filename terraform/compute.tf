@@ -18,30 +18,43 @@ resource "aws_instance" "bench" {
   vpc_security_group_ids = [aws_security_group.bench.id]
   iam_instance_profile   = local.instance_profile_name
 
-  instance_market_options {
-    market_type = "spot"
+  # Present only when use_spot is true. The block cannot be set at all for an
+  # on-demand instance, so it is a dynamic block rather than a market_type
+  # switch: EC2 rejects instance_market_options with anything else.
+  dynamic "instance_market_options" {
+    for_each = var.use_spot ? [1] : []
 
-    spot_options {
-      # "terminate" rather than "stop": a stopped instance keeps billing for its
-      # EBS volume and we would rather lose it and resume from S3.
-      instance_interruption_behavior = "terminate"
-      spot_instance_type             = "one-time"
-      max_price                      = var.spot_max_price != "" ? var.spot_max_price : null
+    content {
+      market_type = "spot"
+
+      spot_options {
+        # "terminate" rather than "stop": a stopped instance keeps billing for
+        # its EBS volume and we would rather lose it and resume from S3.
+        instance_interruption_behavior = "terminate"
+        spot_instance_type             = "one-time"
+        max_price                      = var.spot_max_price != "" ? var.spot_max_price : null
+      }
     }
   }
 
-  # instance_initiated_shutdown_behavior is deliberately not set. It cannot be:
-  # EC2 rejects it on a spot instance, and since every instance here is spot,
-  # setting it failed the apply after the instance had already launched:
+  # Set for on-demand, unset for spot, and the asymmetry matters both ways.
+  #
+  # Spot rejects it outright, which failed an apply after the instance had
+  # already launched:
   #
   #   UnsupportedOperation: Modifying 'instanceInitiatedShutdownBehavior' is
   #   not supported for spot instances
   #
-  # Nothing is lost. Spot instances already terminate on an instance-initiated
-  # shutdown and the value cannot be anything else, so the belt this used to
-  # provide for the user-data's braces is there by default. Confirmed on two
-  # of this fleet's own instances: describe-instance-attribute reports
-  # "terminate" on both, neither of which ever had it set.
+  # Nothing is lost there, because spot forces "terminate" anyway and cannot be
+  # anything else. Confirmed on two of this fleet's own instances:
+  # describe-instance-attribute reported "terminate" on both, neither of which
+  # ever had it set.
+  #
+  # On-demand is the opposite: it defaults to "stop". terminate() falls back to
+  # `shutdown -h now` when the API call fails, so on the default an instance
+  # that took that path would stop rather than terminate and keep billing its
+  # root volume, which for this fleet is 1500 GB, until someone noticed.
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
 
   root_block_device {
     volume_type           = "gp3"
