@@ -54,9 +54,12 @@ terraform apply -var instance_count=2 -var n_attempts=3 -var noise=true
 # come from.
 terraform apply -var instance_count=3 -var runs_per_instance=12
 
-# Sweep brain-go's own tuning knobs. Anything it reads from the environment
+# Set brain-go's own tuning knobs. Anything it reads from the environment
 # works here; the map is merged over the derived defaults, so setting one key
 # does not drop CHAT_SERVICE_TURN_TIMEOUT.
+#
+# One apply is one setting, not a sweep: setup_brain_go.sh runs once per
+# instance and every slot on it shares that stack. A sweep is N applies.
 terraform apply -var 'brain_env={CHAT_SERVICE_RCI_TEMPERATURE="0.5"}'
 
 # Ablate a behaviour rather than tune a number.

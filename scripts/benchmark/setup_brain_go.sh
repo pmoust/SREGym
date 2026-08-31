@@ -39,13 +39,28 @@ die() { echo "[setup-brain-go] ERROR: $*" >&2; exit 1; }
 # Set a key in deploy/.env, replacing it if present and appending if not.
 # dev-env.sh's set_key only fills keys that are empty, so it will not correct a
 # key that already holds the wrong value; this will.
+#
+# Delete-then-append rather than a sed substitution. sed's replacement text
+# treats & as "the whole match" and \ as an escape, so a value containing
+# either rewrote the line into something else and still reported success:
+# CHAT_SERVICE_TURN_TIMEOUT=a&b produced
+# CHAT_SERVICE_TURN_TIMEOUT=aCHAT_SERVICE_TURN_TIMEOUT=900sb. Escaping the
+# value would work but leaves the next caller to rediscover which characters
+# need it; not putting the value in front of sed at all removes the class.
+#
+# The value now only ever reaches printf, which is why printf rather than echo:
+# echo interprets backslash escapes in some shells. Only the key reaches sed,
+# as a pattern, and callers constrain it to a shell name.
+#
+# The rewritten key moves to the end of the file. .env is unordered key=value
+# pairs, so this changes nothing about what is read.
 set_env_key() {
   local key="$1" value="$2"
   if grep -q "^${key}=" deploy/.env; then
-    sed -i.bak "s|^${key}=.*|${key}=${value}|" deploy/.env && rm -f deploy/.env.bak
-  else
-    echo "${key}=${value}" >>deploy/.env
+    sed -i.bak "/^${key}=/d" deploy/.env && rm -f deploy/.env.bak
   fi
+
+  printf '%s=%s\n' "$key" "$value" >>deploy/.env
 }
 
 [ -d "$BRAIN_GO_DIR" ] || die "brain-go checkout not found at $BRAIN_GO_DIR"
@@ -123,13 +138,11 @@ if [ -n "${BRAIN_ENV_EXTRA:-}" ]; then
 
     [ "$key" = "$entry" ] && die "BRAIN_ENV_EXTRA entry has no '=': $entry"
 
-    # set_env_key builds a sed s|...| expression, so a key outside this charset
-    # or a value containing the delimiter would corrupt .env rather than fail.
+    # The key reaches sed as a pattern and has to be a valid .env name, so it is
+    # constrained here. The value is not: set_env_key never puts it in front of
+    # sed, so no character in it needs rejecting.
     case "$key" in
       *[!A-Za-z0-9_]* | [0-9]*) die "BRAIN_ENV_EXTRA key is not a shell name: $key" ;;
-    esac
-    case "$value" in
-      *"|"*) die "BRAIN_ENV_EXTRA value for $key contains '|', which set_env_key cannot escape" ;;
     esac
 
     set_env_key "$key" "$value"

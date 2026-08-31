@@ -106,8 +106,17 @@ variable "brain_env" {
     CHAT_SERVICE_RCI_INJECT_TIME_WINDOWS.
 
     Entries here are merged over the derived defaults in locals.brain_env, so
-    setting one key does not drop the others. Do not put secrets here: the keys
-    are logged, and the values reach a plaintext .env on the instance.
+    setting one key does not drop the others.
+
+    Do not put secrets here. A map(string) variable is not sensitive, so values
+    reach terraform state, plan and apply output, and user_data (readable via
+    ec2:DescribeInstanceAttribute), as well as a plaintext .env on the
+    instance. Key names are also logged; values are not.
+
+    A value containing a line equal to the bootstrap's heredoc terminator would
+    end that heredoc early and run the rest as root. The input is your own
+    -var, so this is self-inflicted rather than a vector, but it is the one
+    thing the heredoc does not defend against.
   EOT
   type        = map(string)
   default     = {}

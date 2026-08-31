@@ -239,6 +239,7 @@ eval "$(ssh-agent -s)" >/dev/null || { terminate "could not start an ssh-agent";
 #
 # Slots 1 and 2 were unaffected, because their customers were new and their keys
 # were created rather than conflicting.
+
 # Tuning knobs from the run's configuration (terraform local.brain_env), one
 # KEY=VALUE per line. A quoted heredoc, so nothing here is expanded by this
 # shell: the values are written into brain-go's .env verbatim.
