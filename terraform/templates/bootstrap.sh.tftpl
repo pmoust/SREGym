@@ -239,11 +239,20 @@ eval "$(ssh-agent -s)" >/dev/null || { terminate "could not start an ssh-agent";
 #
 # Slots 1 and 2 were unaffected, because their customers were new and their keys
 # were created rather than conflicting.
+# Tuning knobs from the run's configuration (terraform local.brain_env), one
+# KEY=VALUE per line. A quoted heredoc, so nothing here is expanded by this
+# shell: the values are written into brain-go's .env verbatim.
+BRAIN_ENV_EXTRA=$(cat <<'SREGYM_BRAIN_ENV'
+${brain_env}
+SREGYM_BRAIN_ENV
+)
+
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
 SREGYM_MCP_PORT="9954" \
 AGENT_MODEL_ID="${agent_model}" \
 AWS_DEFAULT_REGION="${region}" \
 MINER_REPO_PULL_TOKEN="$GH_TOKEN" \
+BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
 
 # setup_brain_go.sh writes BRAIN_API_URL here. No key: every slot mints its own

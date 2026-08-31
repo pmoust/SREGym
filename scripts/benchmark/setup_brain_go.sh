@@ -98,6 +98,51 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 
+# --- run-configured knobs ----------------------------------------------------
+# BRAIN_ENV_EXTRA carries KEY=VALUE lines from the run's terraform config
+# (local.brain_env), so brain-go's tuning knobs can be swept per run instead of
+# by editing this script (NOFireAI/brain-go#2282). It always carries at least
+# CHAT_SERVICE_TURN_TIMEOUT, derived from the harness budget, because brain-go's
+# own 15-minute default would truncate diagnoses and score them zero.
+#
+# Applied here, before the stack starts. docker compose reads .env at container
+# start, so a value written after `make up` would not reach the process.
+#
+# Only key names are logged. These are tuning knobs today, but the mechanism is
+# generic and a secret passed through it must not end up in a log that ships to
+# S3.
+if [ -n "${BRAIN_ENV_EXTRA:-}" ]; then
+  applied=""
+  while IFS= read -r entry; do
+    case "$entry" in
+      "" | \#*) continue ;;
+    esac
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+
+    [ "$key" = "$entry" ] && die "BRAIN_ENV_EXTRA entry has no '=': $entry"
+
+    # set_env_key builds a sed s|...| expression, so a key outside this charset
+    # or a value containing the delimiter would corrupt .env rather than fail.
+    case "$key" in
+      *[!A-Za-z0-9_]* | [0-9]*) die "BRAIN_ENV_EXTRA key is not a shell name: $key" ;;
+    esac
+    case "$value" in
+      *"|"*) die "BRAIN_ENV_EXTRA value for $key contains '|', which set_env_key cannot escape" ;;
+    esac
+
+    set_env_key "$key" "$value"
+    applied="$applied $key"
+  done <<BRAIN_ENV_EOF
+$BRAIN_ENV_EXTRA
+BRAIN_ENV_EOF
+
+  # Logged as one line so the applied configuration is recoverable from the
+  # bootstrap log after the instance self-terminates.
+  log "run-configured keys:${applied:- none}"
+fi
+
 # --- AWS credentials for the containers --------------------------------------
 # Without these every LLM call fails and the agent submits nothing:
 #

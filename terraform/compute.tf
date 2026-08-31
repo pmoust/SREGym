@@ -81,8 +81,18 @@ resource "aws_instance" "bench" {
   #
   # Preferred over deleting 521 bytes of comments: the script is mostly
   # comments recording bugs that cost a fleet each to find, and trimming to
-  # just under the cap would put the next addition back over it. Compressed it
-  # is 6624 bytes, so there is room for the script to nearly triple.
+  # just under the cap would put the next addition back over it.
+  #
+  # Headroom, measured rather than estimated: the rendered script gzips to
+  # ~9.3 KB, which is ~12.3 KB once base64-encoded, against the 16384 cap. So
+  # ~4 KB spare, or about 1.3x, not the "nearly triple" an earlier version of
+  # this comment claimed. base64 is the figure that matters and it inflates
+  # gzip by 4/3, which is what that estimate missed. Re-measure before adding
+  # anything substantial:
+  #
+  #   terraform console <<<'templatefile("./templates/bootstrap.sh.tftpl", {...})'
+  #
+  # or just apply: the failure is loud, at plan time, and named the cap.
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
     run_id                = local.run_id
     shard_index           = count.index
@@ -101,6 +111,7 @@ resource "aws_instance" "bench" {
     runs_per_instance     = var.runs_per_instance
     max_runtime_hours     = var.max_runtime_hours
     keep_alive_on_failure = var.keep_alive_on_failure
+    brain_env             = local.brain_env_rendered
   }))
 
   tags = {

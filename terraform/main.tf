@@ -31,6 +31,32 @@ locals {
 
   instance_profile_name = var.instance_profile_name != "" ? var.instance_profile_name : aws_iam_instance_profile.bench[0].name
 
+  # brain-go bounds one chat turn at CHAT_SERVICE_TURN_TIMEOUT, defaulting to
+  # 15 minutes (NOFireAI/brain-go#2376). That is an interactive-chat ceiling
+  # with no counterpart in the benchmark, and it is well below the harness
+  # budget: when it fires during diagnosis the driver catches TurnFailed,
+  # submits an empty answer and never attempts mitigation, so the problem
+  # scores zero on both dimensions whatever the investigation was doing. It
+  # cost 3 problems in the first full run and 2 in the second.
+  #
+  # Derived from the harness budget rather than pinned, so the harness timeout
+  # stays the only binding cap at any agent_timeout_seconds. Note brain-go's
+  # own HTTP write timeout is 90 minutes and severs the connection regardless,
+  # so an agent_timeout_seconds above roughly 45m needs that raised too.
+  brain_env_derived = {
+    CHAT_SERVICE_TURN_TIMEOUT = "${var.agent_timeout_seconds * 2}s"
+  }
+
+  # var.brain_env last, so an explicit override wins while omitted keys keep
+  # their derived value. A plain default on the variable would not do: a caller
+  # setting one knob would replace the whole map and silently reinstate the
+  # 15-minute cap.
+  brain_env = merge(local.brain_env_derived, var.brain_env)
+
+  # Rendered here rather than in the template so the template stays a shell
+  # script. One KEY=VALUE per line, consumed by setup_brain_go.sh.
+  brain_env_rendered = join("\n", [for k, v in local.brain_env : "${k}=${v}"])
+
   # The judge grading output from the same model that produced it is not a
   # measurement. Two judges agreeing is also weaker evidence than one good
   # judge: SREGym's own inter-rater table has GPT-5.4 and K2.5 agreeing with

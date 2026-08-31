@@ -95,6 +95,24 @@ variable "judge_model" {
   default     = "bedrock/us.anthropic.claude-sonnet-5"
 }
 
+variable "brain_env" {
+  description = <<-EOT
+    Extra key/value pairs written into brain-go's deploy/.env before its stack
+    starts, for sweeping its tuning knobs from a run's configuration rather
+    than by editing a script (NOFireAI/brain-go#2282).
+
+    Anything brain-go reads from the environment works here, for example
+    CHAT_SERVICE_RCI_TEMPERATURE, CHAT_SERVICE_RCI_MAX_HYPOTHESES or
+    CHAT_SERVICE_RCI_INJECT_TIME_WINDOWS.
+
+    Entries here are merged over the derived defaults in locals.brain_env, so
+    setting one key does not drop the others. Do not put secrets here: the keys
+    are logged, and the values reach a plaintext .env on the instance.
+  EOT
+  type        = map(string)
+  default     = {}
+}
+
 variable "agent_timeout_seconds" {
   description = "Per-run agent timeout. The paper uses 1800 and counts timed-out runs at the cap."
   type        = number
