@@ -263,9 +263,37 @@ variable "brain_go_ref" {
     Git ref of brain-go to run. It is checked out on the instance because
     BRAIN_API_URL defaults to localhost:8001, so brain-go runs beside the
     harness rather than centrally.
+
+    A branch name, a tag, or a full 40-character commit SHA. Prefer a SHA for
+    anything whose numbers will be compared later: "main" is resolved on each
+    instance at boot, so three shards launching minutes apart can pick up
+    different commits, and a rerun weeks later gets whatever main is then.
+
+    Full, not abbreviated. `git fetch origin <ref>` treats a ref as an object
+    name only when it is 40 hex characters; anything shorter is looked up as a
+    ref name and does not resolve, which fails the boot exactly as `clone
+    --branch <sha>` used to. The validation below rejects the short form rather
+    than letting it terminate a launched fleet.
+
+    The commit must also still be reachable from a branch, a tag or a PR head.
+    GitHub serves reachable objects only, so a commit that was force-pushed
+    away, or that sat on a branch deleted without a PR, cannot be fetched.
   EOT
   type        = string
   default     = "main"
+
+  # Either a full SHA, or something that does not look like a truncated one. A
+  # 7-to-39 character hex string is almost always an abbreviated commit, and
+  # accepting it means a plan and an apply that both succeed followed by three
+  # instances terminating eighty seconds in. brain_env's validation above exists
+  # for the same reason: this path's failures are late and expensive.
+  validation {
+    condition = (
+      can(regex("^[0-9a-f]{40}$", var.brain_go_ref)) ||
+      !can(regex("^[0-9a-f]{7,39}$", var.brain_go_ref))
+    )
+    error_message = "brain_go_ref looks like an abbreviated commit SHA. Use the full 40-character SHA: git fetch cannot resolve a short one and the instance will terminate at boot."
+  }
 }
 
 variable "github_token_ssm_path" {
