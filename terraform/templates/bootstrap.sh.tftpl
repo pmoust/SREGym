@@ -350,6 +350,15 @@ run_slot() {
     # Ports, cluster name, kubeconfig and cache dir for this slot.
     eval "$(SREGYM_SLOT_ROOT="$WORKDIR/slot-state" "$WORKDIR/scripts/benchmark/run_slot_env.sh" "$slot")"
 
+    # Which run, shard and slot produced a row. The driver stamps these onto
+    # each investigation it opens, so a result can be traced back to the sweep
+    # that made it; without them every investigation is titled alike and rows
+    # are told apart only by creation time. RUN_ID and SHARD_INDEX exist above
+    # but were never exported, so the driver saw none of the three.
+    export SREGYM_RUN_ID="$RUN_ID"
+    export SREGYM_SHARD_INDEX="$SHARD_INDEX"
+    export SREGYM_SLOT="$slot"
+
     # Each slot needs its own kind cluster. Nothing else creates it: main.py
     # exits with "Missing kubeconfig. Please set up a cluster." if it is absent,
     # and the bootstrap installs kind without ever calling it.

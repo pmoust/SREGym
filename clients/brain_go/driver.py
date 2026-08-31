@@ -383,10 +383,15 @@ def open_investigation(problem_id: str) -> tuple[str, str] | None:
 
 
 def _run_label() -> str:
-    """Identify which run, shard and attempt a row belongs to.
+    """Identify which run, shard and slot a row belongs to.
 
-    Everything here is already exported per slot by the bootstrap; anything
-    missing degrades to a short random suffix rather than dropping the field.
+    The fleet bootstrap exports all three per slot before launching a run. A
+    local run supplies none of them and gets a random suffix instead, which
+    keeps rows distinguishable without pretending to be attributable.
+
+    The first version of this read three variables nothing in the repo wrote,
+    so it always took the fallback and the identity it advertised was never
+    present. If that regresses, TestRunLabel below fails.
     """
     parts = [os.environ.get(k, "") for k in ("SREGYM_RUN_ID", "SREGYM_SHARD_INDEX", "SREGYM_SLOT")]
     label = " ".join(p for p in parts if p)
@@ -395,13 +400,15 @@ def _run_label() -> str:
 
 
 def confirm_persisted(investigation_uuid: str) -> None:
-    """Fail if the investigation carries no analysis after the diagnosis turn.
+    """Check that the diagnosis turn actually recorded something.
 
-    Without this a misdirected session is invisible. brain-go's CompleteRCI
+    Without this a misdirected session is invisible: brain-go's CompleteRCI
     swallows both a missing investigation and a state conflict as benign
-    no-ops, so a session pointing at another slot's tenant would let every turn
-    complete, the run exit 0, and nothing be written: the exact failure this
-    exists to remove, one layer further down where it is harder to see.
+    no-ops, so a session resolving to a different tenant than the API key
+    would let every turn complete, the run exit 0, and nothing be written.
+
+    Raises only when the investigation cannot be read at all, which is
+    unambiguous. An empty report is logged rather than raised; see below.
     """
     if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
         return
@@ -424,11 +431,22 @@ def confirm_persisted(investigation_uuid: str) -> None:
     # task row, but this route surfaces it as data.rca_response
     # (internal/api/investigations/v2_detail.go). Checking `analysis` here would
     # have failed on every run regardless of whether the write happened.
+    #
+    # Empty is ambiguous, so it does not raise. It means either the session and
+    # the API key resolve to different tenants, so the report was written to an
+    # account this investigation does not belong to, or the turn legitimately
+    # produced no structured report, which completeInvestigation treats as a
+    # no-op. Killing the problem would punish the second case for the first.
+    # A misconfigured run prints this on every problem, which is what makes it
+    # visible; a one-off does not cost the problem.
     if not data.get("rca_response"):
-        raise RuntimeError(
-            f"investigation {investigation_uuid} carries no rca_response after the diagnosis "
-            f"turn (state={data.get('state')!r}); the run would record nothing "
-            "(NOFireAI/sregym#28)"
+        logger.error(
+            "NOT PERSISTED: investigation %s has no rca_response after the diagnosis turn "
+            "(state=%s). Either BRAIN_SESSION and BRAIN_API_KEY resolve to different tenants, "
+            "or the turn produced no structured report. If every problem logs this, it is the "
+            "former and the run is recording nothing (NOFireAI/sregym#28).",
+            investigation_uuid,
+            data.get("state"),
         )
 
 
@@ -520,12 +538,16 @@ def main() -> int:
 
     logger.info("diagnosis (%d chars): %s", len(diagnosis), diagnosis[:300])
 
-    # Before submitting, so a run that is silently recording nothing stops here
-    # rather than after every problem has been scored.
+    # Submit first. The check below is about whether the run is recording, not
+    # about whether the answer is good, and an unsubmitted diagnosis scores zero
+    # on both dimensions. An earlier version ran it first and would have thrown
+    # away a perfectly good diagnosis whenever the turn produced no structured
+    # report, which completeInvestigation treats as a no-op and which is
+    # reachable through a recursion-limit exit or a decode failure.
+    submit_to_conductor(diagnosis)
+
     if opened:
         confirm_persisted(opened[1])
-
-    submit_to_conductor(diagnosis)
 
     stage = wait_for_stage({"mitigation", "done"})
     if stage == "done":
