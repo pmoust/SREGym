@@ -314,7 +314,7 @@ def submit_to_conductor(solution: str) -> None:
     resp.raise_for_status()
 
 
-def open_investigation(problem_id: str) -> str | None:
+def open_investigation(problem_id: str) -> tuple[str, str] | None:
     """Open an investigation and return the thread id to run this problem on.
 
     brain-go only persists an RCI report when the turn carries an investigation
@@ -329,13 +329,13 @@ def open_investigation(problem_id: str) -> str | None:
     `inv-` prefixed id here would not work either: it would parse to a
     valid-looking uuid that updates no row. We ask for a real one.
 
-    Returns None when the api service or session was not supplied, which leaves
-    the caller on a self-made thread and the old, non-persisting behaviour.
+    Returns (thread_id, investigation_uuid), or None when the api service or
+    session was not supplied, which leaves the caller on a self-made thread and
+    the old, non-persisting behaviour.
     """
     if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
         logger.warning(
-            "no BRAIN_ADMIN_API_URL/BRAIN_SESSION; this run will not persist its "
-            "hypotheses (see NOFireAI/sregym#28)"
+            "no BRAIN_ADMIN_API_URL/BRAIN_SESSION; this run will not persist its hypotheses (see NOFireAI/sregym#28)"
         )
 
         return None
@@ -356,25 +356,80 @@ def open_investigation(problem_id: str) -> str | None:
             "is BRAIN_ADMIN_API_URL pointing at the api service rather than chat?"
         )
 
+    # The title is how a row is attributed afterwards. n_attempts>1 opens one
+    # investigation per attempt, and --resume re-runs a partially finished
+    # problem for all of its attempts again, so "SREGym <problem>" alone leaves
+    # several identical rows to be told apart by creation time.
+    label = f"SREGym {problem_id} [{_run_label()}]"
+
     resp = requests.post(
         f"{base}/api/v2/investigations",
-        json={"title": f"SREGym {problem_id}", "description": f"SREGym benchmark problem {problem_id}"},
+        json={"title": label, "description": f"SREGym benchmark problem {problem_id}"},
         headers={"X-CSRF-Token": csrf},
         cookies={"session": BRAIN_SESSION, "CSRF-TOKEN": csrf},
         timeout=30,
     )
 
     if not resp.ok:
+        raise RuntimeError(f"POST /api/v2/investigations returned {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json().get("data") or {}
+    thread_id, uuid_str = data.get("chat_thread_id"), data.get("uuid")
+
+    if not thread_id or not uuid_str:
+        raise RuntimeError(f"investigation response was incomplete: {resp.text[:300]}")
+
+    return thread_id, uuid_str
+
+
+def _run_label() -> str:
+    """Identify which run, shard and attempt a row belongs to.
+
+    Everything here is already exported per slot by the bootstrap; anything
+    missing degrades to a short random suffix rather than dropping the field.
+    """
+    parts = [os.environ.get(k, "") for k in ("SREGYM_RUN_ID", "SREGYM_SHARD_INDEX", "SREGYM_SLOT")]
+    label = " ".join(p for p in parts if p)
+
+    return label or uuid.uuid4().hex[:8]
+
+
+def confirm_persisted(investigation_uuid: str) -> None:
+    """Fail if the investigation carries no analysis after the diagnosis turn.
+
+    Without this a misdirected session is invisible. brain-go's CompleteRCI
+    swallows both a missing investigation and a state conflict as benign
+    no-ops, so a session pointing at another slot's tenant would let every turn
+    complete, the run exit 0, and nothing be written: the exact failure this
+    exists to remove, one layer further down where it is harder to see.
+    """
+    if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
+        return
+
+    base = BRAIN_ADMIN_API_URL.rstrip("/")
+    resp = requests.get(
+        f"{base}/api/v2/investigations/{investigation_uuid}",
+        cookies={"session": BRAIN_SESSION},
+        timeout=30,
+    )
+
+    if not resp.ok:
         raise RuntimeError(
-            f"POST /api/v2/investigations returned {resp.status_code}: {resp.text[:300]}"
+            f"investigation {investigation_uuid} could not be read back: {resp.status_code} {resp.text[:200]}"
         )
 
-    thread_id = (resp.json().get("data") or {}).get("chat_thread_id")
+    data = resp.json().get("data") or {}
 
-    if not thread_id:
-        raise RuntimeError(f"investigation response carried no chat_thread_id: {resp.text[:300]}")
-
-    return thread_id
+    # rca_response, not analysis. The stored column is `analysis` on the triage
+    # task row, but this route surfaces it as data.rca_response
+    # (internal/api/investigations/v2_detail.go). Checking `analysis` here would
+    # have failed on every run regardless of whether the write happened.
+    if not data.get("rca_response"):
+        raise RuntimeError(
+            f"investigation {investigation_uuid} carries no rca_response after the diagnosis "
+            f"turn (state={data.get('state')!r}); the run would record nothing "
+            "(NOFireAI/sregym#28)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +499,14 @@ def main() -> int:
     # An investigation-backed thread when we can open one, so brain-go persists
     # the report and the run's hypotheses survive it (#28). The self-made thread
     # is the fallback: it still runs, it just records nothing.
-    thread_id = open_investigation(problem_id) or f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
+    # Opened before any turn, so a rejected credential costs the conductor wait
+    # and nothing else: no LLM call, no tokens. It does not stop the sweep,
+    # because main.py records a non-zero driver exit as an ordinary snapshot and
+    # moves to the next problem. With a bad session that yields a full run of
+    # zeros that read like scores. The log line below is what tells them apart;
+    # making the harness abort needs a change in main.py, which is upstream code.
+    opened = open_investigation(problem_id)
+    thread_id = opened[0] if opened else f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
     logger.info("thread: %s", thread_id)
 
     logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
@@ -457,6 +519,12 @@ def main() -> int:
         return 1
 
     logger.info("diagnosis (%d chars): %s", len(diagnosis), diagnosis[:300])
+
+    # Before submitting, so a run that is silently recording nothing stops here
+    # rather than after every problem has been scored.
+    if opened:
+        confirm_persisted(opened[1])
+
     submit_to_conductor(diagnosis)
 
     stage = wait_for_stage({"mitigation", "done"})
