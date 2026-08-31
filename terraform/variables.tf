@@ -95,6 +95,49 @@ variable "judge_model" {
   default     = "bedrock/us.anthropic.claude-sonnet-5"
 }
 
+variable "brain_env" {
+  description = <<-EOT
+    Extra key/value pairs written into brain-go's deploy/.env before its stack
+    starts, for sweeping its tuning knobs from a run's configuration rather
+    than by editing a script (NOFireAI/brain-go#2282).
+
+    Anything brain-go reads from the environment works here, for example
+    CHAT_SERVICE_RCI_TEMPERATURE, CHAT_SERVICE_RCI_MAX_HYPOTHESES or
+    CHAT_SERVICE_RCI_INJECT_TIME_WINDOWS.
+
+    Entries here are merged over the derived defaults in locals.brain_env, so
+    setting one key does not drop the others.
+
+    Do not put secrets here. A map(string) variable is not sensitive, so values
+    reach terraform state, plan and apply output, and user_data (readable via
+    ec2:DescribeInstanceAttribute), as well as a plaintext .env on the
+    instance. Key names are also logged; values are not.
+
+    A value containing a line equal to the bootstrap's heredoc terminator would
+    end that heredoc early and run the rest as root. The input is your own
+    -var, so this is self-inflicted rather than a vector, but it is the one
+    thing the heredoc does not defend against.
+  EOT
+  type        = map(string)
+  default     = {}
+
+  # Checked at plan. Without this a bad key reaches the instance, dies inside
+  # setup_brain_go.sh and terminates a launched box: the one late failure in
+  # this path, and the expensive kind. The rules match what that script
+  # enforces on arrival, so the two agree rather than drifting apart.
+  #
+  # A newline in a value would split into a second .env line, and the
+  # instance-side parser reads line by line, so it would write the first half
+  # and then die on the remainder having no "=".
+  validation {
+    condition = alltrue([
+      for k, v in var.brain_env :
+      can(regex("^[A-Za-z_][A-Za-z0-9_]*$", k)) && !strcontains(v, "\n")
+    ])
+    error_message = "brain_env keys must be shell names ([A-Za-z_][A-Za-z0-9_]*) and values must not contain newlines."
+  }
+}
+
 variable "agent_timeout_seconds" {
   description = "Per-run agent timeout. The paper uses 1800 and counts timed-out runs at the cap."
   type        = number

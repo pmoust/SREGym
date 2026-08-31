@@ -53,7 +53,47 @@ terraform apply -var instance_count=2 -var n_attempts=3 -var noise=true
 # See NOFireAI/brain-go#2218's fleet-shape table for where these numbers
 # come from.
 terraform apply -var instance_count=3 -var runs_per_instance=12
+
+# Set brain-go's own tuning knobs. Anything it reads from the environment
+# works here; the map is merged over the derived defaults, so setting one key
+# does not drop CHAT_SERVICE_TURN_TIMEOUT.
+#
+# One apply is one setting, not a sweep: setup_brain_go.sh runs once per
+# instance and every slot on it shares that stack. A sweep is N applies.
+terraform apply -var 'brain_env={CHAT_SERVICE_RCI_TEMPERATURE="0.5"}'
+
+# Ablate a behaviour rather than tune a number.
+terraform apply -var 'brain_env={CHAT_SERVICE_RCI_INJECT_TIME_WINDOWS="false"}'
 ```
+
+`CHAT_SERVICE_TURN_TIMEOUT` is set for every run whether you ask for it or
+not, at twice `agent_timeout_seconds`. brain-go bounds a chat turn at 15
+minutes by default, which is an interactive-chat ceiling with no counterpart
+here: when it fires during diagnosis the driver submits an empty answer and
+never attempts mitigation, so the problem scores zero on both dimensions
+regardless of how the investigation was going. It cost 3 problems in the first
+full run and 2 in the second. Deriving it from the harness budget keeps the
+harness timeout the only binding cap.
+
+One ceiling that is not derived: brain-go's own HTTP write timeout is 90
+minutes and severs the connection whatever the workflow does, so an
+`agent_timeout_seconds` above roughly 45m needs that raised too
+(`cmd/brain/internal/chatsvc/wiring.go`).
+
+Raising the turn timeout also lengthens how long an abandoned turn survives.
+`main.py` kills the agent at `agent_timeout` and that budget covers both phases
+of an attempt, but brain-go does not stop: it logs that the workflow continues
+when the client disconnects. Under the old 15-minute cap an orphaned turn died
+within 15 minutes; at twice the harness budget it can keep spending Bedrock
+tokens and tworker capacity for up to that long while the next problem is
+already running, on a stack all slots on the box share. Still a clear
+improvement, since problems that used to be cut off now reach mitigation, but
+it is a real cost of the change rather than a free one.
+
+The applied keys are logged by `setup_brain_go.sh` as a single
+`run-configured keys:` line, so the configuration is recoverable from the
+bootstrap log after the instance self-terminates. Values are not logged: the
+mechanism is generic and a secret passed through it must not ship to S3.
 
 Watch it, and check progress:
 

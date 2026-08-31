@@ -39,13 +39,28 @@ die() { echo "[setup-brain-go] ERROR: $*" >&2; exit 1; }
 # Set a key in deploy/.env, replacing it if present and appending if not.
 # dev-env.sh's set_key only fills keys that are empty, so it will not correct a
 # key that already holds the wrong value; this will.
+#
+# Delete-then-append rather than a sed substitution. sed's replacement text
+# treats & as "the whole match" and \ as an escape, so a value containing
+# either rewrote the line into something else and still reported success:
+# CHAT_SERVICE_TURN_TIMEOUT=a&b produced
+# CHAT_SERVICE_TURN_TIMEOUT=aCHAT_SERVICE_TURN_TIMEOUT=900sb. Escaping the
+# value would work but leaves the next caller to rediscover which characters
+# need it; not putting the value in front of sed at all removes the class.
+#
+# The value now only ever reaches printf, which is why printf rather than echo:
+# echo interprets backslash escapes in some shells. Only the key reaches sed,
+# as a pattern, and callers constrain it to a shell name.
+#
+# The rewritten key moves to the end of the file. .env is unordered key=value
+# pairs, so this changes nothing about what is read.
 set_env_key() {
   local key="$1" value="$2"
   if grep -q "^${key}=" deploy/.env; then
-    sed -i.bak "s|^${key}=.*|${key}=${value}|" deploy/.env && rm -f deploy/.env.bak
-  else
-    echo "${key}=${value}" >>deploy/.env
+    sed -i.bak "/^${key}=/d" deploy/.env && rm -f deploy/.env.bak
   fi
+
+  printf '%s=%s\n' "$key" "$value" >>deploy/.env
 }
 
 [ -d "$BRAIN_GO_DIR" ] || die "brain-go checkout not found at $BRAIN_GO_DIR"
@@ -97,6 +112,53 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 # env_file: .env.
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
+
+# --- run-configured knobs ----------------------------------------------------
+# BRAIN_ENV_EXTRA carries KEY=VALUE lines from the run's terraform config
+# (local.brain_env), so brain-go's tuning knobs can be swept per run instead of
+# by editing this script (NOFireAI/brain-go#2282). It always carries at least
+# CHAT_SERVICE_TURN_TIMEOUT, derived from the harness budget, because brain-go's
+# own 15-minute default would truncate diagnoses and score them zero.
+#
+# Applied here, before the stack starts. docker compose reads .env at container
+# start, so a value written after `make up` would not reach the process.
+#
+# Only key names are logged. These are tuning knobs today, but the mechanism is
+# generic and a secret passed through it must not end up in a log that ships to
+# S3.
+if [ -n "${BRAIN_ENV_EXTRA:-}" ]; then
+  applied=""
+  while IFS= read -r entry; do
+    case "$entry" in
+      "" | \#*) continue ;;
+    esac
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+
+    # Entries are applied as they are read, so a malformed one partway down the
+    # list dies with the entries above it already written. The instance
+    # terminates on any die here, so a half-applied .env never starts a stack,
+    # and terraform's own validation rejects both malformed shapes at plan.
+    [ "$key" = "$entry" ] && die "BRAIN_ENV_EXTRA entry has no '=': $entry"
+
+    # The key reaches sed as a pattern and has to be a valid .env name, so it is
+    # constrained here. The value is not: set_env_key never puts it in front of
+    # sed, so no character in it needs rejecting.
+    case "$key" in
+      *[!A-Za-z0-9_]* | [0-9]*) die "BRAIN_ENV_EXTRA key is not a shell name: $key" ;;
+    esac
+
+    set_env_key "$key" "$value"
+    applied="$applied $key"
+  done <<BRAIN_ENV_EOF
+$BRAIN_ENV_EXTRA
+BRAIN_ENV_EOF
+
+  # Logged as one line so the applied configuration is recoverable from the
+  # bootstrap log after the instance self-terminates.
+  log "run-configured keys:${applied:- none}"
+fi
 
 # --- AWS credentials for the containers --------------------------------------
 # Without these every LLM call fails and the agent submits nothing:
