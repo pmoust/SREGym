@@ -88,8 +88,12 @@ def _parse_tools(env_value: str) -> set[str]:
 # agent in the SREGym paper gets and is the comparable configuration. A
 # genuinely graph-only measurement would have to disable that connection for
 # the tenant, and would only be meaningful once the entity graph is populated
-# at all (NOFireAI/brain-go#2410); nothing in the benchmark setup populates it
-# today. See #26.
+# at all (NOFireAI/brain-go#2410). Nothing populates it here: brain-go derives
+# the graph from Prometheus on its periodic entity-graph-reindex schedule,
+# whose target lister skips any connection that is not Prometheus, and the
+# connect-time discovery path has providers for AWS, GCP, Azure, Cloudflare,
+# GitHub and MongoDB Atlas but none for MCP. A CUSTOM_MCP-only tenant never
+# gets one. See #26.
 DIAGNOSIS_LOCAL_TOOLS = _parse_tools(os.environ.get("BRAIN_DIAGNOSIS_TOOLS", ""))
 MITIGATION_LOCAL_TOOLS = _parse_tools(os.environ.get("BRAIN_MITIGATION_TOOLS", "kubectl,helm"))
 
