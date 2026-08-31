@@ -183,6 +183,11 @@ def test_tool_result_post_failure_does_not_kill_the_turn():
 
 
 def test_default_diagnosis_tools_are_empty():
-    """Track B by default: diagnosis from the graph alone, no cluster access."""
+    """Diagnosis executes no local tools for brain-go; mitigation executes kubectl.
+
+    This is about the driver's own shell-out, not about cluster access. brain-go
+    reaches the cluster over its sregym-kubectl MCP connection regardless of
+    this set, so an empty set here is not a graph-only measurement (#26).
+    """
     assert set() == driver.DIAGNOSIS_LOCAL_TOOLS
     assert "kubectl" in driver.MITIGATION_LOCAL_TOOLS

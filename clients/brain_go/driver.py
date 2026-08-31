@@ -72,16 +72,24 @@ def _parse_tools(env_value: str) -> set[str]:
     return {t.strip() for t in env_value.split(",") if t.strip()}
 
 
-# The two phases have opposite tool policies, and the diagnosis one is the
-# measurement. Giving brain-go kubectl during diagnosis would let it read the
-# injected fault straight off the cluster, bypassing the observability context
-# the benchmark exists to evaluate. Mitigation is the inverse: the task is to
-# change the cluster.
+# Local tools the driver will execute on brain-go's behalf when it asks, per
+# phase. Diagnosis runs with none by default and mitigation with kubectl and
+# helm, since only mitigation is meant to change the cluster.
 #
-# This is also the Track A / Track B seam. Track B (empty here) measures
-# diagnosis from the entity graph alone, which is harder than any published
-# SREGym result. Track A sets kubectl to match how every agent in the paper
-# runs, and is the only comparable number.
+# This is NOT a switch that takes cluster access away from the agent, and an
+# earlier version of this comment claimed it was. It gates only this driver's
+# own execute_local_tool shell-out. brain-go reaches the cluster through the
+# sregym-kubectl MCP connection the harness registers on the tenant
+# (scripts/benchmark/seed_connections.py), which nothing here touches: the
+# second full run made 573 exec_kubectl_cmd_safely calls during the diagnosis
+# phase, about 27 per problem, with this set to empty.
+#
+# So diagnosis runs with full cluster access either way, which is what every
+# agent in the SREGym paper gets and is the comparable configuration. A
+# genuinely graph-only measurement would have to disable that connection for
+# the tenant, and would only be meaningful once the entity graph is populated
+# at all (NOFireAI/brain-go#2410); nothing in the benchmark setup populates it
+# today. See #26.
 DIAGNOSIS_LOCAL_TOOLS = _parse_tools(os.environ.get("BRAIN_DIAGNOSIS_TOOLS", ""))
 MITIGATION_LOCAL_TOOLS = _parse_tools(os.environ.get("BRAIN_MITIGATION_TOOLS", "kubectl,helm"))
 
@@ -348,8 +356,11 @@ def main() -> int:
 
     problem_id = resolve_problem_id()
     logger.info("brain-go driver starting: problem=%s brain=%s", problem_id, BRAIN_API_URL)
-    logger.info("diagnosis tools: %s", sorted(DIAGNOSIS_LOCAL_TOOLS) or "none (graph only)")
-    logger.info("mitigation tools: %s", sorted(MITIGATION_LOCAL_TOOLS))
+    # "none" means no driver-executed local tools. It does not mean no cluster
+    # access: brain-go still has kubectl over MCP either way (see
+    # DIAGNOSIS_LOCAL_TOOLS).
+    logger.info("diagnosis local tools: %s", sorted(DIAGNOSIS_LOCAL_TOOLS) or "none")
+    logger.info("mitigation local tools: %s", sorted(MITIGATION_LOCAL_TOOLS))
 
     try:
         wait_for_stage({"diagnosis"})
