@@ -263,6 +263,11 @@ variable "brain_go_ref" {
     Git ref of brain-go to run. It is checked out on the instance because
     BRAIN_API_URL defaults to localhost:8001, so brain-go runs beside the
     harness rather than centrally.
+
+    A branch name or a commit SHA. Prefer a SHA for anything whose numbers will
+    be compared later: "main" is resolved on each instance at boot, so three
+    shards launching minutes apart can pick up different commits, and a rerun
+    weeks later gets whatever main is then.
   EOT
   type        = string
   default     = "main"

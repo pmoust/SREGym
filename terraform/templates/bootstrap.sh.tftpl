@@ -169,12 +169,38 @@ fi
 
 # brain-go runs on this box beside the harness, so it has to be checked out
 # here. setup_brain_go.sh brings up its compose stack and seeds it.
+# Fetch-then-checkout, not `clone --branch`. --branch takes a branch or a tag
+# and nothing else, so a commit SHA fails the clone outright:
+#
+#   warning: Could not find remote branch 142a8e5c... to clone.
+#   fatal: Remote branch 142a8e5c... not found in upstream origin
+#
+# which terminated all three instances of run-20260831-1729 about eighty
+# seconds in. A SHA is what makes a benchmark run reproducible: brain-go moved
+# nineteen commits in the two days before that run, four of them in the RCI
+# path, so a run against a branch name cannot tell a real change from an
+# intervening merge, and three shards launching minutes apart can pick up
+# different code.
+#
+# This form takes either. GitHub serves a fetch for an arbitrary commit, so the
+# depth-1 shallow fetch is kept for both cases; sregym above already uses
+# clone-then-checkout and has never had the limitation.
 BRAIN_GO_DIR=/opt/brain-go
 if [ ! -d "$BRAIN_GO_DIR" ]; then
-  git clone --depth 1 --branch "${brain_go_ref}" \
-    "https://x-access-token:$GH_TOKEN@github.com/NOFireAI/brain-go.git" "$BRAIN_GO_DIR" \
-    || { terminate "could not clone brain-go"; exit 1; }
+  git init "$BRAIN_GO_DIR" >/dev/null \
+    || { terminate "could not init the brain-go checkout"; exit 1; }
+  git -C "$BRAIN_GO_DIR" remote add origin \
+    "https://x-access-token:$GH_TOKEN@github.com/NOFireAI/brain-go.git" \
+    || { terminate "could not set the brain-go remote"; exit 1; }
+  git -C "$BRAIN_GO_DIR" fetch --depth 1 origin "${brain_go_ref}" \
+    || { terminate "could not fetch brain-go ref ${brain_go_ref}"; exit 1; }
+  git -C "$BRAIN_GO_DIR" checkout --detach FETCH_HEAD \
+    || { terminate "could not check out brain-go ref ${brain_go_ref}"; exit 1; }
 fi
+
+# Recorded so the results say which build produced them, rather than leaving it
+# to be inferred from a ref that may since have moved.
+echo "[bootstrap] brain-go ref ${brain_go_ref} -> $(git -C "$BRAIN_GO_DIR" rev-parse HEAD)"
 
 # The benchmark never opens the dashboard, but brain-go cannot start without
 # the checkout present: dev-env.sh gates on it as a sibling of brain-go
