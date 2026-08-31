@@ -52,6 +52,16 @@ logger = logging.getLogger("all.brain_go.driver")
 BRAIN_API_URL = os.environ.get("BRAIN_API_URL", "http://localhost:8001")
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
 
+# The api service, and the owner session that authenticates against it. Both
+# come from seed_slot.sh. They are separate from BRAIN_API_URL/BRAIN_API_KEY
+# above, which point at the chat service: a CLI API key carries no permissions
+# at all, so anything on the api service uses the session instead.
+#
+# Unset means "do not open an investigation", which keeps a local run against a
+# hand-started stack working without them.
+BRAIN_ADMIN_API_URL = os.environ.get("BRAIN_ADMIN_API_URL", "")
+BRAIN_SESSION = os.environ.get("BRAIN_SESSION", "")
+
 API_HOSTNAME = os.environ.get("API_HOSTNAME", "localhost")
 API_PORT = os.environ.get("API_PORT", "8000")
 CONDUCTOR_URL = f"http://{API_HOSTNAME}:{API_PORT}"
@@ -304,6 +314,69 @@ def submit_to_conductor(solution: str) -> None:
     resp.raise_for_status()
 
 
+def open_investigation(problem_id: str) -> str | None:
+    """Open an investigation and return the thread id to run this problem on.
+
+    brain-go only persists an RCI report when the turn carries an investigation
+    id, and it derives that id from the thread id: `completeInvestigation`
+    requires a non-empty `InvestigationID`, which `InvestigationUUIDFromThread`
+    produces only for a thread of the form `cli:inv-<uuid>`. A thread we invent
+    ourselves parses to nothing, the write is skipped, and the run's
+    hypotheses, their verdicts and their probabilities are discarded when the
+    workflow ends.
+
+    The id and the row are created together by the api service, so inventing an
+    `inv-` prefixed id here would not work either: it would parse to a
+    valid-looking uuid that updates no row. We ask for a real one.
+
+    Returns None when the api service or session was not supplied, which leaves
+    the caller on a self-made thread and the old, non-persisting behaviour.
+    """
+    if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
+        logger.warning(
+            "no BRAIN_ADMIN_API_URL/BRAIN_SESSION; this run will not persist its "
+            "hypotheses (see NOFireAI/sregym#28)"
+        )
+
+        return None
+
+    base = BRAIN_ADMIN_API_URL.rstrip("/")
+    cookies = {"session": BRAIN_SESSION}
+
+    # Prime the double-submit CSRF token. The cookie is Secure, so requests'
+    # jar will not attach it to a plain http:// request and it has to be passed
+    # by hand on the POST -- the same dance seed_connections.py does, for the
+    # same reason.
+    primed = requests.get(f"{base}/health", cookies=cookies, timeout=30)
+    csrf = primed.cookies.get("CSRF-TOKEN")
+
+    if not csrf:
+        raise RuntimeError(
+            f"no CSRF-TOKEN cookie in {base}/health ({primed.status_code}); "
+            "is BRAIN_ADMIN_API_URL pointing at the api service rather than chat?"
+        )
+
+    resp = requests.post(
+        f"{base}/api/v2/investigations",
+        json={"title": f"SREGym {problem_id}", "description": f"SREGym benchmark problem {problem_id}"},
+        headers={"X-CSRF-Token": csrf},
+        cookies={"session": BRAIN_SESSION, "CSRF-TOKEN": csrf},
+        timeout=30,
+    )
+
+    if not resp.ok:
+        raise RuntimeError(
+            f"POST /api/v2/investigations returned {resp.status_code}: {resp.text[:300]}"
+        )
+
+    thread_id = (resp.json().get("data") or {}).get("chat_thread_id")
+
+    if not thread_id:
+        raise RuntimeError(f"investigation response carried no chat_thread_id: {resp.text[:300]}")
+
+    return thread_id
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -367,7 +440,12 @@ def main() -> int:
 
     # One thread for both phases, so the mitigation turn sees the diagnosis it
     # is acting on.
-    thread_id = f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
+    #
+    # An investigation-backed thread when we can open one, so brain-go persists
+    # the report and the run's hypotheses survive it (#28). The self-made thread
+    # is the fallback: it still runs, it just records nothing.
+    thread_id = open_investigation(problem_id) or f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
+    logger.info("thread: %s", thread_id)
 
     logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
     try:

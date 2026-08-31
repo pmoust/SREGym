@@ -20,8 +20,18 @@
 # Usage:
 #   scripts/benchmark/seed_slot.sh <customer> <mcp-port> [brain-api-url]
 #
-# On success, prints `export BRAIN_API_KEY=...` to stdout so a caller can:
+# On success, prints three `export` lines to stdout so a caller can:
 #   eval "$(scripts/benchmark/seed_slot.sh sregym-shard-0-slot-1 9955)"
+#
+#   BRAIN_API_KEY        the CLI token, for /cli/chat on the chat service
+#   BRAIN_SESSION        the owner session cookie, for the api service
+#   BRAIN_ADMIN_API_URL  the api service base
+#
+# The last two exist because a CLI API key carries no permissions at all
+# (authz.go's APIServicePermissions returns nil for APIKeyTypeCLI), so anything
+# on the api service authenticates with the session instead. The driver needs
+# it to open an investigation per problem, which is what makes a run's results
+# persist (#28).
 #
 # Tracked by NOFireAI/brain-go#2219.
 
@@ -133,3 +143,5 @@ uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \
 
 log "ready"
 printf 'export BRAIN_API_KEY=%q\n' "$DEV_API_KEY"
+printf 'export BRAIN_SESSION=%q\n' "$DEV_SESSION"
+printf 'export BRAIN_ADMIN_API_URL=%q\n' "$BRAIN_API_URL"
