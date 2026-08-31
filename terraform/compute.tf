@@ -83,9 +83,14 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom, measured: the rendered script is ~23.9 KB, gzips to ~9.3 KB, and
-  # is ~12.4 KB base64-encoded. Against the 16384 cap that is 1.8x on the gzip
-  # or 1.3x on the base64.
+  # Headroom, measured: the rendered script is ~25.9 KB, gzips to
+  # ~10.1 KB, and is ~13.5 KB base64-encoded. Against the 16384
+  # cap that is 1.6x on the gzip or 1.18x on the base64,
+  # about 2.5 KB spare on the tighter reading.
+  #
+  # Re-measure when you change this script. These figures have been wrong twice:
+  # once claiming room to nearly triple, and once left stale by an addition that
+  # ate a fifth of the remaining margin.
   #
   # Which of those two the cap actually applies to is not settled here. The
   # failure recorded above was on plain user_data, where 16905 rendered bytes
