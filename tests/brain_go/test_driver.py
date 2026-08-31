@@ -191,3 +191,75 @@ def test_default_diagnosis_tools_are_empty():
     """
     assert set() == driver.DIAGNOSIS_LOCAL_TOOLS
     assert "kubectl" in driver.MITIGATION_LOCAL_TOOLS
+
+
+def test_run_label_uses_the_variables_the_bootstrap_exports(monkeypatch):
+    """The label carries run, shard and slot when the fleet supplies them.
+
+    The first version of this read three variables nothing in the repo wrote,
+    so it silently took the random fallback on every run and the identity it
+    advertised was never present. This test is what makes that visible.
+    """
+    monkeypatch.setenv("SREGYM_RUN_ID", "run-20260901-1000-abcd")
+    monkeypatch.setenv("SREGYM_SHARD_INDEX", "2")
+    monkeypatch.setenv("SREGYM_SLOT", "1")
+
+    assert driver._run_label() == "run-20260901-1000-abcd 2 1"
+
+
+def test_run_label_falls_back_when_unset(monkeypatch):
+    """A local run has none of them and still gets something distinguishing."""
+    for key in ("SREGYM_RUN_ID", "SREGYM_SHARD_INDEX", "SREGYM_SLOT"):
+        monkeypatch.delenv(key, raising=False)
+
+    label = driver._run_label()
+    assert len(label) == 8
+    assert label.isalnum()
+
+
+def test_confirm_persisted_logs_but_does_not_raise_on_an_empty_report(monkeypatch):
+    """An empty report is ambiguous, so it must not cost the problem.
+
+    It means either the session and the API key resolve to different tenants,
+    or the turn legitimately produced no structured report. Raising would
+    punish the second case for the first, and an earlier version did exactly
+    that before the diagnosis had even been submitted.
+    """
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "session_x")
+    monkeypatch.setattr(
+        driver.requests,
+        "get",
+        lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"state": "IN_PROGRESS"}}),
+    )
+
+    error = mock.Mock()
+    monkeypatch.setattr(driver.logger, "error", error)
+
+    driver.confirm_persisted("uuid-1")
+
+    error.assert_called_once()
+    assert "NOT PERSISTED" in error.call_args[0][0]
+
+
+def test_confirm_persisted_raises_when_the_investigation_cannot_be_read(monkeypatch):
+    """Unreadable is unambiguous: the credential or the base url is wrong."""
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "session_x")
+    monkeypatch.setattr(
+        driver.requests,
+        "get",
+        lambda *a, **k: mock.Mock(ok=False, status_code=403, text="forbidden"),
+    )
+
+    with pytest.raises(RuntimeError, match="could not be read back"):
+        driver.confirm_persisted("uuid-1")
+
+
+def test_confirm_persisted_is_a_noop_without_credentials(monkeypatch):
+    """A local run against a hand-started stack must not be blocked by this."""
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "")
+    monkeypatch.setattr(driver.requests, "get", mock.Mock(side_effect=AssertionError("must not call out")))
+
+    driver.confirm_persisted("uuid-1")

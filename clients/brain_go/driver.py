@@ -52,6 +52,16 @@ logger = logging.getLogger("all.brain_go.driver")
 BRAIN_API_URL = os.environ.get("BRAIN_API_URL", "http://localhost:8001")
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
 
+# The api service, and the owner session that authenticates against it. Both
+# come from seed_slot.sh. They are separate from BRAIN_API_URL/BRAIN_API_KEY
+# above, which point at the chat service: a CLI API key carries no permissions
+# at all, so anything on the api service uses the session instead.
+#
+# Unset means "do not open an investigation", which keeps a local run against a
+# hand-started stack working without them.
+BRAIN_ADMIN_API_URL = os.environ.get("BRAIN_ADMIN_API_URL", "")
+BRAIN_SESSION = os.environ.get("BRAIN_SESSION", "")
+
 API_HOSTNAME = os.environ.get("API_HOSTNAME", "localhost")
 API_PORT = os.environ.get("API_PORT", "8000")
 CONDUCTOR_URL = f"http://{API_HOSTNAME}:{API_PORT}"
@@ -317,6 +327,142 @@ def submit_to_conductor(solution: str) -> None:
     resp.raise_for_status()
 
 
+def open_investigation(problem_id: str) -> tuple[str, str] | None:
+    """Open an investigation and return the thread id to run this problem on.
+
+    brain-go only persists an RCI report when the turn carries an investigation
+    id, and it derives that id from the thread id: `completeInvestigation`
+    requires a non-empty `InvestigationID`, which `InvestigationUUIDFromThread`
+    produces only for a thread of the form `cli:inv-<uuid>`. A thread we invent
+    ourselves parses to nothing, the write is skipped, and the run's
+    hypotheses, their verdicts and their probabilities are discarded when the
+    workflow ends.
+
+    The id and the row are created together by the api service, so inventing an
+    `inv-` prefixed id here would not work either: it would parse to a
+    valid-looking uuid that updates no row. We ask for a real one.
+
+    Returns (thread_id, investigation_uuid), or None when the api service or
+    session was not supplied, which leaves the caller on a self-made thread and
+    the old, non-persisting behaviour.
+    """
+    if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
+        logger.warning(
+            "no BRAIN_ADMIN_API_URL/BRAIN_SESSION; this run will not persist its hypotheses (see NOFireAI/sregym#28)"
+        )
+
+        return None
+
+    base = BRAIN_ADMIN_API_URL.rstrip("/")
+    cookies = {"session": BRAIN_SESSION}
+
+    # Prime the double-submit CSRF token. The cookie is Secure, so requests'
+    # jar will not attach it to a plain http:// request and it has to be passed
+    # by hand on the POST -- the same dance seed_connections.py does, for the
+    # same reason.
+    primed = requests.get(f"{base}/health", cookies=cookies, timeout=30)
+    csrf = primed.cookies.get("CSRF-TOKEN")
+
+    if not csrf:
+        raise RuntimeError(
+            f"no CSRF-TOKEN cookie in {base}/health ({primed.status_code}); "
+            "is BRAIN_ADMIN_API_URL pointing at the api service rather than chat?"
+        )
+
+    # The title is how a row is attributed afterwards. n_attempts>1 opens one
+    # investigation per attempt, and --resume re-runs a partially finished
+    # problem for all of its attempts again, so "SREGym <problem>" alone leaves
+    # several identical rows to be told apart by creation time.
+    label = f"SREGym {problem_id} [{_run_label()}]"
+
+    resp = requests.post(
+        f"{base}/api/v2/investigations",
+        json={"title": label, "description": f"SREGym benchmark problem {problem_id}"},
+        headers={"X-CSRF-Token": csrf},
+        cookies={"session": BRAIN_SESSION, "CSRF-TOKEN": csrf},
+        timeout=30,
+    )
+
+    if not resp.ok:
+        raise RuntimeError(f"POST /api/v2/investigations returned {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json().get("data") or {}
+    thread_id, uuid_str = data.get("chat_thread_id"), data.get("uuid")
+
+    if not thread_id or not uuid_str:
+        raise RuntimeError(f"investigation response was incomplete: {resp.text[:300]}")
+
+    return thread_id, uuid_str
+
+
+def _run_label() -> str:
+    """Identify which run, shard and slot a row belongs to.
+
+    The fleet bootstrap exports all three per slot before launching a run. A
+    local run supplies none of them and gets a random suffix instead, which
+    keeps rows distinguishable without pretending to be attributable.
+
+    The first version of this read three variables nothing in the repo wrote,
+    so it always took the fallback and the identity it advertised was never
+    present. If that regresses, TestRunLabel below fails.
+    """
+    parts = [os.environ.get(k, "") for k in ("SREGYM_RUN_ID", "SREGYM_SHARD_INDEX", "SREGYM_SLOT")]
+    label = " ".join(p for p in parts if p)
+
+    return label or uuid.uuid4().hex[:8]
+
+
+def confirm_persisted(investigation_uuid: str) -> None:
+    """Check that the diagnosis turn actually recorded something.
+
+    Without this a misdirected session is invisible: brain-go's CompleteRCI
+    swallows both a missing investigation and a state conflict as benign
+    no-ops, so a session resolving to a different tenant than the API key
+    would let every turn complete, the run exit 0, and nothing be written.
+
+    Raises only when the investigation cannot be read at all, which is
+    unambiguous. An empty report is logged rather than raised; see below.
+    """
+    if not BRAIN_ADMIN_API_URL or not BRAIN_SESSION:
+        return
+
+    base = BRAIN_ADMIN_API_URL.rstrip("/")
+    resp = requests.get(
+        f"{base}/api/v2/investigations/{investigation_uuid}",
+        cookies={"session": BRAIN_SESSION},
+        timeout=30,
+    )
+
+    if not resp.ok:
+        raise RuntimeError(
+            f"investigation {investigation_uuid} could not be read back: {resp.status_code} {resp.text[:200]}"
+        )
+
+    data = resp.json().get("data") or {}
+
+    # rca_response, not analysis. The stored column is `analysis` on the triage
+    # task row, but this route surfaces it as data.rca_response
+    # (internal/api/investigations/v2_detail.go). Checking `analysis` here would
+    # have failed on every run regardless of whether the write happened.
+    #
+    # Empty is ambiguous, so it does not raise. It means either the session and
+    # the API key resolve to different tenants, so the report was written to an
+    # account this investigation does not belong to, or the turn legitimately
+    # produced no structured report, which completeInvestigation treats as a
+    # no-op. Killing the problem would punish the second case for the first.
+    # A misconfigured run prints this on every problem, which is what makes it
+    # visible; a one-off does not cost the problem.
+    if not data.get("rca_response"):
+        logger.error(
+            "NOT PERSISTED: investigation %s has no rca_response after the diagnosis turn "
+            "(state=%s). Either BRAIN_SESSION and BRAIN_API_KEY resolve to different tenants, "
+            "or the turn produced no structured report. If every problem logs this, it is the "
+            "former and the run is recording nothing (NOFireAI/sregym#28).",
+            investigation_uuid,
+            data.get("state"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -383,7 +529,19 @@ def main() -> int:
 
     # One thread for both phases, so the mitigation turn sees the diagnosis it
     # is acting on.
-    thread_id = f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
+    #
+    # An investigation-backed thread when we can open one, so brain-go persists
+    # the report and the run's hypotheses survive it (#28). The self-made thread
+    # is the fallback: it still runs, it just records nothing.
+    # Opened before any turn, so a rejected credential costs the conductor wait
+    # and nothing else: no LLM call, no tokens. It does not stop the sweep,
+    # because main.py records a non-zero driver exit as an ordinary snapshot and
+    # moves to the next problem. With a bad session that yields a full run of
+    # zeros that read like scores. The log line below is what tells them apart;
+    # making the harness abort needs a change in main.py, which is upstream code.
+    opened = open_investigation(problem_id)
+    thread_id = opened[0] if opened else f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
+    logger.info("thread: %s", thread_id)
 
     logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
     try:
@@ -395,7 +553,17 @@ def main() -> int:
         return 1
 
     logger.info("diagnosis (%d chars): %s", len(diagnosis), diagnosis[:300])
+
+    # Submit first. The check below is about whether the run is recording, not
+    # about whether the answer is good, and an unsubmitted diagnosis scores zero
+    # on both dimensions. An earlier version ran it first and would have thrown
+    # away a perfectly good diagnosis whenever the turn produced no structured
+    # report, which completeInvestigation treats as a no-op and which is
+    # reachable through a recursion-limit exit or a decode failure.
     submit_to_conductor(diagnosis)
+
+    if opened:
+        confirm_persisted(opened[1])
 
     stage = wait_for_stage({"mitigation", "done"})
     if stage == "done":
