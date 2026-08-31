@@ -120,6 +120,22 @@ variable "brain_env" {
   EOT
   type        = map(string)
   default     = {}
+
+  # Checked at plan. Without this a bad key reaches the instance, dies inside
+  # setup_brain_go.sh and terminates a launched box: the one late failure in
+  # this path, and the expensive kind. The rules match what that script
+  # enforces on arrival, so the two agree rather than drifting apart.
+  #
+  # A newline in a value would split into a second .env line, and the
+  # instance-side parser reads line by line, so it would write the first half
+  # and then die on the remainder having no "=".
+  validation {
+    condition = alltrue([
+      for k, v in var.brain_env :
+      can(regex("^[A-Za-z_][A-Za-z0-9_]*$", k)) && !strcontains(v, "\n")
+    ])
+    error_message = "brain_env keys must be shell names ([A-Za-z_][A-Za-z0-9_]*) and values must not contain newlines."
+  }
 }
 
 variable "agent_timeout_seconds" {

@@ -83,16 +83,24 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom, measured rather than estimated: the rendered script gzips to
-  # ~9.3 KB, which is ~12.3 KB once base64-encoded, against the 16384 cap. So
-  # ~4 KB spare, or about 1.3x, not the "nearly triple" an earlier version of
-  # this comment claimed. base64 is the figure that matters and it inflates
-  # gzip by 4/3, which is what that estimate missed. Re-measure before adding
-  # anything substantial:
+  # Headroom, measured: the rendered script is ~23.9 KB, gzips to ~9.3 KB, and
+  # is ~12.4 KB base64-encoded. Against the 16384 cap that is 1.8x on the gzip
+  # or 1.3x on the base64.
+  #
+  # Which of those two the cap actually applies to is not settled here. The
+  # failure recorded above was on plain user_data, where 16905 rendered bytes
+  # tripped it, so that case says nothing about which form counts once
+  # base64gzip is in play. An earlier version of this comment asserted base64
+  # was the binding figure; that was a guess. Either way there is room, and the
+  # honest instruction is to measure rather than to reason:
   #
   #   terraform console <<<'templatefile("./templates/bootstrap.sh.tftpl", {...})'
   #
-  # or just apply: the failure is loud, at plan time, and named the cap.
+  # Note it will not fail at plan on a first apply. user_data_base64 depends on
+  # local.run_id, which derives from random_id and timestamp(), and on
+  # local.bucket, which can be an unresolved aws_s3_bucket id, so the value is
+  # unknown until apply. That is exactly how the failure above went: the bucket
+  # and security group existed before anything checked the length.
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
     run_id                = local.run_id
     shard_index           = count.index

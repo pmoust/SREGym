@@ -136,6 +136,10 @@ if [ -n "${BRAIN_ENV_EXTRA:-}" ]; then
     key="${entry%%=*}"
     value="${entry#*=}"
 
+    # Entries are applied as they are read, so a malformed one partway down the
+    # list dies with the entries above it already written. The instance
+    # terminates on any die here, so a half-applied .env never starts a stack,
+    # and terraform's own validation rejects both malformed shapes at plan.
     [ "$key" = "$entry" ] && die "BRAIN_ENV_EXTRA entry has no '=': $entry"
 
     # The key reaches sed as a pattern and has to be a valid .env name, so it is

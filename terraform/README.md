@@ -80,6 +80,16 @@ minutes and severs the connection whatever the workflow does, so an
 `agent_timeout_seconds` above roughly 45m needs that raised too
 (`cmd/brain/internal/chatsvc/wiring.go`).
 
+Raising the turn timeout also lengthens how long an abandoned turn survives.
+`main.py` kills the agent at `agent_timeout` and that budget covers both phases
+of an attempt, but brain-go does not stop: it logs that the workflow continues
+when the client disconnects. Under the old 15-minute cap an orphaned turn died
+within 15 minutes; at twice the harness budget it can keep spending Bedrock
+tokens and tworker capacity for up to that long while the next problem is
+already running, on a stack all slots on the box share. Still a clear
+improvement, since problems that used to be cut off now reach mitigation, but
+it is a real cost of the change rather than a free one.
+
 The applied keys are logged by `setup_brain_go.sh` as a single
 `run-configured keys:` line, so the configuration is recoverable from the
 bootstrap log after the instance self-terminates. Values are not logged: the
