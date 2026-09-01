@@ -51,6 +51,7 @@ sits on the agent timeout and averaging it in measures the cap, not the agent.
 import argparse
 import csv
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -210,6 +211,58 @@ def score(rows: list[dict]) -> dict:
     }
 
 
+def _token_files(run_dir: Path) -> list[Path]:
+    """Every token scrape belonging to this run, in both trees it can land in.
+
+    archive_run.sh splits a run in two: results under sregym-results/<run-id>
+    and logs under sregym-run-logs/<run-id>, siblings of each other. The scrape
+    is a log, so passing the results directory, which is the directory a person
+    passes, found nothing and the report said "not archived" while the file sat
+    one directory over. The smoke run on 2026-09-01 archived 8 real series and
+    was reported as having none.
+
+    SREGYM_TOKEN_DIR adds a third root, for an archive laid out some other way.
+    It adds rather than replaces: a scrape found by the default derivation still
+    counts, so setting it cannot silently hide data that was already being read.
+    """
+    roots = [run_dir]
+
+    override = os.environ.get("SREGYM_TOKEN_DIR")
+    if override:
+        roots.append(Path(override))
+
+    # The sibling log tree, derived rather than assumed: only added when the
+    # path really does contain the results directory name.
+    #
+    # Both the given path and the resolved one, because resolve() dereferences
+    # symlinks first. Review found that a symlinked sregym-results directory
+    # resolves to a name without "sregym-results" in it, so the derivation was
+    # skipped and the scrape went unfound: the same "not archived" failure this
+    # function exists to remove, reached a different way.
+    for candidate in (run_dir, run_dir.resolve()):
+        parts = list(candidate.parts)
+        if "sregym-results" not in parts:
+            continue
+        # rindex, not index: the run directory is the deepest occurrence, so a
+        # path nested under a backup directory of the same name still derives
+        # the sibling next to the run rather than next to the backup.
+        last = len(parts) - 1 - parts[::-1].index("sregym-results")
+        parts[last] = "sregym-run-logs"
+        roots.append(Path(*parts))
+
+    # No file-level dedupe. Reading the same scrape twice is harmless: a series
+    # is keyed by its whole label set and collapsed with max(), so a repeat of
+    # the same line contributes nothing. An earlier version resolved paths into
+    # a seen-set for this, which no mutation could reach, because the max was
+    # already doing the work.
+    files: list[Path] = []
+    for root in roots:
+        if root.is_dir():
+            files.extend(root.rglob("*tokens*.prom"))
+
+    return files
+
+
 def tokens(run_dir: Path) -> dict | None:
     """Per-run token totals from the Prometheus scrape, if it was archived.
 
@@ -235,7 +288,7 @@ def tokens(run_dir: Path) -> dict | None:
     kinds: dict[str, str] = {}
     found = False
 
-    for prom in sorted(run_dir.rglob("*tokens*.prom")):
+    for prom in sorted(_token_files(run_dir)):
         found = True
         for line in prom.read_text(errors="replace").splitlines():
             line = line.strip()
@@ -335,7 +388,9 @@ def render(s: dict, tok: dict | None) -> str:
     out.append("")
     out.append("  The first pair covers completed attempts only, which describes the agent")
     out.append("  when it finishes. The cap-imputed pair gives a censored attempt the")
-    out.append(f"  timeout ({s.get('timeout_cap_seconds')}s) and includes it, which is what the paper")
+    cap = s.get("timeout_cap_seconds")
+    cap_text = f"{cap:.0f}s" if cap else "the agent timeout"
+    out.append(f"  timeout ({cap_text}) and includes it, which is what the paper")
     out.append("  does, so it is the pair to compare against a Table 3 figure. Quoting the")
     out.append("  completed-only mean beside a paper number compares two different")
     out.append("  statistics.")
@@ -343,10 +398,22 @@ def render(s: dict, tok: dict | None) -> str:
 
     out.append("")
     if tok:
-        total = sum(v for k, v in tok.items() if k in ("input", "output"))
-        out.append(f"  Tokens             {total or sum(tok.values()):,}   {tok}")
+        counts = {k: v for k, v in tok.items() if k != "series"}
+        fresh = counts.get("input", 0) + counts.get("output", 0)
+        cached = counts.get("cache_read", 0) + counts.get("cache_write", 0)
+        out.append(f"  Tokens             {fresh + cached:,} across {tok.get('series', 0)} thread series")
+        for kind in sorted(counts):
+            out.append(f"    {kind:<16} {counts[kind]:>12,}")
+        if cached:
+            # Reporting input+output alone hid a cache_read four times larger
+            # than every other column combined, which is most of what the run
+            # actually consumed and is priced differently.
+            out.append("  input and output are the fresh tokens; cache_read and cache_write")
+            out.append("  are billed at different rates, so quote which total you mean.")
     else:
         out.append("  Tokens             not archived for this run")
+        out.append("  scrape_tokens.sh writes sregym-tokens.prom into the log tree; check")
+        out.append("  that sync_logs ran, or point SREGYM_TOKEN_DIR at it.")
 
     out.append("")
     out.append(

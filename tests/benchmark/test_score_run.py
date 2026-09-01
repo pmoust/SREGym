@@ -303,3 +303,130 @@ def test_the_censored_flag_is_not_true_when_nothing_is_absent(tmp_path):
     s = score_run.score(score_run.load(_run(tmp_path, rows)))
 
     assert s["mitigation"]["absent_all_censored"] is None
+
+
+def test_the_scrape_is_found_in_the_sibling_log_tree(tmp_path):
+    """archive_run.sh splits a run into two sibling trees.
+
+    Results go to sregym-results/<run-id> and logs to
+    sregym-run-logs/<run-id>. The scrape is a log, so passing the results
+    directory, which is the directory a person passes, found nothing. The smoke
+    run on 2026-09-01 archived 8 real series and was reported as having none,
+    for the one metric that had never been measured at all.
+    """
+    results = tmp_path / "sregym-results" / "run-x"
+    logs = tmp_path / "sregym-run-logs" / "run-x" / "shard-0" / "logs"
+    results.mkdir(parents=True)
+    logs.mkdir(parents=True)
+    (logs / "sregym-tokens.prom").write_text(_tok("output", 4242, "cli:inv-a") + "\n")
+
+    t = score_run.tokens(results)
+
+    assert t is not None, "did not look in the sibling log tree"
+    assert t["output"] == 4242
+
+
+def test_the_same_scrape_read_twice_counts_once(tmp_path):
+    """Both roots are searched, so one file can be reached by two paths.
+
+    That is harmless by construction rather than by a dedupe: a series is keyed
+    by its whole label set and collapsed with max(), so re-reading the same
+    line adds nothing. This pins that, because the obvious alternative, summing
+    every line, would double the run's tokens.
+    """
+    results = tmp_path / "sregym-results" / "run-x"
+    logs = tmp_path / "sregym-run-logs" / "run-x"
+    results.mkdir(parents=True)
+    logs.mkdir(parents=True)
+    line = _tok("output", 100, "cli:inv-a") + "\n"
+    (results / "sregym-tokens.prom").write_text(line)
+    (logs / "sregym-tokens.prom").write_text(line)
+
+    t = score_run.tokens(results)
+
+    assert t["output"] == 100, "the same series was added twice"
+    assert t["series"] == 1
+
+
+def test_the_cap_sentence_reads_when_nothing_was_censored(tmp_path):
+    """It printed "the timeout (Nones)" when there was no cap to name."""
+    rows = [_row("a", diag="True", mitig="True", ttl="10", ttm="20")]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert "Nones" not in score_run.render(s, None)
+
+
+def test_the_token_line_does_not_hide_the_cache_columns(tmp_path):
+    """Reporting input+output alone hid a cache_read four times larger than
+    every other column combined, which is most of what the run consumed."""
+    results = tmp_path / "sregym-results" / "run-x"
+    results.mkdir(parents=True)
+    (results / "sregym-tokens.prom").write_text(
+        "\n".join(
+            [
+                _tok("input", 100, "cli:inv-a"),
+                _tok("output", 200, "cli:inv-a"),
+                _tok("cache_read", 9000, "cli:inv-a"),
+            ]
+        )
+        + "\n"
+    )
+    rows = [_row("a", diag="True", mitig="True", ttl="10", ttm="20")]
+    text = score_run.render(score_run.score(score_run.load(_run(tmp_path / "slot", rows))), score_run.tokens(results))
+
+    assert "9,300" in text, "headline excluded the cache columns"
+    assert "cache_read" in text
+
+
+def test_a_symlinked_results_directory_still_finds_the_sibling_tree(tmp_path):
+    """resolve() dereferences before the name check.
+
+    Review found that a symlinked sregym-results directory resolves to a name
+    without "sregym-results" in it, so the sibling derivation was skipped and
+    the scrape went unfound: the same "not archived" failure the derivation
+    exists to remove, reached a different way.
+    """
+    real = tmp_path / "archive-2026" / "run-x"
+    real.mkdir(parents=True)
+    logs = tmp_path / "sregym-run-logs" / "run-x"
+    logs.mkdir(parents=True)
+    (logs / "sregym-tokens.prom").write_text(_tok("output", 777, "cli:inv-a") + "\n")
+    (tmp_path / "sregym-results").symlink_to(tmp_path / "archive-2026")
+
+    t = score_run.tokens(tmp_path / "sregym-results" / "run-x")
+
+    assert t is not None, "the symlinked path defeated the derivation"
+    assert t["output"] == 777
+
+
+def test_the_deepest_results_directory_is_the_one_used(tmp_path):
+    """A path nested under a backup of the same name must derive the sibling
+    next to the run, not next to the backup."""
+    run = tmp_path / "sregym-results" / "backup" / "sregym-results" / "run-x"
+    run.mkdir(parents=True)
+    logs = tmp_path / "sregym-results" / "backup" / "sregym-run-logs" / "run-x"
+    logs.mkdir(parents=True)
+    (logs / "sregym-tokens.prom").write_text(_tok("output", 555, "cli:inv-a") + "\n")
+
+    t = score_run.tokens(run)
+
+    assert t is not None, "derived the sibling from the wrong occurrence"
+    assert t["output"] == 555
+
+
+def test_the_token_dir_override_adds_rather_than_replaces(tmp_path, monkeypatch):
+    """Documented as an override and implemented as an addition. Adding is the
+    safer of the two, so the docstring was corrected to match: setting it
+    cannot silently hide a scrape the default derivation already found."""
+    results = tmp_path / "sregym-results" / "run-x"
+    elsewhere = tmp_path / "somewhere-else"
+    results.mkdir(parents=True)
+    elsewhere.mkdir()
+    (results / "sregym-tokens.prom").write_text(_tok("output", 10, "cli:inv-a") + "\n")
+    (elsewhere / "sregym-tokens.prom").write_text(_tok("output", 20, "cli:inv-b") + "\n")
+
+    monkeypatch.setenv("SREGYM_TOKEN_DIR", str(elsewhere))
+    t = score_run.tokens(results)
+
+    assert t["output"] == 30, "the override replaced instead of adding"
+    assert t["series"] == 2
