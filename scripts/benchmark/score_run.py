@@ -92,6 +92,16 @@ def score(rows: list[dict]) -> dict:
     diag_ok = [r for r in diag_graded if _val(r, "Diagnosis.success") == "True"]
     mitig_graded = [r for r in rows if _val(r, "Mitigation.success")]
     mitig_ok = [r for r in mitig_graded if _val(r, "Mitigation.success") == "True"]
+    # Anything neither True nor False was counted as a graded failure, silently
+    # moving the rate. Collected so the reader is told rather than left guessing.
+    odd_verdicts = sorted(
+        {
+            _val(r, key)
+            for r in rows
+            for key in ("Diagnosis.success", "Mitigation.success")
+            if _val(r, key) not in ("", "True", "False")
+        }
+    )
 
     # Both correct. Absent mitigation cannot be an end-to-end success either
     # way, so E2E has no graded/strict split on the numerator, only on the
@@ -118,7 +128,17 @@ def score(rows: list[dict]) -> dict:
     completed = [r for r in rows if _val(r, "timed_out") != "True"]
     ttl = floats("TTL", completed)
     ttm = floats("TTM", completed)
-    phase = [float(_val(r, "TTM")) - float(_val(r, "TTL")) for r in completed if _val(r, "TTM") and _val(r, "TTL")]
+    # Parsed defensively, the way floats() above already is. This called
+    # float() directly, so one unparseable TTL took the whole run's report
+    # down with a traceback while every other field degraded quietly. The
+    # CSVs already carry nine header shapes (#39), so a malformed numeric
+    # field is not far-fetched.
+    phase = []
+    for r in completed:
+        try:
+            phase.append(float(_val(r, "TTM")) - float(_val(r, "TTL")))
+        except ValueError:
+            continue
 
     def stats(xs: list[float]) -> dict | None:
         if not xs:
@@ -130,6 +150,28 @@ def score(rows: list[dict]) -> dict:
             "median": round(statistics.median(xs), 1),
             "sd": round(statistics.stdev(xs), 1) if len(xs) > 1 else 0.0,
         }
+
+    # The paper imputes the cap for a timed-out run and includes it, so failure
+    # cost lands in the mean instead of being selected out. Excluding censored
+    # attempts answers a different question, "how long does the agent take when
+    # it finishes", and both are worth having: the first is what a Table 3
+    # figure can be compared against, the second is what describes the agent.
+    # Reporting only one of them silently picks a convention, which is the thing
+    # this script exists not to do.
+    cap = None
+    for r in rows:
+        try:
+            cap = max(cap or 0.0, float(_val(r, "agent_timeout_seconds")))
+        except ValueError:
+            continue
+    if cap is None and censored:
+        # No column, so fall back to the longest censored attempt, which sits on
+        # the cap by definition.
+        observed = [x for x in (floats("TTL", censored) or []) if x]
+        cap = max(observed) if observed else None
+
+    ttl_capped = floats("TTL", completed) + [cap] * len(censored) if cap else []
+    ttm_capped = floats("TTM", completed) + [cap] * len(censored) if cap else []
 
     problems = {_val(r, "problem_id") for r in rows}
 
@@ -149,7 +191,7 @@ def score(rows: list[dict]) -> dict:
             "strict_pct": _rate(len(mitig_ok), attempts),
             "graded_pct": _rate(len(mitig_ok), len(mitig_graded)),
             "absent": len(absent_mitig),
-            "absent_all_censored": len(absent_mitig) == len(absent_and_censored),
+            "absent_all_censored": (None if not absent_mitig else len(absent_mitig) == len(absent_and_censored)),
         },
         "e2e": {
             "correct": len(e2e_ok),
@@ -158,8 +200,12 @@ def score(rows: list[dict]) -> dict:
             "graded": len(both_graded),
         },
         "censored": len(censored),
+        "odd_verdicts": odd_verdicts,
         "ttd_seconds": stats(ttl),
         "ttm_seconds": stats(ttm),
+        "ttd_seconds_cap_imputed": stats(ttl_capped),
+        "ttm_seconds_cap_imputed": stats(ttm_capped),
+        "timeout_cap_seconds": cap,
         "mitigation_phase_seconds": stats(phase),
     }
 
@@ -167,29 +213,56 @@ def score(rows: list[dict]) -> dict:
 def tokens(run_dir: Path) -> dict | None:
     """Per-run token totals from the Prometheus scrape, if it was archived.
 
-    brain-go labels llm_tokens_total by thread_id and the driver sets one per
-    problem, so this is attributable. Counters are cumulative, so the last
-    scrape before termination is the one that counts; scrape_tokens.sh writes
-    exactly that.
+    A Prometheus counter is identified by its whole label set, and
+    llm_tokens_total carries thread_id, which the driver sets per problem. So a
+    run has one series per (problem, token_type), not one series per
+    token_type.
+
+    That means the aggregation is: take the maximum within each series, because
+    a counter is cumulative and scrape_tokens.sh may write several scrapes, then
+    sum across series, because different problems consumed different tokens.
+
+    Doing max() across series instead keeps the single busiest problem and
+    discards every other one. Review measured that at roughly 35x low on a
+    realistic 63-thread scrape, printed in the same format as a correct number,
+    for the one Table 3 metric that has never been measured at all. A silently
+    low figure is worse than the "not archived" line this returns without data.
     """
-    totals: dict[str, float] = {}
+    # Keyed by the full label set, so two processes scraping the same run (chat
+    # on 9091 and tworker on 9092) contribute their own series rather than one
+    # overwriting the other.
+    series: dict[str, float] = {}
+    kinds: dict[str, str] = {}
     found = False
+
     for prom in sorted(run_dir.rglob("*tokens*.prom")):
         found = True
         for line in prom.read_text(errors="replace").splitlines():
-            if not line.startswith("llm_tokens_total"):
+            line = line.strip()
+            if not line.startswith("llm_tokens_total{") or " " not in line:
                 continue
+            labels, _, raw = line.rpartition(" ")
             try:
-                labels, value = line.rsplit(" ", 1)
-                kind = labels.split('token_type="', 1)[1].split('"', 1)[0]
-                totals[kind] = max(totals.get(kind, 0.0), float(value))
-            except (IndexError, ValueError):
+                value = float(raw)
+            except ValueError:
                 continue
+            if 'token_type="' not in labels:
+                continue
+            kind = labels.split('token_type="', 1)[1].split('"', 1)[0]
+            series[labels] = max(series.get(labels, 0.0), value)
+            kinds[labels] = kind
 
     if not found:
         return None
 
-    return {k: int(v) for k, v in sorted(totals.items())}
+    totals: dict[str, float] = {}
+    for labels, value in series.items():
+        totals[kinds[labels]] = totals.get(kinds[labels], 0.0) + value
+
+    out = {k: int(v) for k, v in sorted(totals.items())}
+    out["series"] = len(series)
+
+    return out
 
 
 def _pct(value: float | None) -> str:
@@ -246,8 +319,26 @@ def render(s: dict, tok: dict | None) -> str:
         out.append(
             f"  {label:<18} mean {st['mean']:>7.1f}s   median {st['median']:>7.1f}s   sd {st['sd']:>6.1f}   n={st['n']}"
         )
-    out.append("  Completed attempts only. A censored attempt's TTL sits on the cap, so")
-    out.append("  averaging it in measures the timeout rather than the agent.")
+    if s.get("timeout_cap_seconds") and s["censored"]:
+        out.append("")
+        for label, key in (
+            ("TTD cap-imputed", "ttd_seconds_cap_imputed"),
+            ("TTM cap-imputed", "ttm_seconds_cap_imputed"),
+        ):
+            st = s[key]
+            if st is None:
+                continue
+            out.append(
+                f"  {label:<18} mean {st['mean']:>7.1f}s   median {st['median']:>7.1f}s"
+                f"   sd {st['sd']:>6.1f}   n={st['n']}"
+            )
+    out.append("")
+    out.append("  The first pair covers completed attempts only, which describes the agent")
+    out.append("  when it finishes. The cap-imputed pair gives a censored attempt the")
+    out.append(f"  timeout ({s.get('timeout_cap_seconds')}s) and includes it, which is what the paper")
+    out.append("  does, so it is the pair to compare against a Table 3 figure. Quoting the")
+    out.append("  completed-only mean beside a paper number compares two different")
+    out.append("  statistics.")
     out.append("  TTM shares TTD's clock, so it includes TTD.")
 
     out.append("")
@@ -258,12 +349,15 @@ def render(s: dict, tok: dict | None) -> str:
         out.append("  Tokens             not archived for this run")
 
     out.append("")
-    out.append("  For orientation, the paper's Stratus row (different agent, judge and")
     out.append(
-        "  problem set, so not a target): "
+        "  For orientation, the paper's Stratus row: "
         f"Diag {PAPER_STRATUS['diag']}%, Mitig {PAPER_STRATUS['mitig']}%, "
         f"E2E {PAPER_STRATUS['e2e']}%, TTD {PAPER_STRATUS['ttd']}s, TTM {PAPER_STRATUS['ttm']}s."
     )
+    out.append("  Not a target and not like-for-like: a different agent, a different judge,")
+    out.append("  and 90 problems x 3 rather than 21 x 3. Compare its timings against the")
+    out.append("  cap-imputed pair above rather than the completed-only pair, because that")
+    out.append("  is the convention it used.")
 
     return "\n".join(out)
 

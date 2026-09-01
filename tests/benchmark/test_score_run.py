@@ -7,8 +7,11 @@ and the repo's own visualizer applies the strict reading silently.
 
 import csv
 import importlib.util
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 _SPEC = importlib.util.spec_from_file_location(
     "score_run",
@@ -26,6 +29,7 @@ _COLUMNS = [
     "TTL",
     "TTM",
     "timed_out",
+    "agent_timeout_seconds",
 ]
 
 
@@ -157,12 +161,145 @@ def test_the_archived_run_reproduces_its_published_figures():
     reported as Diag 47.6%, Mitig 52.4%, E2E 47.6%. If this file ever disagrees,
     one of the two is wrong and it matters which.
     """
-    archive = Path("/Users/nofire/nofire-repos/brain-go/sregym-results/run-20260829-1325-a4d231c1")
+    archive = (
+        Path(os.environ.get("SREGYM_ARCHIVE_DIR", Path.home() / "nofire-repos" / "brain-go" / "sregym-results"))
+        / "run-20260829-1325-a4d231c1"
+    )
     if not archive.is_dir():
-        return  # the archive is not part of this repo
+        # skip, not return. A bare return reports as passed, so this test was
+        # green on every machine that does not have the archive, including CI,
+        # while asserting nothing. Review found it dead everywhere but one
+        # laptop, which is worse than not having it.
+        pytest.skip(f"archive not present at {archive}; set SREGYM_ARCHIVE_DIR to run this")
 
     s = score_run.score(score_run.load(archive))
     assert s["attempts"] == 21
     assert s["diagnosis"]["strict_pct"] == 47.6
     assert s["mitigation"]["strict_pct"] == 52.4
     assert s["e2e"]["strict_pct"] == 47.6
+
+
+def _prom(tmp_path, lines):
+    p = tmp_path / "sregym-tokens.prom"
+    p.write_text("\n".join(lines) + "\n")
+    return tmp_path
+
+
+def _tok(kind, value, thread, port="9091"):
+    return (
+        f'llm_tokens_total{{provider="bedrock",model="m",token_type="{kind}",'
+        f'account_id="1",user_id="1",thread_id="{thread}",job="{port}"}} {value}'
+    )
+
+
+def test_tokens_sum_across_threads_rather_than_keeping_the_busiest(tmp_path):
+    """The bug that made this metric silently ~35x low.
+
+    llm_tokens_total is labelled by thread_id and the driver sets one per
+    problem, so a run has one counter series per problem. Taking max() across
+    series keeps the busiest problem and discards every other one.
+    """
+    d = _prom(
+        tmp_path,
+        [
+            _tok("output", 500, "cli:sregym-a-1"),
+            _tok("output", 3000, "cli:sregym-b-2"),
+            _tok("input", 100, "cli:sregym-a-1"),
+            _tok("input", 200, "cli:sregym-b-2"),
+        ],
+    )
+    t = score_run.tokens(d)
+
+    assert t["output"] == 3500, "kept one thread instead of summing"
+    assert t["input"] == 300
+    assert t["series"] == 4
+
+
+def test_tokens_take_the_maximum_within_one_series(tmp_path):
+    """A counter is cumulative, so repeated scrapes of the same series must not
+    be added together."""
+    d = _prom(
+        tmp_path,
+        [
+            _tok("output", 100, "cli:sregym-a-1"),
+            _tok("output", 400, "cli:sregym-a-1"),  # a later scrape of the same series
+        ],
+    )
+
+    assert score_run.tokens(d)["output"] == 400
+
+
+def test_tokens_keep_both_processes(tmp_path):
+    """chat and tworker are separate processes exporting the same thread, and
+    both contributed. Collapsing them loses one process's work."""
+    d = _prom(
+        tmp_path,
+        [
+            _tok("output", 700, "cli:sregym-a-1", port="9091"),
+            _tok("output", 250, "cli:sregym-a-1", port="9092"),
+        ],
+    )
+
+    assert score_run.tokens(d)["output"] == 950
+
+
+def test_tokens_are_none_when_nothing_was_archived(tmp_path):
+    assert score_run.tokens(tmp_path) is None
+
+
+def test_an_ungraded_diagnosis_is_excluded_from_the_graded_rate(tmp_path):
+    """Diagnosis gets the same strict/graded treatment as mitigation and had no
+    test, so a mutation collapsing its denominator to the attempt count passed
+    the whole suite."""
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="10", ttm="20"),
+        _row("b", mitig="False", ttl="10", ttm="20"),  # no diagnosis verdict
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["diagnosis"]["strict_pct"] == 50.0
+    assert s["diagnosis"]["graded_pct"] == 100.0
+    assert s["diagnosis"]["ungraded"] == 1
+
+
+def test_a_verdict_that_is_neither_true_nor_false_is_reported(tmp_path):
+    """It used to be counted as a graded failure, moving the rate silently."""
+    rows = [_row("a", diag="True", mitig="MAYBE", ttl="10", ttm="20")]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["odd_verdicts"] == ["MAYBE"]
+
+
+def test_an_unparseable_timing_does_not_take_the_report_down(tmp_path):
+    """Every other field degrades quietly; this one used to raise."""
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="not_a_number", ttm="20"),
+        _row("b", diag="True", mitig="True", ttl="10", ttm="30"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["mitigation_phase_seconds"]["n"] == 1
+    assert s["ttd_seconds"]["n"] == 1
+
+
+def test_censored_attempts_are_imputed_at_the_cap_for_the_paper_comparison(tmp_path):
+    """The paper gives a timed-out run the cap and includes it. Excluding them
+    answers a different question, so both are reported."""
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="100", ttm="200"),
+        dict(_row("b", diag="False", timed_out="True", ttl="1800"), agent_timeout_seconds="1800"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["ttd_seconds"]["n"] == 1 and s["ttd_seconds"]["mean"] == 100.0
+    assert s["ttd_seconds_cap_imputed"]["n"] == 2
+    assert s["ttd_seconds_cap_imputed"]["mean"] == 950.0
+    assert s["timeout_cap_seconds"] == 1800.0
+
+
+def test_the_censored_flag_is_not_true_when_nothing_is_absent(tmp_path):
+    """0 of 0 absent verdicts being censored is not a fact about the run."""
+    rows = [_row("a", diag="True", mitig="True", ttl="10", ttm="20")]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["mitigation"]["absent_all_censored"] is None

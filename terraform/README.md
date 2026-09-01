@@ -166,37 +166,19 @@ scripts/benchmark/score_run.py sregym-results/<run-id>        # the six metrics
 scripts/benchmark/score_run.py sregym-results/<run-id> --json
 ```
 
-`TTL` in the result CSVs is the paper's TTD. The name comes from AIOpsLab's
-detect/localize/mitigate taxonomy and the judge's own first dimension is "D1
-Fault Localization"; there is no TTD column. TTL and TTM share one clock, reset
-after deployment and fault injection, so neither includes cluster setup and TTM
-includes TTD rather than timing the mitigation phase alone.
+It prints Diag, Mitig and E2E each under two denominators, TTD and TTM each
+under two timing conventions, and tokens. The reasoning for each pair lives in
+the script's own module docstring rather than here, so there is one copy to keep
+true: run `python3 -c "import runpy; runpy.run_path('scripts/benchmark/score_run.py')" --help`
+or just read the file.
 
-### Absent is not false
-
-A missing `Mitigation.success` means the harness killed the agent before the
-mitigation oracle ran, not that the agent failed to mitigate. In
-`run-20260831-1752` the coupling is exact: 18 attempts have no mitigation
-verdict, 18 have `timed_out=True`, and they are the same 18.
-
-So the same 63 attempts read two ways:
-
-| reading | mitigation |
-|---|---|
-| absent counted as failure | 23/63 = 36.5% |
-| absent excluded | 23/45 = 51.1% |
-
-Fifteen points, from a convention rather than from the agent. `score_run.py`
-prints both and refuses to choose; state which column you are quoting.
-
-`visualizer/queries.py` maps an empty string to `False`, so it applies the
-strict reading silently. It is also undocumented, referenced by no test, and
-carries a hardcoded DSN, so it is not the scoring path for these runs. See #39.
-
-A run where mitigation was never graded at all and nothing was censored is a
-third case: the stage did not run. `score_run.py` names that and declines to
-report a mitigation or E2E figure, because 0/0 is unknown rather than zero. One
-archived run is exactly this.
+The short version, because it decides what you are allowed to quote: a missing
+`Mitigation.success` means the harness killed the agent before the oracle ran,
+not that the agent failed to mitigate, and on `run-20260831-1752` the 18 absent
+verdicts are exactly the 18 timed-out attempts. That is 23/63 = 36.5% or
+23/45 = 51.1% for the same run. The script prints both and declines to choose;
+say which one you are quoting. `visualizer/queries.py` maps an empty string to
+`False`, so it applies the strict reading silently. See #39.
 
 Instances terminate themselves when their shard finishes. `terraform destroy`
 then removes the bucket, security group, and the role (unless
