@@ -11,6 +11,12 @@ from sregym.service.kubectl import KubeCtl
 
 logger = logging.getLogger("all.sregym.mcp_server")
 
+# How long a freshly started port-forward may take to serve traffic before it is
+# treated as failed. It is not instant: the process binds immediately but cannot
+# answer until the pod behind the service does, and a pod that satisfied
+# wait_for_ready can still need a few seconds more.
+PORT_FORWARD_READY_TIMEOUT = 20
+
 
 class MCPServer:
     def __init__(self):
@@ -66,7 +72,18 @@ class MCPServer:
         if self._is_running():
             logger.info("MCP server already running, skipping redeploy.")
             if self._forward_is_external():
-                logger.info("Port-forward is owned externally, leaving it alone.")
+                # Still probe. Not acting on the result is the point; not
+                # looking would delete the only signal there is. The 15
+                # "absent or stale" lines that diagnosed run-20260831-1752 came
+                # from exactly this check, and a regression investigated after
+                # this flag ships would otherwise have strictly less to go on.
+                if self._is_port_forward_healthy():
+                    logger.info("Port-forward is owned externally and serving.")
+                else:
+                    logger.warning(
+                        "Port-forward is owned externally and NOT serving. "
+                        "Leaving it to its owner; expect tool calls to time out until it recovers."
+                    )
             elif not self._is_port_forward_healthy():
                 logger.info("Port-forward is absent or stale, restarting.")
                 self.start_port_forward()
@@ -150,20 +167,37 @@ class MCPServer:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            time.sleep(3)
-
             # Serving traffic, not merely alive. `kubectl port-forward` stays
             # running while forwarding to a pod that never becomes ready, and a
             # process check cannot tell the difference. Everything downstream
             # then pays a full call timeout per request against a socket that
             # accepts and never answers.
-            if self._is_port_forward_healthy():
+            #
+            # Polled to a deadline rather than checked once. A pod that passed
+            # wait_for_ready can still need a few seconds before its SSE
+            # endpoint answers, and a single check three seconds in would tear
+            # down a forward that was about to work -- three times, ending with
+            # no forward at all, where the old poll() check would have kept one
+            # that then served. That is the one way this change could be worse
+            # than what it replaced.
+            healthy = False
+            deadline = time.time() + PORT_FORWARD_READY_TIMEOUT
+            while time.time() < deadline:
+                if self.port_forward_process.poll() is not None:
+                    break  # the process itself exited; no point waiting out the deadline
+                if self._is_port_forward_healthy():
+                    healthy = True
+                    break
+                time.sleep(2)
+
+            if healthy:
                 os.environ["MCP_SERVER_PORT"] = str(self.port)
                 logger.info(f"Port forwarding established at {self.port}. MCP_SERVER_PORT set.")
                 break
 
             logger.warning(
-                "Port forwarding did not become healthy "
+                "Port forwarding did not become healthy within "
+                f"{PORT_FORWARD_READY_TIMEOUT}s "
                 f"(process {'alive' if self.port_forward_process.poll() is None else 'exited'}). Retrying..."
             )
             self.stop_port_forward()

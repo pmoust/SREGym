@@ -35,8 +35,17 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
 - `sregym/service/apps/astronomy_shop.py` — drops the flagd-ui sidecar and
   prunes two dead collector exporters. **Not env-gated**, so it applies to every
   run. Revert it for any run that claims to be stock.
-- `sregym/service/mcp_server.py` — the host side of the MCP port-forward reads
-  `MCP_SERVER_PORT` instead of hardcoding 9954. Candidate for upstreaming.
+- `sregym/service/mcp_server.py` — three changes. The host side of the MCP
+  port-forward reads `MCP_SERVER_PORT` instead of hardcoding 9954.
+  `SREGYM_EXTERNAL_PORT_FORWARD` (off by default) tells `deploy()` that a
+  caller owns the forward, so it probes and reports but never starts,
+  kills or replaces one; the benchmark bootstrap owns it for the life of a
+  slot, which is longer than one problem. And `start_port_forward` now
+  accepts a forward only once it serves traffic, polled to a deadline,
+  rather than on `poll() is None`: a process that binds but never answers
+  used to be declared healthy, and every later call paid a full timeout.
+  The last of the three is a plain bug fix and the strongest candidate for
+  upstreaming; the flag is mirror-specific.
 - `sregym/paths.py` — `SREGYM_CACHE_DIR` overrides the cache location, so runs
   sharing a host do not share a per-cluster baseline snapshot. Candidate for
   upstreaming.

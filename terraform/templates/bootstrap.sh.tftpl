@@ -77,7 +77,11 @@ sync_logs() {
     "$WORKDIR/scripts/benchmark/scrape_tokens.sh" /var/log/sregym-tokens.prom || true
   fi
 
-  for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log /var/log/sregym-tokens.prom; do
+  # sregym-pf-*.log is the port-forward's own stderr. Without it a forward
+  # that died leaves no trace off the box, which is how run-20260831-1752 had
+  # to be diagnosed from tool-call timings instead of from the cause.
+  for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log \
+           /var/log/sregym-pf-*.log /var/log/sregym-tokens.prom; do
     [ -f "$f" ] || continue
     aws s3 cp "$f" "$S3_PREFIX/logs/$(basename "$f")" \
       --region "$REGION" --only-show-errors || true
@@ -434,11 +438,23 @@ run_slot() {
     # apply when the deployment is already ready.
     #
     # It used to call the conductor's per-problem deploy() "a no-op". It was
-    # not: it lsof-killed this forward and installed an unverified replacement,
-    # 15 times in run-20260831-1752, and the attempt after each restart stalled
-    # in 11 of 15. SREGYM_EXTERNAL_PORT_FORWARD below is what makes it true.
+    # not, though not for the reason first supposed: deploy() only restarts a
+    # forward its own probe has already found dead, so it never replaced a
+    # healthy one. What it did was accept the replacement on process liveness
+    # alone, so a forward that bound but never served was declared good and
+    # every later tool call paid a 30s timeout against it. That happened 15
+    # times in run-20260831-1752 and the attempt after stalled in 12 of 15.
+    # SREGYM_EXTERNAL_PORT_FORWARD below gives the forward one owner; the
+    # health-check fix in mcp_server.py is what stops the acceptance.
     echo "[slot $slot] deploying the MCP server into $KIND_CLUSTER_NAME"
-    if ! uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/deploy_mcp.py"; then
+    # Also external here. deploy_mcp.py calls stop_port_forward() on the
+    # documented contract that it tears its own forward down, and with the
+    # early-return in start_port_forward that call would see no handle and do
+    # nothing, leaving a forward this slot did not start. Setting the flag for
+    # this call too means deploy() never starts one, the teardown is honestly
+    # a no-op, and the flag means one thing for the whole slot.
+    if ! SREGYM_EXTERNAL_PORT_FORWARD=1 \
+         uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/deploy_mcp.py"; then
       echo "[slot $slot] MCP server deploy failed, slot aborted"
       return 1
     fi
@@ -477,6 +493,13 @@ run_slot() {
     fi
     echo "[slot $slot] MCP port-forward serving on $MCP_SERVER_PORT (pid $PF_PID)"
 
+    # Through a file, not a variable. The supervisor below runs in a subshell,
+    # so a PF_PID it assigns there is invisible out here: teardown would kill
+    # the original pid, already killed by the supervisor, while the forward
+    # really running had been reparented to init and outlived the slot.
+    PF_PID_FILE="$slot_dir/mcp-pf.pid"
+    echo "$PF_PID" >"$PF_PID_FILE"
+
     # Supervise it. A forward dies on its own: three attempts in
     # run-20260831-1752 stalled with nothing logging a restart. The conductor
     # no longer watches it either (SREGYM_EXTERNAL_PORT_FORWARD below), so
@@ -484,22 +507,38 @@ run_slot() {
     #
     # Probed, not pinged: the process stays alive while forwarding to a pod
     # that never becomes ready, and requests then cost a full timeout each.
-    # 15s because brain-go's per-call MCP timeout is 30s and calls serialise.
+    # ~20s a cycle, not 15: curl blocks the full --max-time against an endless
+    # text/event-stream, so a healthy probe spends 5s on top of the sleep.
+    # Worst case is roughly two cycles of blindness, so a death still costs
+    # one or two dead calls rather than none -- against streaks of 28 to 85
+    # measured in run-20260831-1752.
     (
       while true; do
         sleep 15
-        if [ "$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5                 "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)" = "200" ]; then
+        pf_code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5 \
+          "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)
+        if [ "$pf_code" = "200" ]; then
           continue
         fi
         echo "[slot $slot] MCP port-forward stopped serving, restarting"
-        kill "$PF_PID" 2>/dev/null || true
+        kill "$(cat "$PF_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+        # Let the old process release the port before rebinding, or the new
+        # kubectl loses the race, exits, and the port stays dead a full cycle.
+        sleep 1
         nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
           -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
-        PF_PID=$!
+        echo "$!" >"$PF_PID_FILE"
       done
     ) &
     PF_WATCH_PID=$!
     echo "[slot $slot] MCP port-forward supervisor started (pid $PF_WATCH_PID)"
+
+    # Every exit below must stop it, or it keeps restarting a forward nothing
+    # will use, into a log sync_logs uploads, for the instance's whole life.
+    stop_pf() {
+      kill "$PF_WATCH_PID" 2>/dev/null || true
+      kill "$(cat "$PF_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+    }
 
     # Every slot seeds its own tenant, slot 0 included. It used to be special,
     # seeded by setup_brain_go.sh while that script brought the shared stack up,
@@ -519,10 +558,11 @@ run_slot() {
            "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT" \
            "http://127.0.0.1:8000")"; then
       echo "[slot $slot] tenant seeding failed, slot aborted"
+      stop_pf
       return 1
     fi
 
-    cd "$slot_dir" || return 1
+    cd "$slot_dir" || { stop_pf; return 1; }
 
     # This slot's own prior results, pulled above as part of the whole
     # slots/ tree. Each slot resumes from its own CSV, not a shared one --
@@ -556,8 +596,7 @@ run_slot() {
 
     # Stop supervising before the slot's subshell exits, so a finished slot
     # does not leave a loop restarting a forward nothing will use.
-    kill "$PF_WATCH_PID" 2>/dev/null || true
-    kill "$PF_PID" 2>/dev/null || true
+    stop_pf
 
     echo "[slot $slot] complete"
   } >>"$slot_log" 2>&1
