@@ -9,10 +9,15 @@ live MCP server (brain-go never populates `tools_cache` itself, see
 seed_connections.py). So the server has to be up before seeding, which is
 before any problem has been deployed.
 
-Running it here is safe rather than duplicative: `MCPServer.deploy()` skips
-the apply when the deployment is already ready and only re-establishes the
-port-forward if it went stale, so the conductor's own call later in the run
-becomes a no-op.
+Running it here is safe rather than duplicative: `MCPServer.deploy()` skips the
+apply when the deployment is already ready.
+
+This used to add "so the conductor's own call later in the run becomes a
+no-op". That was wrong, and it is the claim NOFireAI/sregym#34 retracts. The
+conductor's per-problem deploy() restarted the forward 15 times in
+run-20260831-1752 and the attempt after each restart stalled in 12 of 15. It is
+a no-op now only because SREGYM_EXTERNAL_PORT_FORWARD is set, for this call and
+for the conductor's.
 
 Reads KUBECONFIG and MCP_SERVER_PORT from the environment, both of which
 run_slot_env.sh sets per slot, so each slot deploys into its own cluster and
@@ -42,18 +47,18 @@ def main() -> int:
     log.info("deploying the MCP server (kubeconfig=%s, host port=%s)", kubeconfig, server.port)
     server.deploy()
 
-    # deploy() also starts a port-forward, and that one dies with this process:
-    # start_port_forward holds it as a subprocess.Popen child, which the
-    # interpreter reaps on exit. The conductor never sees this because it keeps
-    # the MCPServer object alive for a whole run; this script exits in seconds.
+    # Belt and braces. With SREGYM_EXTERNAL_PORT_FORWARD set, which the
+    # bootstrap sets for this call, deploy() starts no forward and there is
+    # nothing here to stop.
     #
-    # So the forward this script leaves behind is worthless, and confirming it
-    # here would confirm something about to disappear: the first run to get this
-    # far logged "MCP server ready on port 9954" and then every slot timed out
-    # waiting on that same port, with no kubectl port-forward process alive.
+    # Without the flag it would, and that forward would be worthless: it is a
+    # subprocess.Popen child the interpreter reaps when this script exits
+    # seconds later. The conductor never sees that because it keeps its
+    # MCPServer alive for a whole run. The first run to get this far logged
+    # "MCP server ready on port 9954" and then every slot timed out on that
+    # same port with no kubectl port-forward alive.
     #
-    # Tear it down deliberately rather than leaving a doomed child around, and
-    # let the caller own a forward that outlives us. run_slot in
+    # Either way the caller owns a forward that outlives us: run_slot in
     # terraform/templates/bootstrap.sh.tftpl starts one with nohup so it lives
     # as long as the slot does.
     server.stop_port_forward()

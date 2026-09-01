@@ -438,14 +438,21 @@ run_slot() {
     # apply when the deployment is already ready.
     #
     # It used to call the conductor's per-problem deploy() "a no-op". It was
-    # not, though not for the reason first supposed: deploy() only restarts a
-    # forward its own probe has already found dead, so it never replaced a
-    # healthy one. What it did was accept the replacement on process liveness
-    # alone, so a forward that bound but never served was declared good and
-    # every later tool call paid a 30s timeout against it. That happened 15
-    # times in run-20260831-1752 and the attempt after stalled in 12 of 15.
-    # SREGYM_EXTERNAL_PORT_FORWARD below gives the forward one owner; the
-    # health-check fix in mcp_server.py is what stops the acceptance.
+    # not, though not for the reason first supposed. deploy() has two paths.
+    # The one taken when the server is already running is health-gated, so it
+    # only ever restarted a forward its own probe had found dead: that fired 15
+    # times in run-20260831-1752 and the attempt after stalled in 12 of 15. Its
+    # other path, taken when the deployment is absent, calls start_port_forward
+    # with no gate at all, and that one does kill a healthy forward. It never
+    # fired mid-run here only because the deployment already existed.
+    #
+    # What went wrong in both cases was accepting the replacement on process
+    # liveness alone: a forward that bound but never served was declared good,
+    # and every later tool call paid a 30s timeout against it.
+    #
+    # SREGYM_EXTERNAL_PORT_FORWARD below gives the forward one owner and closes
+    # both paths; the health-polled accept in mcp_server.py is what stops the
+    # acceptance itself, for callers that still own their own forward.
     echo "[slot $slot] deploying the MCP server into $KIND_CLUSTER_NAME"
     # Also external here. deploy_mcp.py calls stop_port_forward() on the
     # documented contract that it tears its own forward down, and with the

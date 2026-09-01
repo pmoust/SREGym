@@ -35,17 +35,23 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
 - `sregym/service/apps/astronomy_shop.py` — drops the flagd-ui sidecar and
   prunes two dead collector exporters. **Not env-gated**, so it applies to every
   run. Revert it for any run that claims to be stock.
-- `sregym/service/mcp_server.py` — three changes. The host side of the MCP
+- `sregym/service/mcp_server.py` — four changes. The host side of the MCP
   port-forward reads `MCP_SERVER_PORT` instead of hardcoding 9954.
   `SREGYM_EXTERNAL_PORT_FORWARD` (off by default) tells `deploy()` that a
-  caller owns the forward, so it probes and reports but never starts,
-  kills or replaces one; the benchmark bootstrap owns it for the life of a
-  slot, which is longer than one problem. And `start_port_forward` now
-  accepts a forward only once it serves traffic, polled to a deadline,
-  rather than on `poll() is None`: a process that binds but never answers
-  used to be declared healthy, and every later call paid a full timeout.
-  The last of the three is a plain bug fix and the strongest candidate for
-  upstreaming; the flag is mirror-specific.
+  caller owns the forward, so it probes and reports but never starts, kills or
+  replaces one; the benchmark bootstrap owns it for the life of a slot, which
+  is longer than one problem. `start_port_forward` returns early when the port
+  already serves, before the unconditional kill below it, which used to tear
+  down a working forward and then, if all three retries failed, leave none at
+  all. And it now accepts a forward only once it serves traffic, polled to a
+  `PORT_FORWARD_READY_TIMEOUT` deadline, rather than on `poll() is None`: a
+  process that binds but never answers was declared healthy and every later
+  call paid a full timeout.
+
+  The last two are plain bug fixes and the strongest candidates for
+  upstreaming; the flag is mirror-specific. Behaviour with the flag unset is
+  unchanged apart from those two fixes, which is what
+  `tests/service/test_mcp_server_port_forward.py` pins.
 - `sregym/paths.py` — `SREGYM_CACHE_DIR` overrides the cache location, so runs
   sharing a host do not share a per-cluster baseline snapshot. Candidate for
   upstreaming.
@@ -59,8 +65,10 @@ path:
 - `clients/brain_go/` — the brain-go agent driver and its SSE parser, with tests
   in `tests/brain_go/`.
 - `scripts/benchmark/` — stands up and seeds brain-go on an instance
-  (`setup_brain_go.sh`, `seed_connections.py`) and computes the per-run
-  environment that lets runs share a host (`run_slot_env.sh`).
+  (`setup_brain_go.sh`, `seed_connections.py`), computes the per-run
+  environment that lets runs share a host (`run_slot_env.sh`), and deploys the
+  MCP server once per instance before any slot starts (`deploy_mcp.py`), which
+  is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
 - `terraform/` — the ephemeral spot fleet the suite runs on.
 
 ## Lessons carried over from the Python brain SREGym runbook

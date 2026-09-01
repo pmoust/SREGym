@@ -83,16 +83,25 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom, measured: the rendered script is ~27.7 KB, gzips to ~10.6 KB, and
-  # is ~14.2 KB base64-encoded. Against the 16384 cap that is ~1.8 KB spare,
-  # about 1.13x. This is tight, and the margin has now shrunk twice.
+  # Headroom, measured at THIS commit: the rendered script is ~30.6 KB, gzips to
+  # ~11.7 KB, and is ~15.6 KB base64-encoded. Against the 16384 cap that leaves
+  # ~776 bytes on the base64 reading, about 1.05x. That is roughly one comment
+  # block. Anything more than a couple of lines needs to come out of the
+  # template and into scripts/benchmark/, the way the manifest and resume merge
+  # did, rather than being trimmed.
   #
-  # Which form the cap applies to is not settled here. The failure recorded
-  # above was on plain user_data, so it says nothing about which form counts
-  # under base64gzip. An earlier version of this comment asserted base64 was
-  # binding; that was a guess. Measure, do not reason:
+  # These figures were wrong three times before this one, most recently in the
+  # commit that added this warning: they were measured at the first commit of a
+  # two-commit branch and not re-measured after the second added 63 lines.
+  # Measure at the tip, not at the change you remember making:
   #
   #   terraform console <<<'templatefile("./templates/bootstrap.sh.tftpl", {...})'
+  #
+  # Which form the cap applies to is not settled. The failure recorded above was
+  # on plain user_data, so it says nothing about base64gzip. base64 is the
+  # conservative reading and the one quoted here; on the gzip reading there is
+  # ~4.7 KB. Do not let the conservative number veto an addition without
+  # checking which one actually binds.
   #
   # It will NOT fail at plan on a first apply. user_data_base64 depends on
   # local.run_id, which derives from random_id and timestamp(), and on a bucket
