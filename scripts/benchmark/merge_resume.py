@@ -67,7 +67,9 @@ def merge(slot_dir: Path) -> Path | None:
                     # count and skipping work that was never done.
                     skipped += 1
                     continue
-                row.pop(None, None)  # DictReader's restkey, if this file was ragged
+                # Drop DictReader's restkey. A ragged row parks its surplus
+                # fields under None, and a None in fieldnames makes the sort
+                # below raise on the str comparison.
                 fields.update(k for k in row if k is not None)
                 rows[(pid, (row.get("attempt") or "").strip())] = row
 
