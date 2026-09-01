@@ -29,6 +29,9 @@ OUT="${1:?usage: write_run_manifest.sh <output-path>}"
   echo "shard_index=${SHARD_INDEX:-}"
   echo "shard_count=${SHARD_COUNT:-}"
   echo "problem_set=${PROBLEM_SET:-}"
+  # Empty means the whole set. A narrowed run is not comparable with a full one,
+  # so the archive has to be able to tell them apart.
+  echo "problems=${PROBLEMS_OVERRIDE:-}"
   echo "n_attempts=${N_ATTEMPTS:-}"
   echo "noise=${NOISE:-}"
   echo "agent_timeout_seconds=${AGENT_TIMEOUT_SECONDS:-}"

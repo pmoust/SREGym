@@ -29,7 +29,20 @@ import sys
 from pathlib import Path
 
 CAP = 16384
+
+
+# The real sregym-lite ids, so the pessimistic scenario measures real lengths.
+# Read from the source of truth rather than copied, which would go stale the
+# first time the set changes.
+def _lite_ids() -> list[str]:
+    src = (Path(__file__).resolve().parents[2] / "sregym" / "conductor" / "problem_sets.py").read_text()
+    body = src.split("SREGYM_LITE_PROBLEMS = (")[1].split(")")[0]
+
+    return re.findall(r'"([a-z0-9_]+)"', body)
+
+
 TEMPLATE = Path(__file__).resolve().parents[2] / "terraform" / "templates" / "bootstrap.sh.tftpl"
+_LITE_IDS = _lite_ids()
 
 # Fixed-shape values: these have the same length in any real deployment.
 FIXED = {
@@ -56,6 +69,8 @@ SCENARIOS = {
         "bucket": "sregym-bench-run-20260901-1200-a4d231c1-results",
         "brain_env": "CHAT_SERVICE_TURN_TIMEOUT=3600s",
         "github_token_ssm_path": "/sregym/github-token",
+        # The scored run leaves var.problems empty, so this interpolates to "".
+        "problems": "",
     },
     "pessimistic": {
         "bucket": "sregym-bench-run-20261231-2359-deadbeef-results",
@@ -64,6 +79,11 @@ SCENARIOS = {
             "RCI_TEMPERATURE=0.2\nFEATURE_TEMPLATED_PROMPT_LOGS=1"
         ),
         "github_token_ssm_path": "/nofire/sregym/benchmark/github-clone-token-readonly",
+        # Every id named explicitly, which is the worst case a valid input can
+        # reach: var.problems is validated against ^[a-z0-9_]+$ per entry, and
+        # the set is 21 ids, so this bounds it. Real ids rather than padding,
+        # because their length is the point: this string goes into user_data.
+        "problems": " ".join(_LITE_IDS),
     },
 }
 

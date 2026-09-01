@@ -44,11 +44,29 @@ if [ -z "$PROBLEM_SET" ]; then
   exit 1
 fi
 
-PROBLEMS=$(uv run python -c "
+# PROBLEMS_OVERRIDE narrows the set to a named list, which is how a smoke run
+# costs ten minutes instead of a full suite. Filtered through the set rather
+# than trusted: a typo would otherwise shard to nothing and terminate looking
+# like a clean short run, which is the failure mode this whole file keeps
+# hitting. An id not in the set is a hard stop, listing what was rejected.
+PROBLEMS=$(PROBLEMS_OVERRIDE="${PROBLEMS_OVERRIDE:-}" uv run python -c "
+import os, sys
 from sregym.conductor.problem_sets import PROBLEM_SETS
+
 ids = sorted(PROBLEM_SETS['$PROBLEM_SET'])
+want = os.environ.get('PROBLEMS_OVERRIDE', '').split()
+if want:
+    unknown = [p for p in want if p not in ids]
+    if unknown:
+        sys.stderr.write('unknown problem ids: ' + ', '.join(unknown) + chr(10))
+        sys.exit(2)
+    ids = [p for p in ids if p in set(want)]
+
 print(' '.join(p for i, p in enumerate(ids) if i % $SHARD_COUNT == $SHARD_INDEX))
-")
+") || {
+  terminate "problems override rejected, see the error above"
+  exit 1
+}
 
 if [ -z "$PROBLEMS" ]; then
   terminate "shard $SHARD_INDEX resolved to no problems"

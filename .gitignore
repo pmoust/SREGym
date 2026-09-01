@@ -257,3 +257,15 @@ terraform/.terraform.lock.hcl
 terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/*.tfvars
+# The named scenarios are the opposite of a personal tfvars: they are the
+# definition of what a smoke run and a scored run are, and launch.sh cannot work
+# without them. The blanket rule above silently swallowed them once, so a PR
+# shipped launch.sh with no scenarios and passed its own gate because the files
+# were sitting untracked on the author's disk.
+!terraform/smoke.tfvars
+!terraform/run.tfvars
+
+# launch.sh writes terraform/<scenario>.tfplan next to the tfvars it read.
+# A plan is a snapshot of one moment's state and refs; committing one invites
+# someone to apply a stale one.
+*.tfplan

@@ -14,6 +14,13 @@ than whole sweeps.
 
 ## Prerequisites
 
+The `region` default is `us-east-2`, matching where every run so far has gone
+and where `sregym-results/archive_run.sh` in the brain-go checkout looks. It
+used to default to `us-east-1`, which meant omitting the var put the bucket in
+a region the archiver could not find, and the symptom was "no bucket matching"
+after the run had already been billed.
+
+
 One-time, per account:
 
 ```bash
@@ -38,6 +45,51 @@ only permission the caller then needs is `iam:PassRole` scoped to that one
 role's ARN.
 
 ## Running
+
+Two named scenarios cover almost every launch:
+
+```bash
+./scripts/benchmark/launch.sh smoke     # 2 problems, proves the harness works
+./scripts/benchmark/launch.sh run       # 21 x 3 = 63, the scored run
+./scripts/benchmark/launch.sh smoke --plan-only
+```
+
+`launch.sh` reads `terraform/<name>.tfvars`, pins both refs to the current
+`origin/main` of each checkout, prints what it is about to bill you for, checks
+the user_data size before planning rather than after applying, and asks before
+it applies.
+
+Pinning is the part worth not skipping by hand. `sregym_ref` and `brain_go_ref`
+both default to `main`, and `main` means whatever it happens to be when each of
+three instances boots. Two runs a week apart, or two instances minutes apart,
+can then be running different code with no record of which. The manifest records
+what was pinned.
+
+Run the smoke scenario before any scored run. It costs two problems and answers
+the one question the local gates cannot: whether a real instance gets through
+boot, cluster creation, brain-go setup, the port-forward, tenant seeding, and
+into a problem. Look for these four lines, the first of which is emitted from
+inside `run_shard.sh` and so proves the source handoff worked:
+
+```
+[bootstrap] shard 0 owns 2 problems
+[slot 0] starting with 2 problems
+[slot 0] MCP port-forward serving on ...
+[slot 0] === network_policy_block ===
+```
+
+`run.tfvars` fixes 21 x 3 deliberately. `run-20260831-1752` was that shape, so
+keeping it identical makes the next run a paired comparison and isolates what
+changed in between; 63 paired problem-runs resolves about 23pp at 80% power.
+Changing `n_attempts` or the problem set costs that comparison.
+
+To narrow any run, set `problems` to a list of ids from the set. Ids are checked
+on the instance and an unknown one is a hard stop, because a typo would
+otherwise shard to nothing and the instance would terminate looking like a clean
+short run.
+
+The raw form still works and is what the scenarios expand to:
+
 
 ```bash
 terraform init

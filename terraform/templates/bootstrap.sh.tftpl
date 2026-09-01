@@ -324,6 +324,7 @@ BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
 # for why values and not just key names.
 RUN_ID="$RUN_ID" SHARD_INDEX="$SHARD_INDEX" SHARD_COUNT="$SHARD_COUNT" \
 PROBLEM_SET="${problem_set}" N_ATTEMPTS="${n_attempts}" NOISE="${noise}" \
+PROBLEMS_OVERRIDE="${problems}" \
 AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}" RUNS_PER_INSTANCE="${runs_per_instance}" \
 AGENT_MODEL="${agent_model}" JUDGE_MODEL="${judge_model}" \
 SREGYM_REF="${sregym_ref}" SREGYM_SHA="$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null || echo unknown)" \
@@ -341,35 +342,6 @@ BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
 . /etc/profile.d/sregym-brain-go.sh
 # --- shard runner -----------------------------------------------------------
 # Everything past this point lives in the repo, not in user_data. EC2 caps user
-# data at 16384 bytes and the combination of this file's port-forward
-# supervisor and the resume merge went 588 bytes over it -- neither change
-# alone did, which is why nothing caught it until they met.
-#
-# Sourced, not executed: the block below uses terminate, hard_stop,
-# sync_results and sync_logs, and the traps and background watchdogs already
-# armed above. A child process would inherit none of them.
-#
-# The seven values below were template interpolations. run_shard.sh is a repo
-# file and cannot interpolate, so they are passed as shell variables.
-PROBLEM_SET="${problem_set}"
-N_ATTEMPTS="${n_attempts}"
-AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}"
-RUNS_PER_INSTANCE="${runs_per_instance}"
-AGENT_MODEL="${agent_model}"
-JUDGE_MODEL="${judge_model}"
-SREGYM_REF="${sregym_ref}"
-NOISE="${noise}"
-export PROBLEM_SET N_ATTEMPTS AGENT_TIMEOUT_SECONDS RUNS_PER_INSTANCE
-export AGENT_MODEL JUDGE_MODEL SREGYM_REF NOISE
-
-# Hard failure, not a warning. Without this file the instance completes its
-# bootstrap, runs nothing, and terminates looking like a clean short run.
-if [ ! -f "$WORKDIR/scripts/benchmark/run_shard.sh" ]; then
-  terminate "scripts/benchmark/run_shard.sh missing on ref ${sregym_ref}"
-  exit 1
-fi
-# --- shard runner -----------------------------------------------------------
-# Everything past this point lives in the repo, not in user_data. EC2 caps user
 # data at 16384 bytes and the port-forward supervisor plus the resume merge went
 # 588 bytes over it. Neither change alone did, which is why nothing caught it
 # until they met. scripts/benchmark/measure_user_data.py is the check.
@@ -378,9 +350,10 @@ fi
 # sync_logs, and the traps and background watchdogs already armed above. A child
 # process would inherit none of them.
 #
-# The values below were template interpolations. run_shard.sh is a repo file and
+# The values below were template interpolations. run_shard.sh is a repo file
 # cannot interpolate, so they are passed as shell variables.
 PROBLEM_SET="${problem_set}"
+PROBLEMS_OVERRIDE="${problems}"
 N_ATTEMPTS="${n_attempts}"
 AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}"
 RUNS_PER_INSTANCE="${runs_per_instance}"
@@ -388,7 +361,7 @@ AGENT_MODEL="${agent_model}"
 JUDGE_MODEL="${judge_model}"
 SREGYM_REF="${sregym_ref}"
 NOISE="${noise}"
-export PROBLEM_SET N_ATTEMPTS AGENT_TIMEOUT_SECONDS RUNS_PER_INSTANCE
+export PROBLEM_SET PROBLEMS_OVERRIDE N_ATTEMPTS AGENT_TIMEOUT_SECONDS RUNS_PER_INSTANCE
 export AGENT_MODEL JUDGE_MODEL SREGYM_REF NOISE
 
 # Hard failure, not a warning. Without this file the instance completes its

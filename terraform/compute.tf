@@ -118,6 +118,7 @@ resource "aws_instance" "bench" {
     brain_go_ref          = var.brain_go_ref
     github_token_ssm_path = var.github_token_ssm_path
     problem_set           = var.problem_set
+    problems              = join(" ", var.problems)
     n_attempts            = var.n_attempts
     noise                 = var.noise
     agent_model           = var.agent_model

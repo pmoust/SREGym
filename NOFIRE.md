@@ -68,7 +68,12 @@ path:
   (`setup_brain_go.sh`, `seed_connections.py`), computes the per-run
   environment that lets runs share a host (`run_slot_env.sh`), and deploys the
   MCP server once per instance before any slot starts (`deploy_mcp.py`), which
-  is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
+  is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for. `run_shard.sh` holds
+  the shard's resume, problem division and slot workers; it is sourced by the
+  terraform bootstrap rather than executed, because user_data is capped at
+  16384 bytes and `measure_user_data.py --check` is what keeps it under.
+  `launch.sh` runs a named scenario from `terraform/<name>.tfvars` with both
+  refs pinned to current `origin/main`.
 - `terraform/` — the ephemeral spot fleet the suite runs on.
 
 ## Lessons carried over from the Python brain SREGym runbook

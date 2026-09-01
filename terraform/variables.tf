@@ -50,6 +50,40 @@ variable "runs_per_instance" {
 # What to run
 # ---------------------------------------------------------------------------
 
+variable "problems" {
+  type        = list(string)
+  default     = []
+  description = <<-EOT
+    Narrow the run to these problem ids, still drawn from problem_set. Empty
+    means the whole set.
+
+    This exists so a smoke run costs ten minutes rather than a full suite. It is
+    the difference between debugging the harness for the price of two problems
+    and doing it for the price of twenty-one.
+
+    Ids are checked against the set on the instance, and an unknown id is a hard
+    stop rather than a silent narrowing: a typo would otherwise shard to nothing
+    and the instance would terminate looking like a clean short run.
+
+    Sharding applies after the filter, so instance_count above the number of
+    problems leaves later shards empty.
+
+    Validated below, and not only for typos. This value is interpolated into a
+    double-quoted assignment in the bootstrap template, so terraform splices it
+    into the script's source text before bash ever parses it. An entry
+    containing a command substitution therefore runs as root at boot, ahead of
+    the instance-side id check, which was demonstrated rather than assumed. The
+    input is your own -var, so this is self-inflicted rather than a vector, the
+    same footing as brain_env above; unlike brain_env it is a live expansion
+    context rather than an inert heredoc, so it gets the stricter guard.
+  EOT
+
+  validation {
+    condition     = alltrue([for p in var.problems : can(regex("^[a-z0-9_]+$", p))])
+    error_message = "problems entries must match ^[a-z0-9_]+$, which is what a registered problem id looks like."
+  }
+}
+
 variable "problem_set" {
   description = "Suite name passed to main.py --suite. Empty runs the full registry."
   type        = string
@@ -241,9 +275,19 @@ variable "keep_alive_on_failure" {
 # ---------------------------------------------------------------------------
 
 variable "region" {
-  description = "us-east-1: brain-go's account is there and Bedrock quota is the real constraint, not latency."
+  description = "Where the fleet and its results bucket go. Bedrock quota is the real constraint here, not latency."
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
+
+  # The default was us-east-1 and its description asserted a reason for that
+  # value. Every run has in fact been in us-east-2, and
+  # sregym-results/archive_run.sh in the brain-go checkout defaults there too,
+  # so omitting this var put the bucket in a region the archiver does not look
+  # in. The symptom was "no bucket matching" after the run was already billed.
+  #
+  # scripts/benchmark/setup_brain_go.sh keeps its own us-east-1 fallback for a
+  # direct invocation. The bootstrap always passes AWS_DEFAULT_REGION
+  # explicitly, so that fallback is unreachable on the real path.
 }
 
 variable "run_id" {
