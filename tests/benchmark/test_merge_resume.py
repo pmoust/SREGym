@@ -171,3 +171,60 @@ def test_merged_output_drives_main_py_completion_the_way_it_should(tmp_path, n_a
     counts = Counter(r["problem_id"] for r in rows)
     complete = {pid for pid, c in counts.items() if c >= n_attempts}
     assert ("p1" in complete) is expected_complete
+
+
+def test_a_non_utf8_byte_does_not_lose_the_whole_shard(tmp_path):
+    """The judge's prose has carried non-UTF-8 bytes before.
+
+    Strict decoding raised out of the process. The call site is
+    `resume_csv=$(merge_resume.py ... || true)`, which keeps stdout and drops
+    the exit code, so the visible result was an empty resume and a slot that
+    re-ran everything it had already finished.
+    """
+    d = tmp_path / "results" / "t0"
+    d.mkdir(parents=True)
+    (d / "x_ALL_results.csv").write_bytes(b'problem_id,attempt,Diagnosis.reasoning\np1,1,"caf\xe9 \xff failed"\n')
+
+    rows = _rows(merge_resume.merge(tmp_path))
+
+    assert [r["problem_id"] for r in rows] == ["p1"]
+    assert rows[0]["attempt"] == "1"  # still keyed correctly
+
+
+def test_one_unreadable_file_does_not_discard_the_others(tmp_path):
+    """Aborting on the first bad file throws away every later file's problems."""
+    good = "problem_id,attempt,Diagnosis.success\np1,1,True\n"
+    _slot(tmp_path, good, "problem_id,attempt\np2,1\n")
+    bad = tmp_path / "results" / "t1" / "x_ALL_results.csv"
+    bad.chmod(0o000)
+    try:
+        rows = _rows(merge_resume.merge(tmp_path))
+    finally:
+        bad.chmod(0o644)
+
+    assert [r["problem_id"] for r in rows] == ["p1"]  # the readable one survives
+
+
+def test_returns_none_when_nothing_is_recoverable(tmp_path):
+    """An empty resume CSV is worse than none.
+
+    main.py would load it, count zero completed problems, and log a successful
+    resume. Returning None makes the caller omit --resume, which is the honest
+    description of what can be offered.
+    """
+    _slot(tmp_path, "problem_id,attempt\np1,1\n")
+    bad = tmp_path / "results" / "t0" / "x_ALL_results.csv"
+    bad.chmod(0o000)
+    try:
+        assert merge_resume.merge(tmp_path) is None
+    finally:
+        bad.chmod(0o644)
+
+
+def test_a_repeated_header_row_is_not_kept_as_data(tmp_path):
+    """DictReader hands a mid-file header line back as an ordinary row."""
+    a = "problem_id,attempt,x\np1,1,a\nproblem_id,attempt,x\np2,1,b\n"
+    rows = _rows(merge_resume.merge(_slot(tmp_path, a)))
+
+    assert sorted(r["problem_id"] for r in rows) == ["p1", "p2"]
+    assert "problem_id" not in [r["problem_id"] for r in rows]
