@@ -23,3 +23,11 @@ n_attempts            = 1
 max_runtime_hours     = 1
 keep_alive_on_failure = true
 use_spot              = false # a reclaim mid-smoke reads like a harness failure
+
+# See variables.tf for why an empty value fails here. The name comes from
+# CloudTrail, which records iamInstanceProfile on every RunInstances: every
+# successful launch between 2026-08-28 and 08-31 used this one. Do not take it
+# from setup_brain_go.sh's log line, which prints IMDS_ROLE, the role rather
+# than the profile, and is named -instance-role; passing that gets
+# "Invalid IAM Instance Profile name" part way through an apply.
+instance_profile_name = "sregym-benchmark-instance-profile"
