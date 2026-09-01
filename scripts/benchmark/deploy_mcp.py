@@ -14,8 +14,9 @@ apply when the deployment is already ready.
 
 This used to add "so the conductor's own call later in the run becomes a
 no-op". That was wrong, and it is the claim NOFireAI/sregym#34 retracts. The
-conductor's per-problem deploy() restarted the forward 15 times in
-run-20260831-1752 and the attempt after each restart stalled in 12 of 15. It is
+conductor's per-problem deploy() took the restart path 15 times in
+run-20260831-1752, killed a forward on 8 of those (the port was already free on
+the other 7), and the attempt after stalled in 12 of the 15. It is
 a no-op now only because SREGYM_EXTERNAL_PORT_FORWARD is set, for this call and
 for the conductor's.
 

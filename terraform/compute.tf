@@ -83,12 +83,21 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom, measured at THIS commit: the rendered script is ~30.6 KB, gzips to
-  # ~11.7 KB, and is ~15.6 KB base64-encoded. Against the 16384 cap that leaves
-  # ~776 bytes on the base64 reading, about 1.05x. That is roughly one comment
-  # block. Anything more than a couple of lines needs to come out of the
-  # template and into scripts/benchmark/, the way the manifest and resume merge
-  # did, rather than being trimmed.
+  # Headroom is not stated here any more. It was, four times, and it was wrong
+  # every time: someone measured, the template grew in the next commit, and the
+  # figure stayed. The last stale number sat in the same comment that told the
+  # reader to re-measure.
+  #
+  #   scripts/benchmark/measure_user_data.py            # report
+  #   scripts/benchmark/measure_user_data.py --check    # exit 1 if over
+  #
+  # At the time of writing that reports about 300 to 430 bytes spare depending
+  # on bucket name, brain_env and SSM path length. Treat any figure in this file
+  # as hearsay and run the script.
+  #
+  # 300 bytes is under ten lines of shell. Anything larger comes out of the
+  # template and into scripts/benchmark/, the way the manifest and the resume
+  # merge did, rather than being trimmed.
   #
   # These figures were wrong three times before this one, most recently in the
   # commit that added this warning: they were measured at the first commit of a

@@ -437,29 +437,15 @@ run_slot() {
     # itself). Deploying here is not duplicative: MCPServer.deploy() skips the
     # apply when the deployment is already ready.
     #
-    # It used to call the conductor's per-problem deploy() "a no-op". It was
-    # not, though not for the reason first supposed. deploy() has two paths.
-    # The one taken when the server is already running is health-gated, so it
-    # only ever restarted a forward its own probe had found dead: that fired 15
-    # times in run-20260831-1752 and the attempt after stalled in 12 of 15. Its
-    # other path, taken when the deployment is absent, calls start_port_forward
-    # with no gate at all, and that one does kill a healthy forward. It never
-    # fired mid-run here only because the deployment already existed.
-    #
-    # What went wrong in both cases was accepting the replacement on process
-    # liveness alone: a forward that bound but never served was declared good,
-    # and every later tool call paid a 30s timeout against it.
-    #
-    # SREGYM_EXTERNAL_PORT_FORWARD below gives the forward one owner and closes
-    # both paths; the health-polled accept in mcp_server.py is what stops the
-    # acceptance itself, for callers that still own their own forward.
+      # It is not a no-op for the port-forward, though: deploy() has two paths
+      # and either could replace one. SREGYM_EXTERNAL_PORT_FORWARD below closes
+      # both. The incident and the reasoning live in one place, the
+      # _forward_is_external docstring in sregym/service/mcp_server.py, rather
+      # than being restated at every call site where a later correction would
+      # then have to find them all.
     echo "[slot $slot] deploying the MCP server into $KIND_CLUSTER_NAME"
-    # Also external here. deploy_mcp.py calls stop_port_forward() on the
-    # documented contract that it tears its own forward down, and with the
-    # early-return in start_port_forward that call would see no handle and do
-    # nothing, leaving a forward this slot did not start. Setting the flag for
-    # this call too means deploy() never starts one, the teardown is honestly
-    # a no-op, and the flag means one thing for the whole slot.
+      # External here too, so the flag means one thing for the whole slot and
+      # deploy_mcp.py's own teardown is honestly a no-op.
     if ! SREGYM_EXTERNAL_PORT_FORWARD=1 \
          uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/deploy_mcp.py"; then
       echo "[slot $slot] MCP server deploy failed, slot aborted"
@@ -534,7 +520,9 @@ run_slot() {
         sleep 1
         nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
           -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
-        echo "$!" >"$PF_PID_FILE"
+        # Atomic, so a concurrent stop_pf reads either the old pid or the
+        # new one, never a half-written file.
+        echo "$!" >"$PF_PID_FILE.tmp" && mv "$PF_PID_FILE.tmp" "$PF_PID_FILE"
       done
     ) &
     PF_WATCH_PID=$!
@@ -543,8 +531,20 @@ run_slot() {
     # Every exit below must stop it, or it keeps restarting a forward nothing
     # will use, into a log sync_logs uploads, for the instance's whole life.
     stop_pf() {
+      # Supervisor first, so it cannot start a replacement after the kill.
       kill "$PF_WATCH_PID" 2>/dev/null || true
       kill "$(cat "$PF_PID_FILE" 2>/dev/null)" 2>/dev/null || true
+
+      # Then by port, because the pid file alone is not enough. The
+      # supervisor forks kubectl and records its pid as two statements, so a
+      # stop_pf landing between them kills the pid already on file, which the
+      # supervisor had just killed itself, and the new kubectl survives
+      # reparented to init with nothing left that knows its pid. Each slot
+      # owns its own MCP_SERVER_PORT, so this is slot-scoped, and it is what
+      # mcp_server.py's _kill_stale_port_forward already does.
+      for pid in $(lsof -ti "tcp:$MCP_SERVER_PORT" 2>/dev/null); do
+        kill "$pid" 2>/dev/null || true
+      done
     }
 
     # Every slot seeds its own tenant, slot 0 included. It used to be special,

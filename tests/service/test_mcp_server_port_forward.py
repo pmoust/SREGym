@@ -54,8 +54,14 @@ def test_deploy_never_touches_a_forward_it_does_not_own(monkeypatch):
 def test_deploy_still_probes_when_the_forward_is_external(monkeypatch):
     """Not acting is the point; not looking would delete the only signal.
 
-    The 15 "absent or stale" lines that diagnosed run-20260831-1752 came from
-    this probe.
+    The "absent or stale" lines that diagnosed run-20260831-1752 came from this
+    probe.
+
+    Weaker than it looks, and left in deliberately. Reverting the ownership
+    guard does not fail this test, because the already-running branch probes
+    anyway. What it does catch is someone making the external branch skip the
+    probe to save a call. test_deploy_never_touches_a_forward_it_does_not_own is
+    the one that guards the guard.
     """
     monkeypatch.setenv("SREGYM_EXTERNAL_PORT_FORWARD", "1")
     s = _server(healthy=False)
