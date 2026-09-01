@@ -19,8 +19,13 @@ output "watch" {
 }
 
 output "progress" {
-  description = "Problems completed so far, across all shards."
-  value       = "aws s3 ls --recursive s3://${local.bucket}/${local.run_id}/ | grep -c _results.csv"
+  description = "Problem-runs scored so far, across all shards. Compare against problems x n_attempts."
+  # Matches only the per-attempt files under a run_N directory. A bare
+  # `grep -c _results.csv` counts six objects per problem: the three run_N
+  # files plus a per-problem rollup, a _running_ file and an _ALL_ file. It
+  # reported 126 for the 63 real problem-runs of run-20260831-1752, and the
+  # figure reads plausibly enough that nobody questioned it mid-run.
+  value = "aws s3 ls --recursive s3://${local.bucket}/${local.run_id}/ | grep -cE '/run_[0-9]+/[^/]*_results\\.csv$'"
 }
 
 output "estimated_cost_note" {
