@@ -98,9 +98,16 @@ mechanism is generic and a secret passed through it must not ship to S3.
 Watch it, and check progress:
 
 ```bash
-terraform output watch      # prints an SSM command that tails the bootstrap log
-terraform output progress   # prints an S3 command that counts finished problems
+terraform output -raw watch      # an SSM command that tails the bootstrap log
+terraform output -raw progress   # an S3 command that counts scored problem-runs
 ```
+
+`-raw` is not optional for `progress`. Without it terraform prints the value as
+a quoted string and doubles the backslash in the regex, so `\.` becomes `\\.`:
+in ERE that means a literal backslash followed by any character, no S3 key
+contains a backslash, and the command reports 0 forever. It fails silently,
+with a plausible-looking number, which is the same way the count it replaced
+was wrong.
 
 Instances terminate themselves when their shard finishes. `terraform destroy`
 then removes the bucket, security group, and the role (unless
