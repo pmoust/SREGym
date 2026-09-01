@@ -84,10 +84,25 @@ variable "problems" {
   }
 }
 
+# The four variables below, plus problems above, are interpolated into
+# double-quoted shell assignments in templates/bootstrap.sh.tftpl. Terraform
+# substitutes into the script's source text before bash parses it, so a value
+# containing a quote or a command substitution runs as root at boot. These are
+# your own -var rather than remote input, the same footing as brain_env, but
+# brain_env is an inert quoted heredoc and these are live expansion contexts,
+# so they get a charset guard. Review found problems validated and these four
+# not, which is worse than validating none: it reads as though the class had
+# been handled.
+
 variable "problem_set" {
   description = "Suite name passed to main.py --suite. Empty runs the full registry."
   type        = string
   default     = "sregym-lite"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]+$", var.problem_set))
+    error_message = "problem_set must match ^[A-Za-z0-9_-]+$, which is what a set name in problem_sets.py looks like."
+  }
 }
 
 variable "n_attempts" {
@@ -113,6 +128,11 @@ variable "agent_model" {
   EOT
   type        = string
   default     = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._:/-]+$", var.agent_model))
+    error_message = "agent_model must match ^[A-Za-z0-9._:/-]+$, which covers a bedrock or litellm model id."
+  }
 }
 
 variable "judge_model" {
@@ -127,6 +147,11 @@ variable "judge_model" {
   EOT
   type        = string
   default     = "bedrock/us.anthropic.claude-sonnet-5"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._:/-]+$", var.judge_model))
+    error_message = "judge_model must match ^[A-Za-z0-9._:/-]+$, which covers a bedrock or litellm model id."
+  }
 }
 
 variable "brain_env" {
@@ -300,6 +325,11 @@ variable "sregym_ref" {
   description = "Git ref of the sregym mirror to check out."
   type        = string
   default     = "main"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._/-]+$", var.sregym_ref))
+    error_message = "sregym_ref must match ^[A-Za-z0-9._/-]+$, which covers a branch, a tag and a full SHA."
+  }
 }
 
 variable "brain_go_ref" {

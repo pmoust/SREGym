@@ -49,11 +49,24 @@ fi
 # than trusted: a typo would otherwise shard to nothing and terminate looking
 # like a clean short run, which is the failure mode this whole file keeps
 # hitting. An id not in the set is a hard stop, listing what was rejected.
-PROBLEMS=$(PROBLEMS_OVERRIDE="${PROBLEMS_OVERRIDE:-}" uv run python -c "
+# Every value reaches python through the environment, none through string
+# interpolation. $PROBLEM_SET used to be spliced into the source as
+# PROBLEM_SETS['$PROBLEM_SET'], where a value containing a quote breaks out of
+# the literal into arbitrary python. terraform now also charset-validates the
+# variable, but the two guards are independent on purpose: this one holds for
+# any caller, including a hand-run invocation that never went through
+# terraform.
+PROBLEMS=$(PROBLEMS_OVERRIDE="${PROBLEMS_OVERRIDE:-}" PROBLEM_SET="$PROBLEM_SET" uv run python -c "
 import os, sys
 from sregym.conductor.problem_sets import PROBLEM_SETS
 
-ids = sorted(PROBLEM_SETS['$PROBLEM_SET'])
+name = os.environ['PROBLEM_SET']
+if name not in PROBLEM_SETS:
+    sys.stderr.write('unknown problem_set: ' + name + chr(10))
+    sys.stderr.write('known: ' + ', '.join(sorted(PROBLEM_SETS)) + chr(10))
+    sys.exit(2)
+
+ids = sorted(PROBLEM_SETS[name])
 want = os.environ.get('PROBLEMS_OVERRIDE', '').split()
 if want:
     unknown = [p for p in want if p not in ids]

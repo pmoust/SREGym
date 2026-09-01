@@ -11,11 +11,17 @@
 # pinned input.
 #
 # A note on `set -e` here, because two bugs in the first version of this file
-# came from trusting it. errexit does not cross a command substitution: bash
-# 3.2, which is what macOS ships, has no `inherit_errexit`, so a function that
-# fails inside $(...) keeps going and the outer script never notices. And a
-# grep that legitimately matches nothing fails the whole pipeline under
-# pipefail. Both are handled explicitly below rather than left to the shell.
+# came from trusting it.
+#
+# A substitution's own failure does propagate: ROOT=$(git rev-parse ...) stops
+# the script if git fails. What does not propagate is a failure *inside* a
+# multi-statement substitution, because bash 3.2 is what macOS ships and it has
+# no `inherit_errexit`. So a function that fails partway through $(...) keeps
+# going and returns whatever it printed, which is how the first version pinned
+# a stale SHA after a failed fetch.
+#
+# Separately, a grep that legitimately matches nothing fails its whole pipeline
+# under pipefail. Both cases are handled explicitly below.
 
 set -euo pipefail
 

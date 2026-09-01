@@ -20,7 +20,6 @@ used to default to `us-east-1`, which meant omitting the var put the bucket in
 a region the archiver could not find, and the symptom was "no bucket matching"
 after the run had already been billed.
 
-
 One-time, per account:
 
 ```bash
@@ -89,7 +88,6 @@ otherwise shard to nothing and the instance would terminate looking like a clean
 short run.
 
 The raw form still works and is what the scenarios expand to:
-
 
 ```bash
 terraform init
