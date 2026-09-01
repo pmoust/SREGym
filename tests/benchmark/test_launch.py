@@ -221,3 +221,35 @@ def test_invoked_through_a_symlink(tmp_path):
 
     # Resolving $0 wrongly makes the scenario listing empty rather than failing.
     assert "smoke" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("reply", ["y", "Y", "yes", "YES", "Yes"])
+def test_the_apply_prompt_accepts_what_people_actually_type(tmp_path, reply):
+    """The prompt reads [y/N] and "yes" is what gets typed at it.
+
+    Matching only the single letter turned a deliberate yes into "not applied",
+    which reads as though the script refused rather than as though the answer
+    was not understood. The scratch config declares no providers, so the apply
+    this drives touches nothing outside tmp_path.
+    """
+    if shutil.which("terraform") is None:
+        pytest.skip("terraform is needed to reach the prompt")
+    repo = _repo(tmp_path / "r")
+    _remote(repo)
+
+    r = _run(repo, "smoke", stdin=reply + "\n")
+
+    assert "not applied" not in r.stdout, f"{reply!r} was read as a no"
+    assert "watch it with" in r.stdout, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("reply", ["n", "N", "", "nonsense"])
+def test_the_apply_prompt_declines_on_anything_else(tmp_path, reply):
+    if shutil.which("terraform") is None:
+        pytest.skip("terraform is needed to reach the prompt")
+    repo = _repo(tmp_path / "r")
+    _remote(repo)
+
+    r = _run(repo, "smoke", stdin=reply + "\n")
+
+    assert "not applied" in r.stdout, f"{reply!r} was read as a yes"

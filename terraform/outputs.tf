@@ -30,5 +30,11 @@ output "progress" {
 
 output "estimated_cost_note" {
   description = "Compute is the cheap half. The tokens are the question."
-  value       = "${var.instance_count}x ${var.instance_type} spot. Compute is tens of dollars; token spend is the number to watch. See NOFireAI/brain-go#2219 for what to capture."
+
+  # Reads use_spot rather than asserting "spot". It said spot unconditionally,
+  # so the smoke scenario, which sets use_spot = false on purpose so a reclaim
+  # cannot be mistaken for a harness failure, reported spot pricing while
+  # billing on-demand. On an r7a.24xlarge that is roughly a threefold
+  # difference, stated in the one output whose job is to say what this costs.
+  value = "${var.instance_count}x ${var.instance_type} ${var.use_spot ? "spot" : "on-demand"}. Compute is tens of dollars; token spend is the number to watch. See NOFireAI/brain-go#2219 for what to capture."
 }

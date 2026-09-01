@@ -176,7 +176,10 @@ if ! read -r reply; then
   echo
 fi
 case "$reply" in
-  y | Y) ;;
+  # "yes" too. The prompt reads [y/N] and that is what people type; matching
+  # only the single letter turned a deliberate yes into "not applied", which
+  # reads like the script refused.
+  y | Y | yes | YES | Yes) ;;
   *)
     echo "launch: not applied. The plan is at $PLAN"
     echo "launch: for a non-interactive launch, apply that plan directly."
