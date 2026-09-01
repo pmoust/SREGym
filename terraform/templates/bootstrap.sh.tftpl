@@ -226,7 +226,9 @@ fi
 
 # Recorded so the results say which build produced them, rather than leaving it
 # to be inferred from a ref that may since have moved.
-echo "[bootstrap] brain-go ref ${brain_go_ref} -> $(git -C "$BRAIN_GO_DIR" rev-parse HEAD)"
+BRAIN_GO_SHA="$(git -C "$BRAIN_GO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo "[bootstrap] brain-go ref ${brain_go_ref} -> $BRAIN_GO_SHA"
+
 
 # The benchmark never opens the dashboard, but brain-go cannot start without
 # the checkout present: dev-env.sh gates on it as a sibling of brain-go
@@ -307,6 +309,19 @@ AWS_DEFAULT_REGION="${region}" \
 MINER_REPO_PULL_TOKEN="$GH_TOKEN" \
 BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
   "$WORKDIR/scripts/benchmark/setup_brain_go.sh" || { terminate "brain-go setup failed"; exit 1; }
+
+# What produced these numbers, as one object beside the logs. See the script
+# for why values and not just key names.
+RUN_ID="$RUN_ID" SHARD_INDEX="$SHARD_INDEX" SHARD_COUNT="$SHARD_COUNT" \
+PROBLEM_SET="${problem_set}" N_ATTEMPTS="${n_attempts}" NOISE="${noise}" \
+AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}" RUNS_PER_INSTANCE="${runs_per_instance}" \
+AGENT_MODEL="${agent_model}" JUDGE_MODEL="${judge_model}" \
+SREGYM_REF="${sregym_ref}" SREGYM_SHA="$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null || echo unknown)" \
+BRAIN_GO_REF="${brain_go_ref}" BRAIN_GO_SHA="$BRAIN_GO_SHA" \
+BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
+  "$WORKDIR/scripts/benchmark/write_run_manifest.sh" /var/log/sregym-run-manifest.txt || true
+aws s3 cp /var/log/sregym-run-manifest.txt \
+  "$S3_PREFIX/logs/sregym-run-manifest.txt" --region "$REGION" --only-show-errors || true
 
 # setup_brain_go.sh writes BRAIN_API_URL here. No key: every slot mints its own
 # when it seeds its own tenant, slot 0 included.
@@ -574,14 +589,14 @@ run_slot() {
     # This slot's own prior results, pulled above as part of the whole
     # slots/ tree. Each slot resumes from its own CSV, not a shared one --
     # results is a name reused per slot working directory, not one file.
-    local resume_csv resume_arg
-    resume_csv=$(find "$slot_dir/results" -name '*_ALL_results.csv' -print -quit 2>/dev/null || true)
+    # This slot's own prior results. A restarted slot has several result
+    # files and main.py takes one, so they are merged rather than picked.
+    local resume_arg resume_csv
     resume_arg=""
+    resume_csv=$("$WORKDIR/scripts/benchmark/merge_resume.sh" "$slot_dir" || true)
     if [ -n "$resume_csv" ]; then
-      echo "[slot $slot] resuming from $resume_csv ($(wc -l <"$resume_csv") rows)"
+      echo "[slot $slot] resuming from $resume_csv"
       resume_arg="--resume $resume_csv"
-    else
-      echo "[slot $slot] no prior results, starting clean"
     fi
 
     # The forward is this subshell's, established and supervised above; without
