@@ -83,34 +83,25 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom is not stated here any more. It was, four times, and it was wrong
-  # every time: someone measured, the template grew in the next commit, and the
+  # Headroom is not stated here. It was, four times, and it was wrong every
+  # time: someone measured, the template grew in the next commit, and the
   # figure stayed. The last stale number sat in the same comment that told the
-  # reader to re-measure.
+  # reader to re-measure. So the number lives in a script instead:
   #
   #   scripts/benchmark/measure_user_data.py            # report
   #   scripts/benchmark/measure_user_data.py --check    # exit 1 if over
   #
-  # At the time of writing that reports about 300 to 430 bytes spare depending
-  # on bucket name, brain_env and SSM path length. Treat any figure in this file
-  # as hearsay and run the script.
+  # It reports two scenarios, because the size depends on bucket name,
+  # brain_env and SSM path length. Budget against the pessimistic row, and
+  # treat any figure written in this file as hearsay.
   #
-  # 300 bytes is under ten lines of shell. Anything larger comes out of the
-  # template and into scripts/benchmark/, the way the manifest and the resume
-  # merge did, rather than being trimmed.
+  # The margin is comfortable now only because the shard runner moved into
+  # scripts/benchmark/run_shard.sh. Put new bootstrap logic there, not here.
   #
-  # These figures were wrong three times before this one, most recently in the
-  # commit that added this warning: they were measured at the first commit of a
-  # two-commit branch and not re-measured after the second added 63 lines.
-  # Measure at the tip, not at the change you remember making:
+  # base64 is the conservative reading of the cap and the one the script
+  # reports. The recorded failure above was on plain user_data, so it says
+  # nothing about which form binds under base64gzip.
   #
-  #   terraform console <<<'templatefile("./templates/bootstrap.sh.tftpl", {...})'
-  #
-  # Which form the cap applies to is not settled. The failure recorded above was
-  # on plain user_data, so it says nothing about base64gzip. base64 is the
-  # conservative reading and the one quoted here; on the gzip reading there is
-  # ~4.7 KB. Do not let the conservative number veto an addition without
-  # checking which one actually binds.
   #
   # It will NOT fail at plan on a first apply. user_data_base64 depends on
   # local.run_id, which derives from random_id and timestamp(), and on a bucket
