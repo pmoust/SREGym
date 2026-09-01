@@ -39,6 +39,27 @@ OUT="${1:?usage: write_run_manifest.sh <output-path>}"
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"
   echo "brain_go_sha=${BRAIN_GO_SHA:-}"
+
+  # Which stages ran, derived rather than asserted. sregym/conductor/tasklist.yml
+  # selects stages per problem (diagnosis, mitigation, in that order); with no
+  # such file the conductor runs both. The file is gitignored, so a git clone
+  # never brings one, but CI writes a mitigation-only one, and anything left on a
+  # box would silently change what a run measures. A run that cannot say which
+  # stages it graded cannot be compared against one that graded more.
+  #
+  # A stage still needs its oracle attached: a problem with no mitigation_oracle
+  # is skipped with "Mitigation oracle is not attached", which cannot be seen
+  # from here. All 21 sregym-lite problems have one, checked against the
+  # archived results rather than by reading the registry.
+  TASKLIST="${SREGYM_TASKLIST:-${WORKDIR:-.}/sregym/conductor/tasklist.yml}"
+  if [ -f "$TASKLIST" ]; then
+    echo "stages_source=tasklist.yml"
+    echo "stages=$(grep -oE '(diagnosis|mitigation)' "$TASKLIST" | sort -u | paste -sd, -)"
+    echo "tasklist_sha256=$(shasum -a 256 "$TASKLIST" 2>/dev/null | cut -d" " -f1)"
+  else
+    echo "stages_source=conductor-default-no-tasklist"
+    echo "stages=diagnosis,mitigation"
+  fi
   # One KEY=VALUE per line, exactly as written into brain-go's deploy/.env.
   printf '%s\n' "${BRAIN_ENV_EXTRA:-}"
 } >"$OUT"
