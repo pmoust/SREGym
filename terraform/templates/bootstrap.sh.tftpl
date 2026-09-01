@@ -431,8 +431,12 @@ run_slot() {
     # start_problem() -- too late, because seeding has to discover the tool
     # schemas from a live server first (brain-go does not populate tools_cache
     # itself). Deploying here is not duplicative: MCPServer.deploy() skips the
-    # apply when the deployment is already ready and only revives a stale
-    # port-forward, so the conductor's later call is a no-op.
+    # apply when the deployment is already ready.
+    #
+    # It used to call the conductor's per-problem deploy() "a no-op". It was
+    # not: it lsof-killed this forward and installed an unverified replacement,
+    # 15 times in run-20260831-1752, and the attempt after each restart stalled
+    # in 11 of 15. SREGYM_EXTERNAL_PORT_FORWARD below is what makes it true.
     echo "[slot $slot] deploying the MCP server into $KIND_CLUSTER_NAME"
     if ! uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/deploy_mcp.py"; then
       echo "[slot $slot] MCP server deploy failed, slot aborted"
@@ -473,6 +477,30 @@ run_slot() {
     fi
     echo "[slot $slot] MCP port-forward serving on $MCP_SERVER_PORT (pid $PF_PID)"
 
+    # Supervise it. A forward dies on its own: three attempts in
+    # run-20260831-1752 stalled with nothing logging a restart. The conductor
+    # no longer watches it either (SREGYM_EXTERNAL_PORT_FORWARD below), so
+    # ownership without supervision would move the outage, not remove it.
+    #
+    # Probed, not pinged: the process stays alive while forwarding to a pod
+    # that never becomes ready, and requests then cost a full timeout each.
+    # 15s because brain-go's per-call MCP timeout is 30s and calls serialise.
+    (
+      while true; do
+        sleep 15
+        if [ "$(curl -s -o /dev/null -w '%%{http_code}' --max-time 5                 "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)" = "200" ]; then
+          continue
+        fi
+        echo "[slot $slot] MCP port-forward stopped serving, restarting"
+        kill "$PF_PID" 2>/dev/null || true
+        nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
+          -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
+        PF_PID=$!
+      done
+    ) &
+    PF_WATCH_PID=$!
+    echo "[slot $slot] MCP port-forward supervisor started (pid $PF_WATCH_PID)"
+
     # Every slot seeds its own tenant, slot 0 included. It used to be special,
     # seeded by setup_brain_go.sh while that script brought the shared stack up,
     # but that ran before any cluster existed and so before any MCP server did:
@@ -509,6 +537,10 @@ run_slot() {
       echo "[slot $slot] no prior results, starting clean"
     fi
 
+    # The forward is this subshell's, established and supervised above; without
+    # this the conductor replaces it once per problem. See the deploy comment.
+    export SREGYM_EXTERNAL_PORT_FORWARD=1
+
     for pid in $problems; do
       echo "[slot $slot] === $pid ==="
       uv run --project "$WORKDIR" python "$WORKDIR/main.py" \
@@ -521,6 +553,11 @@ run_slot() {
         $NOISE_FLAG $resume_arg || echo "[slot $slot] $pid failed, continuing"
       sync_results || true
     done
+
+    # Stop supervising before the slot's subshell exits, so a finished slot
+    # does not leave a loop restarting a forward nothing will use.
+    kill "$PF_WATCH_PID" 2>/dev/null || true
+    kill "$PF_PID" 2>/dev/null || true
 
     echo "[slot $slot] complete"
   } >>"$slot_log" 2>&1

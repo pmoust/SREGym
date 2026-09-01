@@ -39,6 +39,22 @@ class MCPServer:
             self.kubectl.exec_command(f"kubectl apply -f {rbac_dir / resource}")
         logger.info("MCP server RBAC resources ensured.")
 
+    def _forward_is_external(self) -> bool:
+        """Whether something outside this process owns the port-forward.
+
+        Set SREGYM_EXTERNAL_PORT_FORWARD=1 when a caller establishes and
+        supervises the forward itself and this class must not touch it.
+
+        Without it, deploy() runs per problem and replaces a forward it does not
+        own. On a long benchmark run that forward is not a deploy-time
+        convenience: the agent's MCP connection is registered against the
+        forwarded address, so every tool call for the whole run goes through it.
+        Killing it costs one full call timeout per tool call until it recovers.
+
+        Off by default, so the standalone behaviour is unchanged.
+        """
+        return os.environ.get("SREGYM_EXTERNAL_PORT_FORWARD", "").strip().lower() in ("1", "true", "yes")
+
     def deploy(self):
         """Deploy the MCP server into the cluster via kustomize.
 
@@ -49,13 +65,20 @@ class MCPServer:
 
         if self._is_running():
             logger.info("MCP server already running, skipping redeploy.")
-            if not self._is_port_forward_healthy():
+            if self._forward_is_external():
+                logger.info("Port-forward is owned externally, leaving it alone.")
+            elif not self._is_port_forward_healthy():
                 logger.info("Port-forward is absent or stale, restarting.")
                 self.start_port_forward()
             return
 
         self.kubectl.exec_command(f"kubectl apply -k {MCP_SERVER_K8S}")
         self.kubectl.wait_for_ready(self.namespace)
+
+        if self._forward_is_external():
+            logger.info("MCP server deployed; port-forward is owned externally.")
+            return
+
         self.start_port_forward()
         logger.info("MCP server deployed successfully.")
 
@@ -95,7 +118,18 @@ class MCPServer:
                 logger.warning(f"Failed to kill stale port-forward: {e}")
 
     def start_port_forward(self):
-        """Starts port-forwarding to access the MCP server."""
+        """Starts port-forwarding to access the MCP server.
+
+        Returns early when the port already serves traffic. The kill below is
+        destructive and unconditional, so doing it before checking meant a
+        healthy forward was torn down and, if the three attempts below then
+        failed, replaced by nothing at all.
+        """
+        if self._is_port_forward_healthy():
+            logger.info(f"Port-forward on {self.port} is already serving; leaving it in place.")
+            os.environ["MCP_SERVER_PORT"] = str(self.port)
+            return
+
         self._kill_stale_port_forward()
 
         for attempt in range(3):
@@ -118,12 +152,22 @@ class MCPServer:
             )
             time.sleep(3)
 
-            if self.port_forward_process.poll() is None:
+            # Serving traffic, not merely alive. `kubectl port-forward` stays
+            # running while forwarding to a pod that never becomes ready, and a
+            # process check cannot tell the difference. Everything downstream
+            # then pays a full call timeout per request against a socket that
+            # accepts and never answers.
+            if self._is_port_forward_healthy():
                 os.environ["MCP_SERVER_PORT"] = str(self.port)
                 logger.info(f"Port forwarding established at {self.port}. MCP_SERVER_PORT set.")
                 break
-            else:
-                logger.warning("Port forwarding failed. Retrying...")
+
+            logger.warning(
+                "Port forwarding did not become healthy "
+                f"(process {'alive' if self.port_forward_process.poll() is None else 'exited'}). Retrying..."
+            )
+            self.stop_port_forward()
+            self.port_forward_process = None
         else:
             logger.warning("Failed to establish port forwarding after multiple attempts.")
 

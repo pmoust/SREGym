@@ -83,29 +83,22 @@ resource "aws_instance" "bench" {
   # comments recording bugs that cost a fleet each to find, and trimming to
   # just under the cap would put the next addition back over it.
   #
-  # Headroom, measured: the rendered script is ~25.9 KB, gzips to
-  # ~10.1 KB, and is ~13.5 KB base64-encoded. Against the 16384
-  # cap that is 1.6x on the gzip or 1.18x on the base64,
-  # about 2.5 KB spare on the tighter reading.
+  # Headroom, measured: the rendered script is ~27.7 KB, gzips to ~10.6 KB, and
+  # is ~14.2 KB base64-encoded. Against the 16384 cap that is ~1.8 KB spare,
+  # about 1.13x. This is tight, and the margin has now shrunk twice.
   #
-  # Re-measure when you change this script. These figures have been wrong twice:
-  # once claiming room to nearly triple, and once left stale by an addition that
-  # ate a fifth of the remaining margin.
-  #
-  # Which of those two the cap actually applies to is not settled here. The
-  # failure recorded above was on plain user_data, where 16905 rendered bytes
-  # tripped it, so that case says nothing about which form counts once
-  # base64gzip is in play. An earlier version of this comment asserted base64
-  # was the binding figure; that was a guess. Either way there is room, and the
-  # honest instruction is to measure rather than to reason:
+  # Which form the cap applies to is not settled here. The failure recorded
+  # above was on plain user_data, so it says nothing about which form counts
+  # under base64gzip. An earlier version of this comment asserted base64 was
+  # binding; that was a guess. Measure, do not reason:
   #
   #   terraform console <<<'templatefile("./templates/bootstrap.sh.tftpl", {...})'
   #
-  # Note it will not fail at plan on a first apply. user_data_base64 depends on
-  # local.run_id, which derives from random_id and timestamp(), and on
-  # local.bucket, which can be an unresolved aws_s3_bucket id, so the value is
-  # unknown until apply. That is exactly how the failure above went: the bucket
-  # and security group existed before anything checked the length.
+  # It will NOT fail at plan on a first apply. user_data_base64 depends on
+  # local.run_id, which derives from random_id and timestamp(), and on a bucket
+  # id that may not exist yet, so the value is unknown until apply. That is how
+  # the original overflow went: the bucket and security group existed first.
+  #
   user_data_base64 = base64gzip(templatefile("${path.module}/templates/bootstrap.sh.tftpl", {
     run_id                = local.run_id
     shard_index           = count.index
