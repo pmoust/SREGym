@@ -30,6 +30,7 @@ _COLUMNS = [
     "TTM",
     "timed_out",
     "agent_timeout_seconds",
+    "deploy_attempts",
 ]
 
 
@@ -46,7 +47,7 @@ def _run(tmp_path, rows):
     return tmp_path
 
 
-def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out=""):
+def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy_attempts=""):
     return {
         "problem_id": pid,
         "attempt": str(attempt),
@@ -55,6 +56,7 @@ def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out=""):
         "TTL": ttl,
         "TTM": ttm,
         "timed_out": timed_out,
+        "deploy_attempts": deploy_attempts,
     }
 
 
@@ -430,3 +432,55 @@ def test_the_token_dir_override_adds_rather_than_replaces(tmp_path, monkeypatch)
 
     assert t["output"] == 30, "the override replaced instead of adding"
     assert t["series"] == 2
+
+
+def test_wasted_deploys_are_counted_and_not_folded_into_any_rate(tmp_path):
+    """A retry costs 35 to 40 minutes and moves no score, so it needs saying.
+
+    One attempt deployed once, one needed two deploys, one exhausted all three.
+    That is three wasted deploys across two of the three attempts, and the
+    diagnosis rate is untouched by any of it.
+    """
+    run = _run(
+        tmp_path,
+        [
+            _row("p1", diag="True", mitig="True", deploy_attempts="1"),
+            _row("p2", diag="True", mitig="True", deploy_attempts="2"),
+            _row("p3", diag="False", mitig="False", deploy_attempts="3"),
+        ],
+    )
+    s = score_run.score(score_run.load(run))
+
+    assert s["wasted_deploys"] == 3
+    assert s["retried_attempts"] == 2
+    assert s["deploy_attempts_known"] == 3
+    # The point of reporting it separately: no rate moves.
+    assert s["diagnosis"]["correct"] == 2
+    assert s["attempts"] == 3
+
+    assert "3 deploy(s) produced no attempt, across 2 of 3 attempts" in score_run.render(s, None)
+
+
+def test_a_run_with_no_deploy_column_reads_as_unknown_not_as_zero(tmp_path):
+    """Every run archived before this column existed has to say so.
+
+    Reading a blank cell as zero would let an old run claim it wasted no
+    deploys, which is the same mistake as counting an absent verdict as a
+    failure.
+    """
+    run = _run(tmp_path, [_row("p1", diag="True", mitig="True")])
+    s = score_run.score(score_run.load(run))
+
+    assert s["deploy_attempts_known"] == 0
+    assert s["wasted_deploys"] == 0
+    out = score_run.render(s, None)
+    assert "deploy retries: not recorded in this run's rows" in out
+    assert "produced no attempt" not in out
+
+
+def test_a_clean_run_says_nothing_about_deploys(tmp_path):
+    """No line at all when every attempt deployed once. Silence is the signal."""
+    run = _run(tmp_path, [_row("p1", diag="True", mitig="True", deploy_attempts="1")])
+    out = score_run.render(score_run.score(score_run.load(run)), None)
+
+    assert "deploy retries" not in out
