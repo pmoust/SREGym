@@ -110,7 +110,17 @@ def test_the_shard_handoff_is_declared_once():
     assert len(re.findall(r"^export PROBLEM_SET", tpl, re.M)) == 1
 
 
-@pytest.mark.parametrize("name", ["smoke", "run"])
+def _scenarios() -> list[str]:
+    """Every scenario file, so adding one does not quietly opt out of these.
+
+    The list used to be ["smoke", "run"] spelled out here. A third scenario
+    would then have been unchecked on both counts below, which is the failure
+    these tests exist to prevent.
+    """
+    return sorted(p.stem for p in (ROOT / "terraform").glob("*.tfvars"))
+
+
+@pytest.mark.parametrize("name", _scenarios())
 def test_each_scenario_names_only_real_problems(name):
     """A typo in a tfvars list is a hard stop on the instance, which is correct
     but expensive: it costs a boot to find out. Check it here instead."""
@@ -164,7 +174,7 @@ def test_the_scored_run_is_exactly_lite_width_and_splits_evenly():
     )
 
 
-@pytest.mark.parametrize("scenario", ["smoke", "run"])
+@pytest.mark.parametrize("scenario", _scenarios())
 def test_no_scenario_asks_for_a_turn_timeout_brain_go_will_not_honour(scenario):
     """The bootstrap derives CHAT_SERVICE_TURN_TIMEOUT as twice this value.
 
@@ -209,3 +219,28 @@ def test_every_template_variable_is_modelled_for_the_user_data_measurement():
         f"bootstrap.sh.tftpl uses {sorted(referenced - modelled)}, which measure_user_data "
         "does not model, so launch.sh will refuse to plan"
     )
+
+
+def test_a_narrowed_scenario_has_a_slot_for_every_problem_it_names():
+    """A scenario that asks for more slots than problems wastes the difference.
+
+    Slots are handed problems by index modulo runs_per_instance, so a slot that
+    draws none logs "drew no problems, skipping" and exits. That reads like a
+    clean short run. It matters most for smoke7, whose entire purpose is to put
+    a named number of slots under load: if its problem list and its slot count
+    ever drift apart, it silently tests fewer slots than it claims to.
+    """
+    for name in _scenarios():
+        src = (ROOT / "terraform" / f"{name}.tfvars").read_text()
+        block = re.search(r"^problems\s*=\s*\[(.*?)\]", src, re.S | re.M)
+        if block is None:  # the scored run runs the whole set
+            continue
+
+        named = len(re.findall(r'"([a-z0-9_]+)"', block.group(1)))
+        instances = int(_tfvar(name, "instance_count") or 1)
+        slots = int(_tfvar(name, "runs_per_instance") or 1)
+
+        assert instances * slots <= named, (
+            f"{name}.tfvars: {instances} x {slots} = {instances * slots} slots for "
+            f"{named} problem(s), so {instances * slots - named} slot(s) draw nothing"
+        )
