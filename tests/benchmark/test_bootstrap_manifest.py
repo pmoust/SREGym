@@ -1,6 +1,6 @@
 """The bootstrap's manifest invocation, which fails silently when it breaks.
 
-The manifest is a multi-line environment prefix: eight lines of VAR=value each
+The manifest is a multi-line environment prefix: nine lines of VAR=value each
 ending in a backslash, then the script. Drop one backslash and the statement
 splits in two. The first half becomes bare assignments, which set shell
 variables without exporting them, so the script runs as a child that sees none
@@ -27,6 +27,7 @@ _VALUES = {
     "problems": "network_policy_block wrong_dns_policy_astronomy_shop",
     "agent_timeout_seconds": "1800",
     "runs_per_instance": "3",
+    "instance_type": "test-instance-type",
     "agent_model": "test-agent-model",
     "judge_model": "test-judge-model",
     "sregym_ref": "a" * 40,
@@ -81,6 +82,7 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "noise",
         "agent_timeout_seconds",
         "runs_per_instance",
+        "instance_type",
         "agent_model",
         "judge_model",
         "sregym_ref",
