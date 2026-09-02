@@ -11,6 +11,7 @@ shell anyone meant. This file exists because that exact edit was made and only
 caught by running it.
 """
 
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -183,4 +184,28 @@ def test_no_scenario_asks_for_a_turn_timeout_brain_go_will_not_honour(scenario):
     assert int(configured) <= ceiling, (
         f"{scenario}: agent_timeout_seconds={configured} derives a "
         f"{int(configured) * 2}s turn timeout, past brain-go's 5400s write timeout"
+    )
+
+
+def test_every_template_variable_is_modelled_for_the_user_data_measurement():
+    """measure_user_data models the template's inputs and drifts from it silently.
+
+    Adding a variable to the templatefile block in compute.tf without adding it
+    here makes launch.sh exit before it plans, with "template needs values not
+    modelled here". That is the right failure, but it fires on the operator at
+    launch time rather than here, and it already cost one launch attempt.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "measure_user_data",
+        ROOT / "scripts" / "benchmark" / "measure_user_data.py",
+    )
+    measure_user_data = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(measure_user_data)
+
+    referenced = set(re.findall(r"\$\{(\w+)\}", TEMPLATE.read_text()))
+    modelled = set(measure_user_data.FIXED) | set(measure_user_data.SCENARIOS["typical"])
+
+    assert not referenced - modelled, (
+        f"bootstrap.sh.tftpl uses {sorted(referenced - modelled)}, which measure_user_data "
+        "does not model, so launch.sh will refuse to plan"
     )
