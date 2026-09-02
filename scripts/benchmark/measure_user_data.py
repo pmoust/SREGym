@@ -53,6 +53,7 @@ FIXED = {
     "noise": "false",
     "agent_timeout_seconds": "1800",
     "runs_per_instance": "3",
+    "instance_type": "m8i.8xlarge",
     "region": "us-east-2",
     "max_runtime_hours": "12",
     "keep_alive_on_failure": "false",
