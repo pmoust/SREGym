@@ -314,7 +314,16 @@ def driver_loop(
                 # Retry start_problem up to 3 times to handle transient deploy failures
                 max_deploy_retries = 3
                 result = None
+                # How many deploys this attempt actually cost. Recorded on the
+                # result row because a retry is expensive and otherwise
+                # invisible: start_problem waits 600s on pod readiness before it
+                # raises, and the retry then tears down and redeploys the whole
+                # problem, so one retry is 35 to 40 minutes of a run's wall
+                # clock. run-20260902-0606 spent 12 of them and scored the same
+                # as a run that spent none (#53).
+                deploy_attempts = 0
                 for deploy_attempt in range(1, max_deploy_retries + 1):
+                    deploy_attempts = deploy_attempt
                     try:
                         result = await conductor.start_problem()
                         break  # Success — exit retry loop
@@ -348,6 +357,7 @@ def driver_loop(
                         "problem_id": pid,
                         "attempt": attempt,
                         "deploy_failed": True,
+                        "deploy_attempts": deploy_attempts,
                     }
                     all_results_for_agent.append(snapshot)
                     fieldnames = sorted({key for row in all_results_for_agent for key in row})
@@ -452,6 +462,7 @@ def driver_loop(
                 snapshot = {
                     "problem_id": pid,
                     "attempt": attempt,
+                    "deploy_attempts": deploy_attempts,
                 }
                 for stage, outcome in conductor.results.items():
                     if isinstance(outcome, dict):

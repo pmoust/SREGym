@@ -82,6 +82,14 @@ def load(run_dir: Path) -> list[dict]:
     return [r for r in rows if _val(r, "problem_id")]
 
 
+def _int(raw: str) -> int:
+    """A CSV cell as an int, with anything unparseable reading as 0."""
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _rate(correct: int, total: int) -> float | None:
     return None if total == 0 else round(100.0 * correct / total, 1)
 
@@ -111,6 +119,20 @@ def score(rows: list[dict]) -> dict:
     both_graded = [r for r in rows if _val(r, "Diagnosis.success") and _val(r, "Mitigation.success")]
 
     censored = [r for r in rows if _val(r, "timed_out") == "True"]
+
+    # Deploys that produced no attempt. start_problem waits 600s on pod
+    # readiness, and a retry tears the problem down and redeploys it, so one
+    # retry costs 35 to 40 minutes of the run's wall clock (#53). Reported
+    # because it does not touch any rate: a run that wasted a dozen deploys
+    # scores exactly like one that wasted none and finishes an hour later.
+    #
+    # Rows written before deploy_attempts existed have no column, which reads
+    # as 0 wasted rather than as unknown. Counting the rows that carry it is
+    # what tells the two apart.
+    retried = [r for r in rows if _int(_val(r, "deploy_attempts")) > 1]
+    wasted_deploys = sum(_int(_val(r, "deploy_attempts")) - 1 for r in retried)
+    deploy_attempts_known = len([r for r in rows if _val(r, "deploy_attempts")])
+
     absent_mitig = [r for r in rows if not _val(r, "Mitigation.success")]
     # The claim in this file's docstring, checked against the data in hand
     # rather than asserted from one run.
@@ -201,6 +223,9 @@ def score(rows: list[dict]) -> dict:
             "graded": len(both_graded),
         },
         "censored": len(censored),
+        "wasted_deploys": wasted_deploys,
+        "retried_attempts": len(retried),
+        "deploy_attempts_known": deploy_attempts_known,
         "odd_verdicts": odd_verdicts,
         "ttd_seconds": stats(ttl),
         "ttm_seconds": stats(ttm),
@@ -327,6 +352,13 @@ def render(s: dict, tok: dict | None) -> str:
     out: list[str] = []
     d, m, e = s["diagnosis"], s["mitigation"], s["e2e"]
     out.append(f"{s['problems']} problems, {s['attempts']} attempts, {s['censored']} censored by the agent timeout")
+    if s["deploy_attempts_known"] == 0:
+        out.append("  deploy retries: not recorded in this run's rows")
+    elif s["wasted_deploys"]:
+        out.append(
+            f"  deploy retries: {s['wasted_deploys']} deploy(s) produced no attempt, "
+            f"across {s['retried_attempts']} of {s['deploy_attempts_known']} attempts"
+        )
     out.append("")
     out.append("                 strict          graded          note")
     out.append(
