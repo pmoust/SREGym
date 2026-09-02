@@ -125,3 +125,62 @@ def test_each_scenario_names_only_real_problems(name):
     assert named, "problems is present but empty; omit it instead"
     unknown = [p for p in named if p not in known]
     assert not unknown, f"{name}.tfvars names ids that are not in sregym-lite: {unknown}"
+
+
+def _tfvar(scenario: str, name: str) -> str | None:
+    """The scalar a scenario assigns, or None when it leaves the default."""
+    src = (ROOT / "terraform" / f"{scenario}.tfvars").read_text()
+    found = re.search(rf"^{name}\s*=\s*(\S+)", src, re.M)
+
+    return found.group(1) if found else None
+
+
+def _lite_problem_count() -> int:
+    src = (ROOT / "sregym" / "conductor" / "problem_sets.py").read_text()
+
+    return len(re.findall(r'"([a-z0-9_]+)"', src.split("SREGYM_LITE_PROBLEMS = (")[1].split(")")[0]))
+
+
+def test_the_scored_run_is_exactly_lite_width_and_splits_evenly():
+    """Both splits are static modulo, so a width that does not divide is silent.
+
+    instance_count x runs_per_instance above the problem count leaves slots
+    that draw nothing and log "drew no problems, skipping", which reads like a
+    clean short run. Below it, slots go two problems deep and the run takes as
+    long as the deepest slot. Neither fails, and neither is visible in the
+    results.
+    """
+    problems = _lite_problem_count()
+    instances = int(_tfvar("run", "instance_count"))
+    slots = int(_tfvar("run", "runs_per_instance"))
+
+    assert instances * slots == problems, (
+        f"{instances} x {slots} = {instances * slots} slots for {problems} problems: "
+        "over-provisioned slots skip, under-provisioned slots go deep"
+    )
+    assert problems % instances == 0, (
+        f"{problems} problems across {instances} instances is uneven, so the run is as slow as the largest shard"
+    )
+
+
+@pytest.mark.parametrize("scenario", ["smoke", "run"])
+def test_no_scenario_asks_for_a_turn_timeout_brain_go_will_not_honour(scenario):
+    """The bootstrap derives CHAT_SERVICE_TURN_TIMEOUT as twice this value.
+
+    brain-go's HTTP write timeout is 90 minutes and severs the connection
+    whatever the turn timeout says, so anything above 2700s here configures a
+    turn timeout that is quietly capped. The symptom is a turn dying at 90
+    minutes with a client-side disconnect rather than at the timeout anyone
+    set.
+    """
+    ceiling = 90 * 60 // 2
+    configured = _tfvar(scenario, "agent_timeout_seconds")
+    if configured is None:  # inherits the variables.tf default
+        src = (ROOT / "terraform" / "variables.tf").read_text()
+        block = src.split('variable "agent_timeout_seconds"', 1)[1]
+        configured = re.search(r"default\s*=\s*(\d+)", block).group(1)
+
+    assert int(configured) <= ceiling, (
+        f"{scenario}: agent_timeout_seconds={configured} derives a "
+        f"{int(configured) * 2}s turn timeout, past brain-go's 5400s write timeout"
+    )

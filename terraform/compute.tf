@@ -1,6 +1,7 @@
 # One instance per shard. Spot, because this is interruptible batch work where a
-# killed run resumes from S3: r7a.24xlarge has been running around $1.43 spot
-# against $7.30 on-demand in us-east-1.
+# killed run resumes from S3. Both scenarios still set use_spot = false, for the
+# reason run.tfvars gives. The default instance is m8i.8xlarge at $1.69/hour
+# on demand in us-east-2, down from r7a.24xlarge at $7.30.
 #
 # Deliberately aws_instance with count rather than an Auto Scaling group. An ASG
 # would fight the self-termination: it exists to hold capacity, while these
