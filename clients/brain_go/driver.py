@@ -24,6 +24,7 @@ Tracked by NOFireAI/brain-go#2219.
 from __future__ import annotations
 
 import logging
+import datetime
 import os
 import subprocess
 import sys
@@ -467,6 +468,67 @@ def confirm_persisted(investigation_uuid: str) -> None:
 # Prompts
 # ---------------------------------------------------------------------------
 
+# How the incident window has to be phrased, and why it is the last thing in
+# every prompt.
+#
+# Given no bounds, brain-go's init_state stamps a flat one-hour lookback ending
+# now. On this harness almost all of that hour is cluster creation, app deploy
+# and observability startup, and the injected fault is a sliver at the end, so
+# the agent diagnoses the loudest thing it can see and the judge scores that as
+# a failure (sregym#52).
+#
+# brain-go will take a window off the message text instead. Four constraints,
+# each read off its own regexes rather than assumed:
+#
+#   - "between <t> and <t>", because that is what its reFromTo matches.
+#   - Last in the message, no trailing newline. reFromTo ends in `(.+)$` and is
+#     not multiline, so a window with anything after it does not match. It then
+#     falls through to a single-anchor parse that yields start=injection and
+#     end=now, which at turn time is a window seconds wide. Worse than the
+#     default hour, and silent.
+#   - Minute precision and no trailing "Z". Its token pattern is
+#     `\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?`, so seconds do not parse and a "Z"
+#     stops both the gate and the anchor from matching at all.
+#   - UTC, because brain-go builds the timestamp in the account's timezone and
+#     the seeded benchmark account sets none, which resolves to UTC.
+INCIDENT_WINDOW_FMT = "%Y-%m-%dT%H:%M"
+
+
+def incident_window(incident_start: float | None) -> str:
+    """The window sentence to append to a prompt, or "" when unknown.
+
+    Empty rather than a guess: with no sentence brain-go keeps its own
+    one-hour default, which is the behaviour before this existed. A wrong
+    window would be worse than no window, because it would look deliberate.
+
+    The window ends one agent budget after the fault, not "now". brain-go
+    freezes a thread's window on the first turn, so an end at turn time would
+    be seconds wide and everything the agent queried afterwards would fall
+    outside it. The budget is what bounds the investigation, so it is the
+    honest end.
+
+    One consequence worth knowing: brain-go derives baseline_start as
+    start - (end - start) * 3, so a 40 minute window puts the baseline two
+    hours before the fault, which is before the cluster existed. The baseline
+    is then empty rather than wrong. Tightening the window would buy a
+    populated baseline at the cost of the incident window not covering the
+    investigation, which is the worse trade.
+    """
+    if not incident_start:
+        return ""
+
+    budget = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "1800") or 1800)
+    start = datetime.datetime.fromtimestamp(incident_start, datetime.UTC)
+    end = start + datetime.timedelta(seconds=budget)
+
+    return (
+        f"The fault was introduced at {start.strftime(INCIDENT_WINDOW_FMT)} UTC. "
+        f"Anything before that is normal operation, including the cluster build and "
+        f"the application deploy. Investigate between "
+        f"{start.strftime(INCIDENT_WINDOW_FMT)} and {end.strftime(INCIDENT_WINDOW_FMT)}"
+    )
+
+
 DIAGNOSIS_PROMPT = """You are investigating a Kubernetes application failure.
 
 Application: {app_name}
@@ -483,15 +545,24 @@ Provide a clear, concise diagnosis identifying:
 - The root cause of the failure
 - Supporting evidence from your investigation
 
-Be specific and technical. State the root cause clearly in your final answer."""
+Be specific and technical. State the root cause clearly in your final answer.
 
+{window}"""
+
+# The window is repeated here rather than relied on from the diagnosis turn.
+# brain-go would preserve it (its hasWindow case keeps a window a later turn
+# does not override), but that case sits below the explicit-time check, so any
+# incidental time phrase in a later message resets it. Restating it costs a
+# line and removes the dependency.
 MITIGATION_PROMPT = """Your task now is to FIX the failure in this application by
 applying changes to the cluster.
 
 Application: {app_name}
 Namespace: {namespace}
 
-Apply the fix, then confirm the application has recovered."""
+Apply the fix, then confirm the application has recovered.
+
+{window}"""
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +596,9 @@ def main() -> int:
         "app_name": app_info.get("name", "unknown"),
         "namespace": app_info.get("namespace", "unknown"),
         "descriptions": app_info.get("descriptions", ""),
+        "window": incident_window(app_info.get("incident_start")),
     }
+    logger.info("incident window: %s", params["window"] or "not supplied by the conductor")
 
     # One thread for both phases, so the mitigation turn sees the diagnosis it
     # is acting on.
@@ -545,7 +618,7 @@ def main() -> int:
 
     logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
     try:
-        diagnosis = run_turn(DIAGNOSIS_PROMPT.format(**params), thread_id, DIAGNOSIS_LOCAL_TOOLS)
+        diagnosis = run_turn(DIAGNOSIS_PROMPT.format(**params).rstrip(), thread_id, DIAGNOSIS_LOCAL_TOOLS)
     except TurnFailed:
         logger.exception("diagnosis turn failed")
         submit_to_conductor("")
@@ -573,7 +646,7 @@ def main() -> int:
 
     logger.info("=" * 30 + " MITIGATION " + "=" * 29)
     try:
-        mitigation = run_turn(MITIGATION_PROMPT.format(**params), thread_id, MITIGATION_LOCAL_TOOLS)
+        mitigation = run_turn(MITIGATION_PROMPT.format(**params).rstrip(), thread_id, MITIGATION_LOCAL_TOOLS)
         logger.info("mitigation (%d chars): %s", len(mitigation), mitigation[:300])
     except TurnFailed:
         logger.exception("mitigation turn failed")
