@@ -29,11 +29,17 @@ variable "runs_per_instance" {
     running many slots, not many instances running one apiece. See
     NOFireAI/brain-go#2218's fleet-shape table.
 
-    Sizing is not yet measured on a real instance. #2218 estimates roughly 12 GB
-    and 4 to 6 vCPU per concurrent run and flags that figure as known-low, since
-    each instance also carries the shared brain-go stack with its Postgres and
-    Temporal. On an r7a.24xlarge (96 vCPU, 768 GB) that suggests somewhere
-    around 12 to 19, but the first real deploy is what replaces the estimate.
+    Sizing is measured now, on run-20260902-0606 at three slots: ~0.83 cores,
+    ~7.3 GB and ~35 GB of disk per slot. #2218's estimate of 4 to 6 vCPU and
+    12 GB was high on both, and disk, which it did not rank, is the only
+    binding resource: roughly 13 slots per box against the EBS root, until
+    #49 mounts the instance store.
+
+    Slot count is capped by the problem set before it is capped by the box.
+    A problem maps to exactly one slot, so slots past the problem count draw
+    nothing and skip. sregym-lite is 21, which is what run.tfvars asks for
+    across three instances.
+
     The cap below is a guard against a typo costing a fleet, not a measured
     ceiling.
   EOT
@@ -211,10 +217,27 @@ variable "instance_type" {
   description = <<-EOT
     Sized for concurrency, not for one run. Each instance carries kind clusters
     plus a full brain-go stack, since BRAIN_API_URL defaults to localhost:8001.
-    Re-measure on the first deploy and tune.
+
+    Measured on r7a.24xlarge during run-20260902-0606 at three slots: 2.6% of
+    96 vCPU, 3.0% of 739 GB, and 105 GB of a 484 GB root. Per slot that is
+    ~0.83 cores, ~7.3 GB and ~35 GB of disk, so the box was oversized by
+    roughly 30x on CPU and memory. At the seven slots run.tfvars now asks for,
+    32 vCPU and 128 GiB leaves headroom on both: ~51 GB of memory, and ~31
+    vCPU at the boot-time peak when every slot builds its kind cluster at once
+    (13.7% of 96 vCPU at three slots, from CloudWatch, scaled by slot count).
+    That peak figure is a floor, not the peak: CloudWatch averages over five
+    minutes, so a shorter burst reads lower than it was. If boot throttles at
+    seven slots this is the number that was optimistic, and staggering slot
+    starts is the cheaper answer than a bigger box, since steady state is
+    ~1.1 cores per slot.
+
+    m8i and not m8id. The d families carry a local NVMe device that nothing
+    mounts today (#49), so the premium buys an idle disk while the run still
+    fills the EBS root. Revisit once #49 lands, which is also what lifts the
+    ~13-slots-per-box disk ceiling.
   EOT
   type        = string
-  default     = "r7a.24xlarge"
+  default     = "m8i.8xlarge"
 }
 
 variable "disk_gb" {

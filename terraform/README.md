@@ -82,6 +82,24 @@ keeping it identical makes the next run a paired comparison and isolates what
 changed in between; 63 paired problem-runs resolves about 23pp at 80% power.
 Changing `n_attempts` or the problem set costs that comparison.
 
+It also runs those 63 at full width: `instance_count x runs_per_instance` is
+21, one slot per problem, so each slot is three attempts deep instead of seven.
+Width is the only lever on wall clock, because attempts are serial inside a
+slot. Going past 21 needs more problems, not more slots: a problem maps to
+exactly one slot, and the extras log `drew no problems, skipping`. A test pins
+both the width and the even split, since neither fails loudly.
+
+Measured per slot on `run-20260902-0606`: a 24.8 minute median attempt cycle,
+and a bimodal setup before the first attempt, four slots at 16 to 21 minutes
+and five at 56 to 58, median 55.7. Nine slots up to nine attempts deep finished
+in about 4.9 hours, which is the slowest slot; the median slot finished in 3.2.
+At 21 slots the depth is 3, which puts the slowest slot near 2.2 hours.
+
+Quote the slowest slot, not the median one. The run ends when the last slot
+does, and setup is roughly half of that. The tail is a first deploy that fails
+before fault injection and restarts the problem, costing the slot its deploy
+twice; #53 has the evidence and the counts.
+
 To narrow any run, set `problems` to a list of ids from the set. Ids are checked
 on the instance and an unknown one is a hard stop, because a typo would
 otherwise shard to nothing and the instance would terminate looking like a clean
@@ -206,9 +224,9 @@ slot its own in-flight problem, not the whole shard.
 To replace a killed instance, `terraform apply` again.
 
 **It terminates itself twice over.** Once when the shard completes, and again if
-`max_runtime_hours` elapses. Both matter: an `r7a.24xlarge` is about $7.30/hour
-on demand, and the failure that actually costs money is a forgotten box, not a
-failed run.
+`max_runtime_hours` elapses. Both matter: an `m8i.8xlarge` is about $1.69/hour
+on demand in us-east-2, and the failure that actually costs money is a
+forgotten box, not a failed run.
 
 **Access is SSM Session Manager**, so the security group has no inbound rules at
 all. No keys, no bastion, and sessions are audited.
@@ -221,6 +239,12 @@ gives 3000 IOPS and 125 MB/s regardless of size, tunable independently. Sized
 generously because every kind node keeps its own image cache: ENOSPC is what
 kills the smoke-test CI today, and it surfaces as `ErrImagePull` rather than as a
 disk error.
+
+`run.tfvars` raises `disk_throughput_mbps` to 500 for the same reason it raised
+the slot count. Every slot on a box shares that baseline, image pulls are most
+of the ~35 GB each one writes, and three slots never tested it. Capacity is not
+the constraint at seven slots: ~245 GB of a 484 GB root, against a measured
+ceiling of roughly 13 slots per box (#49).
 
 **The judge model must differ from the agent model**, enforced by a
 precondition. A model grading its own output is not a measurement. Note that two
@@ -238,9 +262,17 @@ cluster, its own API/MCP/k8s-proxy host ports
 (`scripts/benchmark/run_slot_env.sh`), and its own brain-go tenant
 (`scripts/benchmark/seed_slot.sh`) seeded against the one brain-go stack the
 instance shares across all its slots. One cluster per run is still a hard
-constraint; one host per run is not. Sizing is not yet measured on a real
-instance -- see NOFireAI/brain-go#2218's fleet-shape table for the current
-estimate and why 3 to 4 large instances beats many small ones on cost.
+constraint; one host per run is not.
+
+Sizing is now measured rather than estimated. On `r7a.24xlarge` at three slots:
+2.6% of 96 vCPU, 3.0% of 739 GB, 105 GB of a 484 GB root, which is ~0.83 cores,
+~7.3 GB and ~35 GB per slot. Disk was the only binding resource. That is what
+moved the default to `m8i.8xlarge` and the scored run to seven slots; see
+`variables.tf` for why `m8i` and not `m8id`.
+
+Those are point-in-time readings taken on a live box, not time averages. No
+CloudWatch agent is installed, so CPU is the only one recoverable after a run
+and memory and disk are not recoverable at all.
 
 ## brain-go
 
@@ -259,7 +291,12 @@ only on the in-process CUSTOM_MCP path, not the Temporal MCP activity path.
 
 ## Cost
 
-Compute is the cheap half. `r7a.24xlarge` is about $7.30/hour on demand and has
-been running near $1.43 spot in us-east-1. A full 540-run protocol is a few tens
-of dollars of compute. The token spend is the number to watch, and what to
-capture from the first run is in NOFireAI/brain-go#2219.
+Compute is the cheap half, and cheaper since the default was resized.
+`m8i.8xlarge` is about $1.69/hour on demand in us-east-2, against $7.30 for the
+`r7a.24xlarge` it replaced. Three boxes for a ~2.2 hour scored run is about $11,
+where the same run at the old size and width was nearer $110. A full 540-run
+protocol is still a few tens of dollars of compute.
+
+The token spend is the number to watch: `run-20260902-0606` billed 96.4M tokens
+across the 60 attempts it actually scored, most of it cache reads. `scripts/benchmark/score_run.py`
+reports the breakdown, and what to capture is in NOFireAI/brain-go#2219.

@@ -36,6 +36,12 @@ OUT="${1:?usage: write_run_manifest.sh <output-path>}"
   echo "noise=${NOISE:-}"
   echo "agent_timeout_seconds=${AGENT_TIMEOUT_SECONDS:-}"
   echo "runs_per_instance=${RUNS_PER_INSTANCE:-}"
+  # The instance family, because slot count alone does not describe the box
+  # the slots ran on. run-20260902-0606 recorded runs_per_instance=3 and
+  # nothing else, so recovering that it ran on r7a.24xlarge took a CloudTrail
+  # lookup of RunInstances. Two runs at the same slot count on different
+  # families are not the same run.
+  echo "instance_type=${INSTANCE_TYPE:-}"
   echo "agent_model=${AGENT_MODEL:-}"
   echo "judge_model=${JUDGE_MODEL:-}"
   echo "sregym_ref=${SREGYM_REF:-}"
