@@ -17,10 +17,19 @@ problems = [
   "wrong_dns_policy_astronomy_shop", # astronomy shop
 ]
 
-instance_count        = 1
-runs_per_instance     = 1
-n_attempts            = 1
-max_runtime_hours     = 1
+instance_count    = 1
+runs_per_instance = 1
+n_attempts        = 1
+# Two hours, not one. One could not finish this scenario: two problems run
+# serially in a single slot, each with the 1800s agent cap, is 60 minutes of
+# agent budget before any setup or deploy. run-20260902-1556 spent 13 minutes
+# on setup, hit the cap on the first problem, diagnosed the second correctly at
+# 16:52, and was killed by the runtime backstop at 16:56 before that verdict
+# could be graded. It scored 1 of 2 and read like a harness failure.
+#
+# It only ever passed because agents usually finish early. A test now pins the
+# arithmetic so the next scenario cannot get this wrong quietly.
+max_runtime_hours     = 2
 keep_alive_on_failure = true
 use_spot              = false # a reclaim mid-smoke reads like a harness failure
 
