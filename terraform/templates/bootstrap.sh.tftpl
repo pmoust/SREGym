@@ -87,11 +87,19 @@ sync_logs() {
     "$WORKDIR/scripts/benchmark/scrape_tokens.sh" /var/log/sregym-tokens.prom || true
   fi
 
+  # brain-go's own logs, which otherwise die with the container runtime. The
+  # archive is harness-side only without this, so the derived incident window
+  # is invisible off the box and sregym#52 cannot be verified from a run.
+  if [ -x "$WORKDIR/scripts/benchmark/dump_brain_go_logs.sh" ]; then
+    "$WORKDIR/scripts/benchmark/dump_brain_go_logs.sh" /var/log/sregym-brain-go.log || true
+  fi
+
   # sregym-pf-*.log is the port-forward's own stderr. Without it a forward
   # that died leaves no trace off the box, which is how run-20260831-1752 had
   # to be diagnosed from tool-call timings instead of from the cause.
   for f in /var/log/sregym-bootstrap.log /var/log/sregym-slot-*.log \
-           /var/log/sregym-pf-*.log /var/log/sregym-tokens.prom "$MANIFEST"; do
+           /var/log/sregym-pf-*.log /var/log/sregym-tokens.prom \
+           /var/log/sregym-brain-go.log "$MANIFEST"; do
     [ -f "$f" ] || continue
     aws s3 cp "$f" "$S3_PREFIX/logs/$(basename "$f")" \
       --region "$REGION" --only-show-errors || true

@@ -275,3 +275,72 @@ def test_every_scenario_file_on_disk_is_tracked_by_git():
         f"untracked scenario file(s): {sorted(on_disk - tracked)}. "
         "Commit them, or name a personal override <something>.local.tfvars"
     )
+
+
+def test_every_scenario_can_finish_inside_its_runtime_cap():
+    """The backstop must not fire before the work it is backing up can finish.
+
+    Attempts are serial inside a slot, so a slot's floor is its problem depth
+    times n_attempts times the agent cap, and the cap has to clear that plus
+    setup. run-20260902-1556 got this wrong: two problems in one slot at the
+    1800s agent cap is 60 minutes of budget alone, against a one-hour backstop.
+    It diagnosed its second problem correctly and was killed four minutes later
+    before the verdict was graded, scoring 1 of 2 and reading like a harness
+    failure rather than a configuration one.
+
+    The setup allowance is measured, not guessed: 13 minutes on that one-slot
+    run, and 16 to 58 minutes per slot on the nine-slot run-20260902-0606,
+    where the tail is a deploy that failed and retried (#53). 30 minutes is the
+    middle of that and is deliberately not the worst case, since a cap sized
+    for the worst case stops being a backstop.
+    """
+    setup_allowance = 30 * 60
+    problems_in_set = _lite_problem_count()
+
+    for name in _scenarios():
+        cap_hours = _tfvar(name, "max_runtime_hours")
+        if cap_hours is None:  # inherits the generous variables.tf default
+            continue
+
+        src = (ROOT / "terraform" / f"{name}.tfvars").read_text()
+        block = re.search(r"^problems\s*=\s*\[(.*?)\]", src, re.S | re.M)
+        problems = len(re.findall(r'"([a-z0-9_]+)"', block.group(1))) if block else problems_in_set
+
+        slots = int(_tfvar(name, "instance_count") or 1) * int(_tfvar(name, "runs_per_instance") or 1)
+        attempts = int(_tfvar(name, "n_attempts") or 1)
+        agent_cap = _tfvar(name, "agent_timeout_seconds")
+        if agent_cap is None:
+            variables = (ROOT / "terraform" / "variables.tf").read_text()
+            agent_cap = re.search(
+                r"default\s*=\s*(\d+)", variables.split('variable "agent_timeout_seconds"', 1)[1]
+            ).group(1)
+
+        depth = -(-problems // slots)  # ceiling division: the deepest slot
+        needed = depth * attempts * int(agent_cap) + setup_allowance
+
+        assert int(cap_hours) * 3600 >= needed, (
+            f"{name}.tfvars: max_runtime_hours={cap_hours} is {int(cap_hours) * 3600}s, but the "
+            f"deepest slot needs {depth} x {attempts} x {agent_cap}s plus {setup_allowance}s of "
+            f"setup = {needed}s"
+        )
+
+
+def test_brain_go_logs_are_dumped_and_shipped():
+    """Both halves, because either alone leaves the archive harness-side only.
+
+    The dump has to run (the logs live in the container runtime and die with
+    the box) and the file has to reach the sync list (a file written to
+    /var/log and never uploaded is the same as no file). run-20260902-1556 had
+    neither, so whether brain-go parsed the incident window it was sent is
+    unanswerable from that run's archive (#52).
+    """
+    tpl = TEMPLATE.read_text()
+    sync = tpl.split("sync_logs() {", 1)[1].split("\n}", 1)[0]
+
+    assert "dump_brain_go_logs.sh" in sync, "nothing dumps brain-go's logs"
+    assert "/var/log/sregym-brain-go.log" in sync.split("for f in", 1)[1], (
+        "the dumped log is not in the list sync_logs uploads"
+    )
+    assert (ROOT / "scripts" / "benchmark" / "dump_brain_go_logs.sh").stat().st_mode & 0o111, (
+        "the dump script is not executable, and sync_logs guards on -x"
+    )
