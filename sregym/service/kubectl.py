@@ -152,6 +152,34 @@ class KubeCtl:
             return False
         return any(owner.kind == "Job" for owner in (pod.metadata.owner_references or []))
 
+    @staticmethod
+    def _blocking_reason(pod) -> str:
+        """One line naming a pod and why it is not ready yet.
+
+        The container's waiting reason is the part worth having:
+        ImagePullBackOff, CrashLoopBackOff and Pending fail for entirely
+        different reasons and the fix differs for each.
+        """
+        blocked = []
+        for status in pod.status.container_statuses or []:
+            if status.ready:
+                continue
+
+            state = status.state
+            if state and state.waiting and state.waiting.reason:
+                blocked.append(f"{status.name}={state.waiting.reason}")
+            elif state and state.terminated and state.terminated.reason:
+                blocked.append(f"{status.name}=Terminated:{state.terminated.reason}")
+            else:
+                blocked.append(f"{status.name}=NotReady")
+
+        if not blocked and not pod.status.container_statuses:
+            # No container statuses at all, which is a pod the scheduler has
+            # not placed. The phase is the only signal there is.
+            blocked.append("no container statuses")
+
+        return f"{pod.metadata.name} [{pod.status.phase}] {', '.join(blocked)}"
+
     def wait_for_ready(
         self,
         namespace: str,
@@ -194,6 +222,10 @@ class KubeCtl:
         console.log(f"[bold yellow]Waiting for all pods in {display_name} to be ready...")
 
         wait = 0
+        # What the last successful poll saw, for the timeout message. None means
+        # no poll ever returned, which is a different failure from pods that
+        # returned and stayed unready, so the two must not read alike.
+        last_not_ready: list[str] | None = None
 
         while wait < max_wait:
             try:
@@ -223,14 +255,34 @@ class KubeCtl:
                         console.log(f"[bold green]All pods in {display_name} are ready.")
                         return
 
+                    ready_names = {pod.metadata.name for pod in ready_pods}
+                    last_not_ready = [
+                        self._blocking_reason(pod) for pod in all_pods if pod.metadata.name not in ready_names
+                    ]
+                else:
+                    last_not_ready = []
+
             except Exception as e:
                 console.log(f"[red]Error checking pod statuses: {e}")
 
             time.sleep(sleep)
             wait += sleep
 
+        # Name them. The caller of this is main.py's deploy retry, which tears
+        # the problem down and redeploys on the exception, so a message that
+        # says only the namespace makes every occurrence equally
+        # unexplainable: 4 of 63 deploys in run-20260902-0606 timed out on the
+        # openebs namespace and no one could say which pod or why, because the
+        # boxes were gone before anyone looked (#56).
+        if last_not_ready is None:
+            detail = "no pod list was ever returned, so the API was unreachable for the whole wait"
+        elif not last_not_ready:
+            detail = "the namespace held no pods at all"
+        else:
+            detail = f"{len(last_not_ready)} not ready: " + "; ".join(last_not_ready)
+
         raise Exception(
-            f"[red]Timeout: Not all pods in {display_name} reached the Ready state within {max_wait} seconds."
+            f"[red]Timeout: Not all pods in {display_name} reached the Ready state within {max_wait} seconds. {detail}"
         )
 
     def wait_for_namespace_deletion(self, namespace, sleep=2, max_wait=300):
