@@ -89,6 +89,11 @@ class Conductor:
         self.waiting_for_agent: bool = False
         self._evaluating: bool = False  # True while a submission is being evaluated
         self.fault_injected: bool = False
+        # When the incident began, as a wall-clock epoch. Separate from
+        # execution_start_time, which is reset after this and is the agent's
+        # budget clock: TTL and TTM measure from it, and reusing it here would
+        # tie the incident window to a value that moves for a different reason.
+        self.fault_injected_at: float | None = None
 
     @property
     def current_problem(self):
@@ -240,6 +245,7 @@ class Conductor:
             problem.mitigation_oracle.capture_baseline()
 
         problem.inject_fault()
+        self.fault_injected_at = time.time()
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
 

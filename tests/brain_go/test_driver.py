@@ -5,6 +5,8 @@ driver: a read timeout must not be retried, and the diagnosis phase must refuse
 local tools.
 """
 
+import datetime
+import re
 import subprocess
 from unittest import mock
 
@@ -263,3 +265,90 @@ def test_confirm_persisted_is_a_noop_without_credentials(monkeypatch):
     monkeypatch.setattr(driver.requests, "get", mock.Mock(side_effect=AssertionError("must not call out")))
 
     driver.confirm_persisted("uuid-1")
+
+
+# brain-go's own regexes, transcribed from internal/chat/lifecycle/nlp.go
+# (explicitTimePattern, reFromTo, reISODate, timeToken). Transcribed rather than
+# approximated because the whole point of the window sentence is that brain-go
+# parses it, and every constraint on its phrasing comes from these three.
+#
+# reFromTo uses `$` in Go without (?m), which matches end of text only. Python's
+# `$` also matches before a trailing newline, which would hide exactly the bug
+# these tests exist to catch, so `\Z` is used here instead.
+_TIME_TOKEN = (
+    r"(?:\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]m)?|\d{1,2}\s*[ap]m"
+    r"|\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?|\d{1,2}[/\-]\d{1,2}(?:[/\-]\d{2,4})?)"
+)
+_EXPLICIT_TIME = re.compile(r"(?i)\bbetween\s+" + _TIME_TOKEN + r"\s+and\s+" + _TIME_TOKEN)
+_FROM_TO = re.compile(r"(?i)\b(?:from|between)\s+(.+?)\s+(?:to|and)\s+(.+)\Z")
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?\b")
+
+_INJECTED_AT = datetime.datetime(2026, 9, 2, 6, 27, 8, tzinfo=datetime.UTC)
+
+
+def _rendered(template, window):
+    return template.format(
+        app_name="astronomy-shop",
+        namespace="astronomy-shop",
+        descriptions="demo",
+        window=window,
+    ).rstrip()
+
+
+@pytest.mark.parametrize("template", ["DIAGNOSIS_PROMPT", "MITIGATION_PROMPT"])
+def test_brain_go_can_parse_the_window_out_of_the_prompt(monkeypatch, template):
+    """The sentence is only worth sending if brain-go's own parser takes it.
+
+    Three ways it silently does not, all of them ending in brain-go using a
+    flat one-hour lookback instead: the explicit-time gate does not fire, the
+    from/to match fails because something follows the window, or an anchor
+    does not parse. Each leaves no error anywhere.
+    """
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
+    prompt = _rendered(getattr(driver, template), driver.incident_window(_INJECTED_AT.timestamp()))
+
+    assert _EXPLICIT_TIME.search(prompt), "hasExplicitTimeReference would not fire"
+    match = _FROM_TO.search(prompt)
+    assert match, "reFromTo needs the window last in the message, with nothing after it"
+
+    bounds = [_ISO_DATE.search(g) for g in (match.group(1), match.group(2))]
+    assert all(bounds), "an anchor did not parse as an ISO timestamp"
+    assert [b.groups() for b in bounds] == [
+        ("2026", "09", "02", "06", "27"),
+        ("2026", "09", "02", "07", "07"),
+    ]
+
+
+def test_the_window_ends_one_agent_budget_after_the_fault(monkeypatch):
+    """brain-go freezes a thread's window on turn 1, so the end has to cover
+    the whole investigation rather than the moment the prompt was built."""
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "600")
+    window = driver.incident_window(_INJECTED_AT.timestamp())
+
+    assert "between 2026-09-02T06:27 and 2026-09-02T06:37" in window
+
+
+def test_the_window_carries_no_seconds_and_no_zulu_suffix(monkeypatch):
+    """Both break the parse outright, and neither is obvious to a later editor.
+
+    brain-go's token pattern ends at the minute, so ":08" does not match, and a
+    trailing "Z" stops both the gate and the anchor from matching at all.
+    """
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
+    window = driver.incident_window(_INJECTED_AT.timestamp())
+    stamps = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?:\S*)", window)
+
+    assert stamps, "no timestamp in the window sentence"
+    for stamp in stamps:
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", stamp), f"unparseable stamp: {stamp}"
+
+
+@pytest.mark.parametrize("unknown", [None, 0, 0.0])
+def test_an_unknown_incident_start_sends_no_window_rather_than_a_guess(unknown):
+    """No sentence leaves brain-go on its own default, which is the behaviour
+    before this existed. A wrong window would read as deliberate."""
+    assert driver.incident_window(unknown) == ""
+
+    prompt = _rendered(driver.DIAGNOSIS_PROMPT, "")
+    assert "between" not in prompt
+    assert not prompt.endswith("\n"), "an absent window must not leave trailing blank lines"

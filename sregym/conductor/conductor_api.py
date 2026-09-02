@@ -166,11 +166,19 @@ async def get_app():
     app_inst = _conductor.app
     logger.debug(f"API returns App instance: {app_inst}")
     namespaces = getattr(app_inst, "namespaces", None) or [app_inst.namespace]
+
     return {
         "app_name": app_inst.app_name,
         "namespace": app_inst.namespace,
         "namespaces": namespaces,
         "descriptions": str(app_inst.description),
+        # When the incident started, for an agent that would otherwise have to
+        # guess. None before injection, so a caller can tell "not yet" from a
+        # timestamp rather than reading 0 as the epoch. Carried here rather
+        # than on /status because the driver already fetches this once per
+        # problem, after the diagnosis stage is reached, and /status is polled
+        # in a loop.
+        "incident_start": _conductor.fault_injected_at,
     }
 
 
