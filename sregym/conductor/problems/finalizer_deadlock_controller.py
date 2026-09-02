@@ -94,22 +94,45 @@ class FinalizerDeadlockController(Problem):
         self._create_clusterrole(_correct_clusterrole_rules())
         self._create_clusterrolebinding()
         self._create_controller_script()
-        self._create_finalized_configmap()
+
+        # The controller comes up before the finalizer goes on, not after.
+        #
+        # Planting it first made a slow pod terminal rather than transient. The
+        # finalizer blocks deletion until a live controller removes it, so when
+        # the readiness wait timed out there was nothing to remove it and the
+        # namespace went permanently Terminating. The retry loop's first act is
+        # to delete the namespace, which is the one thing the deadlock blocks,
+        # so all three attempts died on the same wall and the problem scored
+        # nothing while the run reported success (#50).
+        #
+        # The controller does not need the ConfigMap to exist at startup: its
+        # loop lists by label and skips anything without a deletionTimestamp,
+        # so it simply finds nothing until this creates it.
         self._deploy_controller()
         self._wait_for_controller_ready()
         print(f"Controller `{self.controller_name}` started with valid RBAC")
 
-        self._replace_clusterrole(_broken_clusterrole_rules())
-        print(f"ClusterRole `{self.clusterrole_name}` changed to read-only")
+        self._create_finalized_configmap()
 
-        self.kubectl.core_v1_api.delete_namespaced_config_map(
-            self.configmap_name,
-            self.namespace,
-            body=client.V1DeleteOptions(grace_period_seconds=0),
-            _request_timeout=10,
-        )
-        print(f"Deleted ConfigMap `{self.configmap_name}` with --wait=false semantics")
-        self._wait_for_forbidden_log()
+        # Everything from here on has a finalizer planted, and the RBAC is
+        # about to be broken on purpose. A failure in this stretch leaves the
+        # namespace undeletable, so clear it and let the caller retry against a
+        # clean namespace rather than against the wreckage.
+        try:
+            self._replace_clusterrole(_broken_clusterrole_rules())
+            print(f"ClusterRole `{self.clusterrole_name}` changed to read-only")
+
+            self.kubectl.core_v1_api.delete_namespaced_config_map(
+                self.configmap_name,
+                self.namespace,
+                body=client.V1DeleteOptions(grace_period_seconds=0),
+                _request_timeout=10,
+            )
+            print(f"Deleted ConfigMap `{self.configmap_name}` with --wait=false semantics")
+            self._wait_for_forbidden_log()
+        except BaseException:
+            self._undo_finalizer_trap()
+            raise
 
         print(
             f"Resource: configmap/{self.configmap_name} | Controller: deployment/{self.controller_name} "
@@ -437,7 +460,37 @@ class FinalizerDeadlockController(Problem):
             if (dep.status.ready_replicas or 0) >= 1:
                 return
             time.sleep(2)
-        raise TimeoutError(f"Timed out waiting for Deployment `{self.controller_name}` to become ready")
+
+        # Say why. This raised naming only the Deployment, and that is why the
+        # one occurrence on record is unexplainable: the instance
+        # self-terminated, no CloudWatch agent is installed, and the kubelet
+        # events went with it. A Docker Hub throttle, a crash-looping
+        # controller and a Pending pod on a full node all look identical from
+        # the old message and need different fixes (#50).
+        raise TimeoutError(
+            f"Timed out waiting for Deployment `{self.controller_name}` to become ready. "
+            f"{self._controller_pod_states()}"
+        )
+
+    def _controller_pod_states(self) -> str:
+        """What the controller's pods were doing, for the timeout message.
+
+        Best effort on purpose: this runs on a failure path, and an API error
+        here must not replace the timeout with something less informative.
+        """
+        try:
+            pods = self.kubectl.core_v1_api.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector=f"app={self.controller_name}",
+                _request_timeout=10,
+            ).items
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must not raise
+            return f"pod states unavailable: {type(exc).__name__}: {exc}"
+
+        if not pods:
+            return "no controller pods exist, so the Deployment never created one"
+
+        return "pods: " + "; ".join(self.kubectl.blocking_reason(pod) for pod in pods)
 
     def _wait_for_forbidden_log(self, timeout_seconds: int = 45):
         deadline = time.monotonic() + timeout_seconds
@@ -502,6 +555,28 @@ class FinalizerDeadlockController(Problem):
                 raise
             time.sleep(2)
         return False
+
+    def _undo_finalizer_trap(self) -> None:
+        """Leave the namespace deletable after a failed injection.
+
+        Restores the ClusterRole before clearing the finalizer, because
+        clearing it patches the ConfigMap and the read-only role is exactly
+        what would refuse that patch.
+
+        Swallows everything, including a non-404 ApiException, and reports
+        rather than raising: this runs from an except block, so an exception
+        here would replace the failure it is cleaning up after with a less
+        informative one. _ignore_not_found is deliberately not used, since it
+        re-raises anything that is not a 404.
+        """
+        for step, action in (
+            ("restore the ClusterRole", lambda: self._replace_clusterrole(_correct_clusterrole_rules())),
+            ("clear the finalizer", self._force_clear_finalizer),
+        ):
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001 - must not mask the original failure
+                print(f"Could not {step} after a failed injection: {type(exc).__name__}: {exc}", flush=True)
 
     def _force_clear_finalizer(self):
         try:

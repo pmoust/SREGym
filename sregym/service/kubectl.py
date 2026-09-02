@@ -153,8 +153,12 @@ class KubeCtl:
         return any(owner.kind == "Job" for owner in (pod.metadata.owner_references or []))
 
     @staticmethod
-    def _blocking_reason(pod) -> str:
+    def blocking_reason(pod) -> str:
         """One line naming a pod and why it is not ready yet.
+
+        Public because two readiness waits need it and one format is easier to
+        read across logs than two: this one, and the finalizer-deadlock
+        problem's wait on its own cleanup controller (#50).
 
         The container's waiting reason is the part worth having:
         ImagePullBackOff, CrashLoopBackOff and Pending fail for entirely
@@ -257,7 +261,7 @@ class KubeCtl:
 
                     ready_names = {pod.metadata.name for pod in ready_pods}
                     last_not_ready = [
-                        self._blocking_reason(pod) for pod in all_pods if pod.metadata.name not in ready_names
+                        self.blocking_reason(pod) for pod in all_pods if pod.metadata.name not in ready_names
                     ]
                 else:
                     last_not_ready = []
