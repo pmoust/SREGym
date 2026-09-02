@@ -256,14 +256,16 @@ terraform/.terraform/
 terraform/.terraform.lock.hcl
 terraform/*.tfstate
 terraform/*.tfstate.*
-terraform/*.tfvars
-# The named scenarios are the opposite of a personal tfvars: they are the
-# definition of what a smoke run and a scored run are, and launch.sh cannot work
-# without them. The blanket rule above silently swallowed them once, so a PR
-# shipped launch.sh with no scenarios and passed its own gate because the files
-# were sitting untracked on the author's disk.
-!terraform/smoke.tfvars
-!terraform/run.tfvars
+# Personal tfvars are opt-out by suffix, not opt-in by name. The rule used to
+# be a blanket terraform/*.tfvars with an exception per scenario, and it
+# swallowed a scenario file twice: once shipping launch.sh with no scenarios at
+# all, and again on smoke7, which merged as a set of tests describing a file
+# that was sitting untracked on the author's disk. Both passed their own gate.
+#
+# A scenario is the definition of what a run is and launch.sh cannot work
+# without it, so tracking is the default and a third exception line was not
+# going to be the last one. Name a personal override <something>.local.tfvars.
+terraform/*.local.tfvars
 
 # launch.sh writes terraform/<scenario>.tfplan next to the tfvars it read.
 # A plan is a snapshot of one moment's state and refs; committing one invites

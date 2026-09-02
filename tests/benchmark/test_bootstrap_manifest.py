@@ -244,3 +244,34 @@ def test_a_narrowed_scenario_has_a_slot_for_every_problem_it_names():
             f"{name}.tfvars: {instances} x {slots} = {instances * slots} slots for "
             f"{named} problem(s), so {instances * slots - named} slot(s) draw nothing"
         )
+
+
+def test_every_scenario_file_on_disk_is_tracked_by_git():
+    """A scenario that is not committed is a scenario nobody else has.
+
+    This has now happened twice, both times because .gitignore's blanket
+    terraform/*.tfvars rule needed an exception per file: once shipping
+    launch.sh with no scenarios at all, and again on smoke7, whose tests
+    merged while the file they describe sat untracked on one disk. Both passed
+    their own gate, because the tests below discover scenarios from the
+    filesystem and the author's filesystem had the file.
+
+    So assert the filesystem and the index agree. Discovery is what makes the
+    other scenario tests robust and is also what makes them blind to this.
+    """
+    on_disk = {p.name for p in (ROOT / "terraform").glob("*.tfvars") if not p.name.endswith(".local.tfvars")}
+    tracked = set(
+        subprocess.run(
+            ["git", "ls-files", "--", "terraform/*.tfvars"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    )
+    tracked = {Path(t).name for t in tracked}
+
+    assert not on_disk - tracked, (
+        f"untracked scenario file(s): {sorted(on_disk - tracked)}. "
+        "Commit them, or name a personal override <something>.local.tfvars"
+    )
