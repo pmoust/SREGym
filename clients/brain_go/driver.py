@@ -23,8 +23,8 @@ Tracked by NOFireAI/brain-go#2219.
 
 from __future__ import annotations
 
-import logging
 import datetime
+import logging
 import os
 import subprocess
 import sys
@@ -518,13 +518,40 @@ def incident_window(incident_start: float | None) -> str:
         return ""
 
     budget = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "1800") or 1800)
-    start = datetime.datetime.fromtimestamp(incident_start, datetime.UTC)
+    injected = datetime.datetime.fromtimestamp(incident_start, datetime.UTC)
+
+    # Round the window start UP, never down.
+    #
+    # Truncating to the minute is what run-20260902-2008 got wrong. The fault
+    # landed at 20:35:38, the window was sent as 20:35, and all seven findings
+    # the agent cited fell between 20:35:13 and 20:35:28: inside the window it
+    # was given, and before the fault. It diagnosed otel-collector shutdown
+    # churn and scored 0.0 on a problem that had scored 100 the run before.
+    #
+    # Those 38 seconds are the worst in the run to hand over. The app deploy
+    # and the observability stack finish immediately before injection, so the
+    # noisiest moment available is exactly the gap that rounding down opens.
+    #
+    # Rounding up costs up to 59 seconds of real post-fault data at the front
+    # of a 30 to 40 minute window. That is the cheaper error by a wide margin:
+    # these faults are configuration changes that persist and keep producing
+    # symptoms, rather than one-off events whose only trace is at onset.
+    start = injected.replace(second=0, microsecond=0)
+    if start < injected:
+        start += datetime.timedelta(minutes=1)
+
     end = start + datetime.timedelta(seconds=budget)
 
+    # The exact instant goes in the prose and the rounded window goes last.
+    # brain-go parses the window and needs minute precision; the model reading
+    # the prose does not, and the true instant is strictly better for the tool
+    # calls it makes itself. An ISO stamp before the word "between" cannot
+    # disturb the parse, because reFromTo matches from "between" onward.
     return (
-        f"The fault was introduced at {start.strftime(INCIDENT_WINDOW_FMT)} UTC. "
-        f"Anything before that is normal operation, including the cluster build and "
-        f"the application deploy. Investigate between "
+        f"The fault was introduced at {injected.strftime('%Y-%m-%dT%H:%M:%S')} UTC. "
+        f"Everything before it is normal operation, including the cluster build and "
+        f"the application deploy, so treat pre-fault logs and restarts as setup rather "
+        f"than as the incident. Investigate between "
         f"{start.strftime(INCIDENT_WINDOW_FMT)} and {end.strftime(INCIDENT_WINDOW_FMT)}"
     )
 
