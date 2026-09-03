@@ -108,3 +108,87 @@ def test_an_empty_namespace_says_so():
     """Waiting on a namespace with no pods times out looking identical to
     waiting on unready ones, and the fix is entirely different."""
     assert "held no pods at all" in _timeout_message([[]])
+
+
+def _waiting_with(reason, message):
+    return SimpleNamespace(waiting=SimpleNamespace(reason=reason, message=message), terminated=None)
+
+
+def test_the_pull_failure_reason_comes_with_its_message():
+    """ImagePullBackOff alone cannot be acted on.
+
+    run-20260903-0822 lost all 63 problem-runs to 61 deploy failures, 39
+    reporting ImagePullBackOff, and the archive cannot say why a single pull
+    failed: a registry rate limit, a full disk, a network timeout and a bad
+    credential all render as that one word.
+    """
+    message = _timeout_message(
+        [
+            [
+                _pod(
+                    "loki-results-cache-0",
+                    containers=[
+                        (
+                            "exporter",
+                            False,
+                            _waiting_with(
+                                "ImagePullBackOff",
+                                'Back-off pulling image "memcached:1.6-alpine": '
+                                "failed to pull and unpack: no space left on device",
+                            ),
+                        )
+                    ],
+                )
+            ]
+        ]
+    )
+
+    assert "exporter=ImagePullBackOff" in message
+    assert "no space left on device" in message
+
+
+def test_a_multiline_message_stays_on_one_line():
+    """Runtime errors arrive with embedded newlines and this is a summary line."""
+    message = _timeout_message(
+        [[_pod("p", containers=[("c", False, _waiting_with("CrashLoopBackOff", "line one\nline two"))])]]
+    )
+
+    assert "line one line two" in message
+    assert "\n" not in message.split("1 not ready:")[1]
+
+
+def test_a_very_long_message_is_truncated():
+    """A pull failure quotes the full registry reference and digest, which is
+    rarely the informative part, and this line is one of several per failure."""
+    message = _timeout_message([[_pod("p", containers=[("c", False, _waiting_with("ImagePullBackOff", "x" * 400))])]])
+
+    assert "…" in message
+    assert len(message) < 400
+
+
+def test_a_reason_with_no_message_reads_as_before():
+    """Most states carry no message, and an empty parenthesis would be noise."""
+    message = _timeout_message([[_pod("p", containers=[("c", False, _waiting_with("Pending", None))])]])
+
+    assert "c=Pending" in message
+    assert "()" not in message
+
+
+def test_a_state_object_without_a_message_field_does_not_break_the_report():
+    """The regression this nearly shipped.
+
+    blocking_reason runs inside the poll loop, whose except arm swallows
+    anything and lets the wait run to its timeout. An AttributeError there did
+    not surface as an error: the timeout reported "no pod list was ever
+    returned, so the API was unreachable for the whole wait" while the API had
+    answered every poll. A diagnostic that can turn itself into a false one is
+    worse than the missing detail.
+
+    The fixtures above deliberately omit `message` for this reason.
+    """
+    bare = SimpleNamespace(waiting=SimpleNamespace(reason="ImagePullBackOff"), terminated=None)
+    message = _timeout_message([[_pod("p", containers=[("c", False, bare)])]])
+
+    assert "c=ImagePullBackOff" in message
+    assert "1 not ready" in message
+    assert "unreachable" not in message
