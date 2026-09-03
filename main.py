@@ -238,6 +238,7 @@ def _tool_calls(active_dir: Path) -> dict[str, int]:
         return {}
 
 
+@contextlib.contextmanager
 def _artifact_environment(run: RunArtifacts):
     previous = {
         "AGENT_LOGS_DIR": os.environ.get("AGENT_LOGS_DIR"),
