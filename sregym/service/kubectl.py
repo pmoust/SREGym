@@ -26,6 +26,24 @@ from logger import console  # noqa: E402
 WAIT_FOR_POD_READY_TIMEOUT = int(os.getenv("WAIT_FOR_POD_READY_TIMEOUT", "600"))
 
 
+def _detail(message: str | None, limit: int = 160) -> str:
+    """A container state's message, parenthesised, or nothing.
+
+    Collapsed to one line because a runtime error often arrives with embedded
+    newlines and this goes into a single-line summary. Truncated because a
+    pull failure quotes the full registry reference and digest, which is
+    rarely the informative part.
+    """
+    if not message:
+        return ""
+
+    flat = " ".join(str(message).split())
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "\u2026"
+
+    return f" ({flat})"
+
+
 class KubeCtl:
     def __init__(self):
         """Initialize the KubeCtl object and load the Kubernetes configuration."""
@@ -163,6 +181,17 @@ class KubeCtl:
         The container's waiting reason is the part worth having:
         ImagePullBackOff, CrashLoopBackOff and Pending fail for entirely
         different reasons and the fix differs for each.
+
+        The reason alone is not enough, though, which run-20260903-0822 proved
+        by costing a whole run. That run lost all 63 problem-runs to 61 deploy
+        failures, 39 of them reporting ImagePullBackOff, and the archive cannot
+        say why any pull failed: a registry rate limit, a full disk, a network
+        timeout and a bad credential all render as that one word. The message
+        beside it carries the runtime's actual error, so it comes along.
+
+        Truncated because a pull message can run to several hundred characters
+        of registry URL and digest, and this line is already one of several per
+        failure.
         """
         blocked = []
         for status in pod.status.container_statuses or []:
@@ -170,10 +199,17 @@ class KubeCtl:
                 continue
 
             state = status.state
+            # getattr rather than attribute access: this runs inside the poll
+            # loop, whose except arm swallows anything and lets the wait run to
+            # its timeout, and the timeout then reports "the API was
+            # unreachable" instead of naming the pods. A diagnostic that can
+            # turn itself into a false one is worse than the missing detail.
             if state and state.waiting and state.waiting.reason:
-                blocked.append(f"{status.name}={state.waiting.reason}")
+                detail = _detail(getattr(state.waiting, "message", None))
+                blocked.append(f"{status.name}={state.waiting.reason}{detail}")
             elif state and state.terminated and state.terminated.reason:
-                blocked.append(f"{status.name}=Terminated:{state.terminated.reason}")
+                detail = _detail(getattr(state.terminated, "message", None))
+                blocked.append(f"{status.name}=Terminated:{state.terminated.reason}{detail}")
             else:
                 blocked.append(f"{status.name}=NotReady")
 
