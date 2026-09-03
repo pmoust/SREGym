@@ -220,21 +220,33 @@ variable "instance_type" {
 
     Measured on r7a.24xlarge during run-20260902-0606 at three slots: 2.6% of
     96 vCPU, 3.0% of 739 GB, and 105 GB of a 484 GB root. Per slot that is
-    ~0.83 cores, ~7.3 GB and ~35 GB of disk, so the box was oversized by
-    roughly 30x on CPU and memory. At the seven slots run.tfvars now asks for,
-    32 vCPU and 128 GiB leaves headroom on both: ~51 GB of memory, and ~31
-    vCPU at the boot-time peak when every slot builds its kind cluster at once
-    (13.7% of 96 vCPU at three slots, from CloudWatch, scaled by slot count).
-    That peak figure is a floor, not the peak: CloudWatch averages over five
-    minutes, so a shorter burst reads lower than it was. If boot throttles at
-    seven slots this is the number that was optimistic, and staggering slot
-    starts is the cheaper answer than a bigger box, since steady state is
-    ~1.1 cores per slot.
+    ~0.83 cores, ~7.3 GB and ~35 GB of disk, so that box was oversized by
+    roughly 30x on CPU and memory.
+
+    run.tfvars asks for three slots per box, the same width those figures were
+    taken at, so they carry over directly: ~2.5 cores of 32 vCPU, ~22 of 128
+    GiB, and ~105 GB of the 500 GB root. The boot-time peak, when every slot
+    builds its kind cluster at once, measured 13.7% of 96 vCPU at three slots,
+    which is ~13 vCPU, or 41% here. That figure is a floor rather than the
+    peak: CloudWatch averages over five minutes, so a shorter burst reads
+    lower than it was.
+
+    Seven slots on this box lost every run. run-20260903-0822 failed 63 of 63
+    at deploy, 39 reporting ImagePullBackOff, and no problem reached its agent.
+    Seven slots put 28 containerd stores on one EBS volume against the 12 that
+    0606 proved, and disk_gb's own note records that ENOSPC surfaces as
+    ErrImagePull rather than as a disk error. Four boxes at three slots holds
+    12 stores per volume, because each box carries its own. Widen a box only
+    against a density measurement taken on this instance type, which is what
+    the density scenario is for; do not scale a figure taken on a larger one,
+    which is the mistake that produced the seven-slot shape.
 
     m8i and not m8id. The d families carry a local NVMe device that nothing
     mounts today (#49), so the premium buys an idle disk while the run still
     fills the EBS root. Revisit once #49 lands, which is also what lifts the
-    ~13-slots-per-box disk ceiling.
+    disk ceiling. That ceiling was put at ~13 slots from capacity alone, 500 GB
+    over ~35 GB per slot. Seven slots failing well under 245 GB says contention
+    binds first, so treat 13 as arithmetic rather than as a measured limit.
   EOT
   type        = string
   default     = "m8i.8xlarge"
