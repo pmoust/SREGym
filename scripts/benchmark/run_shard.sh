@@ -378,4 +378,13 @@ for p in $SLOT_PIDS; do
 done
 
 echo "[bootstrap] shard $SHARD_INDEX complete (all $RUNS_PER_INSTANCE slots)"
-terminate "shard complete"
+# "success" so keep_alive_on_failure does not hold a finished box up. Every
+# other terminate call omits it, which reads as a failure and is.
+#
+# The flag is named for failures but terminate() is also this path, so before
+# this a debug flag meant to preserve a broken box for inspection preserved a
+# healthy one with nothing left to inspect. It went unnoticed for as long as
+# smoke could not finish inside its runtime cap, since hard_stop ignores the
+# flag and the cap was the only exit smoke ever reached. Raising that cap
+# surfaced it on run-20260902-2008 and again on run-20260903-0558.
+terminate "shard complete" success
