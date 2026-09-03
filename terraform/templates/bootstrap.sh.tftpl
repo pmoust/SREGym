@@ -334,7 +334,7 @@ RUN_ID="$RUN_ID" SHARD_INDEX="$SHARD_INDEX" SHARD_COUNT="$SHARD_COUNT" \
 PROBLEM_SET="${problem_set}" N_ATTEMPTS="${n_attempts}" NOISE="${noise}" \
 PROBLEMS_OVERRIDE="${problems}" \
 AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}" RUNS_PER_INSTANCE="${runs_per_instance}" \
-INSTANCE_TYPE="${instance_type}" \
+INSTANCE_TYPE="${instance_type}" RESULTS_BUCKET="${bucket}" \
 AGENT_MODEL="${agent_model}" JUDGE_MODEL="${judge_model}" \
 SREGYM_REF="${sregym_ref}" SREGYM_SHA="$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null || echo unknown)" \
 BRAIN_GO_REF="${brain_go_ref}" BRAIN_GO_SHA="$BRAIN_GO_SHA" \

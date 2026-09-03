@@ -42,6 +42,10 @@ OUT="${1:?usage: write_run_manifest.sh <output-path>}"
   # lookup of RunInstances. Two runs at the same slot count on different
   # families are not the same run.
   echo "instance_type=${INSTANCE_TYPE:-}"
+  # Where the results went. One bucket now holds every run under its own
+  # <run-id>/ prefix (#48), so the bucket name is no longer recoverable from
+  # the run id and an archived run should say where it came from.
+  echo "results_bucket=${RESULTS_BUCKET:-}"
   echo "agent_model=${AGENT_MODEL:-}"
   echo "judge_model=${JUDGE_MODEL:-}"
   echo "sregym_ref=${SREGYM_REF:-}"
