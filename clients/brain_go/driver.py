@@ -23,7 +23,9 @@ Tracked by NOFireAI/brain-go#2219.
 
 from __future__ import annotations
 
+import collections
 import datetime
+import json
 import logging
 import os
 import subprocess
@@ -137,7 +139,12 @@ def _timeout_message(where: str) -> str:
     )
 
 
-def run_turn(message: str, thread_id: str, allowed_tools: set[str]) -> str:
+def run_turn(
+    message: str,
+    thread_id: str,
+    allowed_tools: set[str],
+    tool_calls: collections.Counter[str] | None = None,
+) -> str:
     """Run one brain-go turn to completion over /cli/chat SSE.
 
     Deliberately not retried. The brain driver retries on requests.Timeout with
@@ -192,7 +199,10 @@ def run_turn(message: str, thread_id: str, allowed_tools: set[str]) -> str:
                 if event == "token":
                     accumulated = data.get("accumulated") or accumulated
                 elif event == "tool_start":
-                    logger.info("tool_start: %s", data.get("tool"))
+                    tool = data.get("tool") or "unknown"
+                    if tool_calls is not None:
+                        tool_calls[tool] += 1
+                    logger.info("tool_start: %s", tool)
                 elif event == "tool_end":
                     logger.info("tool_end: %s", data.get("tool"))
                 elif event == "execute_local_tool":
@@ -556,6 +566,47 @@ def incident_window(incident_start: float | None) -> str:
     )
 
 
+def write_tool_calls(per_phase: dict[str, collections.Counter[str]]) -> None:
+    """Record what the agent called, where the harness can read it back.
+
+    The tool_start events already arrive on the SSE stream and were only
+    logged. Recovering them meant parsing a column-formatted console log in
+    which two thirds of tool names wrap onto a continuation line, so
+    `grep -c "tool_start: get_logs"` undercounted by however many of that
+    tool's calls happened to wrap. On run-20260903-0558, 193 of 286 wrapped
+    (sregym#67).
+
+    AGENT_LOGS_DIR is the run's artifact directory, exported by main.py's
+    _artifact_environment around the agent launch, so this lands beside the
+    attempt it belongs to and main.py reads it back from the same path.
+
+    Best effort: a run's numbers are the product, and a bookkeeping failure
+    must not cost one. Absent output reads as unmeasured rather than zero.
+    """
+    target = os.environ.get("AGENT_LOGS_DIR")
+    if not target:
+        logger.info("tool calls not recorded: AGENT_LOGS_DIR is unset")
+
+        return
+
+    payload = {
+        "total": sum(sum(c.values()) for c in per_phase.values()),
+        "by_phase": {phase: sum(counter.values()) for phase, counter in per_phase.items()},
+        "by_tool": dict(sum(per_phase.values(), collections.Counter())),
+        "by_phase_and_tool": {phase: dict(counter) for phase, counter in per_phase.items()},
+    }
+    try:
+        path = Path(target) / "tool-calls.json"
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        logger.info("tool calls: %s", payload["by_phase"])
+    except OSError as exc:
+        # OSError covers what this can actually hit: no such directory, a file
+        # already at that path, no permission. The environment cannot deliver a
+        # path the os layer rejects outright, since os.environ refuses to store
+        # one.
+        logger.warning("could not write tool calls (non-fatal): %s", exc)
+
+
 DIAGNOSIS_PROMPT = """You are investigating a Kubernetes application failure.
 
 Application: {app_name}
@@ -643,51 +694,74 @@ def main() -> int:
     thread_id = opened[0] if opened else f"cli:sregym-{problem_id}-{uuid.uuid4().hex[:8]}"
     logger.info("thread: %s", thread_id)
 
-    logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
+    # Per phase, because the mitigation turn's tool use is a different question
+    # from the diagnosis turn's, and in run-20260903-0558 the balance inverted
+    # between them: kubectl-heavy while fixing, log-heavy while diagnosing.
+    tool_calls: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+
+    # try/finally so a run always records what it spent, including the two
+    # early returns below: a failed diagnosis turn and a conductor that goes
+    # straight to done. Those are exactly the attempts whose tool use is
+    # worth seeing, so recording only the happy path would miss them.
     try:
-        diagnosis = run_turn(DIAGNOSIS_PROMPT.format(**params).rstrip(), thread_id, DIAGNOSIS_LOCAL_TOOLS)
-    except TurnFailed:
-        logger.exception("diagnosis turn failed")
+        logger.info("=" * 30 + " DIAGNOSIS " + "=" * 30)
+        try:
+            diagnosis = run_turn(
+                DIAGNOSIS_PROMPT.format(**params).rstrip(),
+                thread_id,
+                DIAGNOSIS_LOCAL_TOOLS,
+                tool_calls["diagnosis"],
+            )
+        except TurnFailed:
+            logger.exception("diagnosis turn failed")
+            submit_to_conductor("")
+
+            return 1
+
+        logger.info("diagnosis (%d chars): %s", len(diagnosis), diagnosis[:300])
+
+        # Submit first. The check below is about whether the run is recording, not
+        # about whether the answer is good, and an unsubmitted diagnosis scores zero
+        # on both dimensions. An earlier version ran it first and would have thrown
+        # away a perfectly good diagnosis whenever the turn produced no structured
+        # report, which completeInvestigation treats as a no-op and which is
+        # reachable through a recursion-limit exit or a decode failure.
+        submit_to_conductor(diagnosis)
+
+        if opened:
+            confirm_persisted(opened[1])
+
+        stage = wait_for_stage({"mitigation", "done"})
+        if stage == "done":
+            logger.info("conductor went straight to done after diagnosis")
+
+            return 0
+
+        logger.info("=" * 30 + " MITIGATION " + "=" * 29)
+        try:
+            mitigation = run_turn(
+                MITIGATION_PROMPT.format(**params).rstrip(),
+                thread_id,
+                MITIGATION_LOCAL_TOOLS,
+                tool_calls["mitigation"],
+            )
+            logger.info("mitigation (%d chars): %s", len(mitigation), mitigation[:300])
+        except TurnFailed:
+            logger.exception("mitigation turn failed")
+
+        # Mitigation is graded from live cluster state, not from this text, so the
+        # submission body is deliberately empty.
         submit_to_conductor("")
 
-        return 1
-
-    logger.info("diagnosis (%d chars): %s", len(diagnosis), diagnosis[:300])
-
-    # Submit first. The check below is about whether the run is recording, not
-    # about whether the answer is good, and an unsubmitted diagnosis scores zero
-    # on both dimensions. An earlier version ran it first and would have thrown
-    # away a perfectly good diagnosis whenever the turn produced no structured
-    # report, which completeInvestigation treats as a no-op and which is
-    # reachable through a recursion-limit exit or a decode failure.
-    submit_to_conductor(diagnosis)
-
-    if opened:
-        confirm_persisted(opened[1])
-
-    stage = wait_for_stage({"mitigation", "done"})
-    if stage == "done":
-        logger.info("conductor went straight to done after diagnosis")
+        try:
+            wait_for_stage({"done", "tearing_down"})
+        except TimeoutError:
+            logger.warning("conductor did not reach done; exiting anyway")
 
         return 0
 
-    logger.info("=" * 30 + " MITIGATION " + "=" * 29)
-    try:
-        mitigation = run_turn(MITIGATION_PROMPT.format(**params).rstrip(), thread_id, MITIGATION_LOCAL_TOOLS)
-        logger.info("mitigation (%d chars): %s", len(mitigation), mitigation[:300])
-    except TurnFailed:
-        logger.exception("mitigation turn failed")
-
-    # Mitigation is graded from live cluster state, not from this text, so the
-    # submission body is deliberately empty.
-    submit_to_conductor("")
-
-    try:
-        wait_for_stage({"done", "tearing_down"})
-    except TimeoutError:
-        logger.warning("conductor did not reach done; exiting anyway")
-
-    return 0
+    finally:
+        write_tool_calls(tool_calls)
 
 
 if __name__ == "__main__":

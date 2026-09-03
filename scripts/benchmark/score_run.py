@@ -110,7 +110,7 @@ def _per_problem_tokens(rows: list[dict]) -> list[dict]:
     """
     out = []
     for row in rows:
-        if not any(_val(row, column) for column in _TOKEN_COLUMNS):
+        if not any(_val(row, column) for column in (*_TOKEN_COLUMNS, "tool_calls")):
             continue
 
         counts = {column.removeprefix("tokens_"): _int(_val(row, column)) for column in _TOKEN_COLUMNS}
@@ -119,6 +119,7 @@ def _per_problem_tokens(rows: list[dict]) -> list[dict]:
                 "problem_id": _val(row, "problem_id"),
                 "attempt": _val(row, "attempt"),
                 "llm_calls": _int(_val(row, "llm_calls")),
+                "tool_calls": _int(_val(row, "tool_calls")),
                 **counts,
                 "total": sum(counts.values()),
             }
@@ -492,16 +493,20 @@ def render(s: dict, tok: dict | None) -> str:
         out.append("")
         out.append("  Per attempt, from the result rows rather than the scrape:")
         out.append(
-            f"    {'problem':<44} {'att':>3} {'calls':>6} {'input':>9} {'output':>8} {'cache_rd':>10} {'cache_wr':>9}"
+            f"    {'problem':<40} {'att':>3} {'llm':>5} {'tool':>5}"
+            f" {'input':>9} {'output':>8} {'cache_rd':>10} {'cache_wr':>9}"
         )
         for row in sorted(per_problem, key=lambda r: (r["problem_id"], r["attempt"])):
             out.append(
-                f"    {row['problem_id'][:44]:<44} {row['attempt']:>3} {row['llm_calls']:>6,}"
+                f"    {row['problem_id'][:40]:<40} {row['attempt']:>3}"
+                f" {row['llm_calls']:>5,} {row['tool_calls']:>5,}"
                 f" {row['input']:>9,} {row['output']:>8,} {row['cache_read']:>10,} {row['cache_write']:>9,}"
             )
         out.append("")
+        out.append("  llm is model calls, tool is tool invocations; they answer different")
+        out.append("  questions and neither implies the other.")
         out.append("  A row of zeros means the counters did not move, not that they were")
-        out.append("  unmeasured: an attempt with no token columns at all is omitted here.")
+        out.append("  unmeasured: an attempt recording none of these is omitted here.")
 
     out.append("")
     out.append(

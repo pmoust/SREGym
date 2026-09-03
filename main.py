@@ -206,6 +206,38 @@ def _token_delta(before: Path, after: Path) -> dict[str, int]:
 
 
 @contextlib.contextmanager
+def _tool_calls(active_dir: Path) -> dict[str, int]:
+    """The agent's tool calls, if it recorded them.
+
+    Written by the agent driver into AGENT_LOGS_DIR, which is this same
+    directory. Flattened onto the row as tool_calls (total) and
+    tool_calls_<phase>, so a run can say whether a slow attempt was thinking or
+    tool-thrashing without anyone parsing a console log (sregym#67).
+
+    The per-tool breakdown stays in the JSON rather than becoming columns:
+    the tool set differs per agent and per stage, so promoting it would grow an
+    unbounded and mostly-empty header, and #39 is already about header shapes.
+
+    Absent file means the agent does not record them, which is every agent but
+    brain_go today. Reads as unmeasured, not as zero.
+    """
+    path = active_dir / "tool-calls.json"
+    if not path.exists():
+        return {}
+
+    try:
+        payload = json.loads(path.read_text())
+        flat = {"tool_calls": int(payload.get("total", 0))}
+        for phase, count in (payload.get("by_phase") or {}).items():
+            flat[f"tool_calls_{phase}"] = int(count)
+
+        return flat
+    except (OSError, ValueError, TypeError) as exc:
+        console.log(f"⚠️  could not read tool calls (non-fatal): {type(exc).__name__}: {exc}")
+
+        return {}
+
+
 def _artifact_environment(run: RunArtifacts):
     previous = {
         "AGENT_LOGS_DIR": os.environ.get("AGENT_LOGS_DIR"),
@@ -517,6 +549,8 @@ def driver_loop(
                     "attempt": attempt,
                     "deploy_attempts": deploy_attempts,
                 }
+                for name, count in _tool_calls(run.active_dir).items():
+                    snapshot[name] = count
                 tokens_after = run.active_dir / "tokens-after.prom"
                 _token_snapshot(tokens_after)
                 for name, count in _token_delta(tokens_before, tokens_after).items():
