@@ -205,7 +205,6 @@ def _token_delta(before: Path, after: Path) -> dict[str, int]:
     return {}
 
 
-@contextlib.contextmanager
 def _tool_calls(active_dir: Path) -> dict[str, int]:
     """The agent's tool calls, if it recorded them.
 
