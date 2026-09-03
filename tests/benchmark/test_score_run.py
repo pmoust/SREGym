@@ -31,6 +31,11 @@ _COLUMNS = [
     "timed_out",
     "agent_timeout_seconds",
     "deploy_attempts",
+    "llm_calls",
+    "tokens_input",
+    "tokens_output",
+    "tokens_cache_read",
+    "tokens_cache_write",
 ]
 
 
@@ -47,7 +52,8 @@ def _run(tmp_path, rows):
     return tmp_path
 
 
-def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy_attempts=""):
+def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy_attempts="", tokens=None):
+    tokens = tokens or {}
     return {
         "problem_id": pid,
         "attempt": str(attempt),
@@ -57,6 +63,11 @@ def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy
         "TTM": ttm,
         "timed_out": timed_out,
         "deploy_attempts": deploy_attempts,
+        "llm_calls": tokens.get("llm_calls", ""),
+        "tokens_input": tokens.get("input", ""),
+        "tokens_output": tokens.get("output", ""),
+        "tokens_cache_read": tokens.get("cache_read", ""),
+        "tokens_cache_write": tokens.get("cache_write", ""),
     }
 
 
@@ -484,3 +495,78 @@ def test_a_clean_run_says_nothing_about_deploys(tmp_path):
     out = score_run.render(score_run.score(score_run.load(run)), None)
 
     assert "deploy retries" not in out
+
+
+def test_tokens_are_reported_per_attempt(tmp_path):
+    """A run total cannot say which problem was expensive.
+
+    The counters are labelled by thread, and since #28 the driver's thread is
+    the investigation's cli:inv-<uuid>, which carries no problem id, so a
+    scrape alone attributes nothing. main.py brackets each attempt and records
+    the delta on the row instead (sregym#67).
+    """
+    run = _run(
+        tmp_path,
+        [
+            _row(
+                "p1",
+                diag="True",
+                mitig="True",
+                tokens={
+                    "llm_calls": "88",
+                    "input": "17000",
+                    "output": "25000",
+                    "cache_read": "2056740",
+                    "cache_write": "326711",
+                },
+            ),
+            _row(
+                "p2",
+                diag="False",
+                mitig="False",
+                tokens={
+                    "llm_calls": "80",
+                    "input": "16501",
+                    "output": "24923",
+                    "cache_read": "1668552",
+                    "cache_write": "192990",
+                },
+            ),
+        ],
+    )
+    s = score_run.score(score_run.load(run))
+    per = {row["problem_id"]: row for row in s["per_problem_tokens"]}
+
+    assert per["p1"]["input"] == 17000
+    assert per["p1"]["cache_read"] == 2056740
+    assert per["p1"]["llm_calls"] == 88
+    # The four sum to real consumption: both providers report cache reads and
+    # writes outside the input count, so nothing here double counts.
+    assert per["p1"]["total"] == 17000 + 25000 + 2056740 + 326711
+
+    out = score_run.render(s, None)
+    assert "Per attempt, from the result rows" in out
+    assert "2,056,740" in out
+    assert "There is no cached output" not in out, "that note belongs with the scrape totals"
+
+
+def test_an_attempt_with_no_token_columns_is_omitted_not_zeroed(tmp_path):
+    """Every archive before this column existed has none.
+
+    Reporting them as zero would read as a free attempt, which is the same
+    mistake as counting an absent verdict as a failure.
+    """
+    run = _run(tmp_path, [_row("p1", diag="True", mitig="True")])
+    s = score_run.score(score_run.load(run))
+
+    assert s["per_problem_tokens"] == []
+    assert "Per attempt" not in score_run.render(s, None)
+
+
+def test_a_measured_attempt_that_spent_nothing_still_appears(tmp_path):
+    """Zero and unmeasured are different, and the calls column tells them apart."""
+    run = _run(tmp_path, [_row("p1", diag="True", tokens={"llm_calls": "0", "input": "0"})])
+    s = score_run.score(score_run.load(run))
+
+    assert len(s["per_problem_tokens"]) == 1
+    assert s["per_problem_tokens"][0]["total"] == 0

@@ -12,9 +12,19 @@
 #
 #   llm_tokens_total{provider, model, token_type, account_id, user_id, thread_id}
 #
-# thread_id is per problem. clients/brain_go/driver.py sets it to
-# cli:sregym-<problem_id>-<hex8>, so one scrape attributes tokens to problems
-# without any per-slot bookkeeping here.
+# thread_id is per attempt, but it does NOT identify the problem any more. This
+# comment used to say the driver sets it to cli:sregym-<problem_id>-<hex8>, so
+# one scrape attributed tokens to problems for free. Since #28 the driver opens
+# an investigation and uses the thread brain-go returns, which is
+# cli:inv-<uuid>: run-20260903-0558's counters are labelled
+# cli:inv-0248e16e-... and cli:inv-fb383882-... and carry no problem id. The
+# fallback name is still the old form, so the old attribution works only when
+# opening an investigation fails.
+#
+# So this file is the run total, and per-attempt attribution comes from
+# token_delta.py, which brackets each attempt and records the difference on the
+# result row (#67). Both are wanted: the totals here survive an attempt whose
+# delta was lost, and the deltas say which problem spent what.
 #
 # Two endpoints, because the work is split across two services and only one of
 # them is reachable the obvious way:
