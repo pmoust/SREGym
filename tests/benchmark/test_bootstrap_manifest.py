@@ -11,15 +11,21 @@ shell anyone meant. This file exists because that exact edit was made and only
 caught by running it.
 """
 
+import ast
 import importlib.util
+import os
 import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from sregym.conductor.problem_sets import ALL_PROBLEM_IDS, SREGYM_LITE_PROBLEMS, resolve_problems
+
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "terraform" / "templates" / "bootstrap.sh.tftpl"
+REGISTRY = ROOT / "sregym" / "conductor" / "problems" / "registry.py"
+WRITE_MANIFEST = ROOT / "scripts" / "benchmark" / "write_run_manifest.sh"
 
 _VALUES = {
     "problem_set": "sregym-lite",
@@ -94,9 +100,170 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
     ):
         assert fields.get(key), f"{key} is empty; an assignment is not reaching the script"
 
-    assert fields["problems"] == _VALUES["problems"]
+    # The manifest now records the fully resolved list, not the override
+    # string verbatim, so compare as sets: resolve_problems() sorts, and
+    # _VALUES["problems"] happens to already be in sorted order, but the
+    # comparison should hold regardless of that coincidence.
+    assert set(fields["problems"].split()) == set(_VALUES["problems"].split())
     assert fields["stages"] == "diagnosis,mitigation"
     assert fields["problem_set"] == "sregym-lite"
+
+
+def _registered_problem_ids() -> set[str]:
+    """Every id in registry.py's PROBLEM_REGISTRY dict literal.
+
+    Read with ast rather than by constructing ProblemRegistry(): its
+    __init__ unconditionally builds KubeCtl(), which calls
+    config.load_kube_config() and exit(1)s the whole process, not just
+    raises, when no kubeconfig exists (sregym/service/kubectl.py). A dev
+    checkout or CI worker with no cluster would kill the pytest session
+    outright rather than fail one assertion, so the class is never
+    instantiated here.
+    """
+    tree = ast.parse(REGISTRY.read_text())
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Attribute) and target.attr == "PROBLEM_REGISTRY" and isinstance(node.value, ast.Dict):
+            return {
+                key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+
+    raise AssertionError(f"PROBLEM_REGISTRY dict literal not found in {REGISTRY}")
+
+
+def test_all_problem_ids_matches_the_real_registry():
+    """ALL_PROBLEM_IDS is hand-copied data; this is what keeps it honest.
+
+    Same reasoning as test_each_scenario_names_only_real_problems below: pin
+    the copy against the source of truth, so a problem added to, renamed in,
+    or removed from the registry is caught here instead of surfacing as a
+    bootstrap failure three minutes into a launch.
+    """
+    registered = _registered_problem_ids()
+    assert set(ALL_PROBLEM_IDS) == registered, (
+        f"stale: only in ALL_PROBLEM_IDS: {sorted(set(ALL_PROBLEM_IDS) - registered)}; "
+        f"only in the registry: {sorted(registered - set(ALL_PROBLEM_IDS))}"
+    )
+
+
+def test_all_problem_ids_has_no_duplicates():
+    assert len(ALL_PROBLEM_IDS) == len(set(ALL_PROBLEM_IDS))
+
+
+def test_sregym_lite_is_a_subset_of_all_problem_ids():
+    assert set(SREGYM_LITE_PROBLEMS) <= set(ALL_PROBLEM_IDS)
+
+
+def test_resolve_problems_expands_a_named_set():
+    assert resolve_problems("sregym-lite") == sorted(SREGYM_LITE_PROBLEMS)
+
+
+def test_resolve_problems_accepts_a_mix_of_bare_ids():
+    assert resolve_problems("network_policy_block,kafka_producer_leak") == sorted(
+        ["network_policy_block", "kafka_producer_leak"]
+    )
+
+
+def test_resolve_problems_unions_a_named_set_with_a_bare_id():
+    resolved = resolve_problems("sregym-lite,kafka_producer_leak")
+    assert set(resolved) == set(SREGYM_LITE_PROBLEMS) | {"kafka_producer_leak"}
+    assert len(resolved) == len(SREGYM_LITE_PROBLEMS) + 1, "kafka_producer_leak duplicated rather than added"
+
+
+def test_resolve_problems_dedupes_an_id_the_set_already_contains():
+    # network_policy_block is already one of the 21 sregym-lite problems.
+    # Naming it again must not double it, or a resolved count of 22 would
+    # read as a 22-problem run that is actually the same 21.
+    resolved = resolve_problems("sregym-lite,network_policy_block")
+    assert set(resolved) == set(SREGYM_LITE_PROBLEMS)
+    assert len(resolved) == len(SREGYM_LITE_PROBLEMS)
+
+
+def test_resolve_problems_hard_stops_on_an_unknown_token():
+    with pytest.raises(ValueError, match="not_a_real_problem"):
+        resolve_problems("sregym-lite,not_a_real_problem")
+
+
+def test_resolve_problems_hard_stops_on_an_unknown_set_name():
+    with pytest.raises(ValueError, match="not-a-real-set"):
+        resolve_problems("not-a-real-set")
+
+
+@pytest.mark.parametrize("spec", ["", "   ", ",,"])
+def test_resolve_problems_hard_stops_on_an_empty_selection(spec):
+    # Empty must never mean "the whole registry": brain-go#2221, nobody
+    # knows which 90 of the 123 registered problems the paper used.
+    with pytest.raises(ValueError):
+        resolve_problems(spec)
+
+
+def _write_manifest(tmp_path, problem_set: str, problems_override: str = "") -> dict[str, str]:
+    """Run write_run_manifest.sh directly, bypassing the template entirely.
+
+    _manifest_block() above exists to protect the template's
+    backslash-continuation invariant; this instead exercises the script's
+    own resolution logic, which needs none of that scaffolding.
+    """
+    out = tmp_path / "manifest.txt"
+    env = dict(os.environ)
+    env["PROBLEM_SET"] = problem_set
+    env["PROBLEMS_OVERRIDE"] = problems_override
+    proc = subprocess.run(
+        ["bash", str(WRITE_MANIFEST), str(out)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return dict(line.split("=", 1) for line in out.read_text().strip().split("\n") if "=" in line)
+
+
+@pytest.mark.parametrize(
+    "problem_set, problems_override, expected",
+    [
+        ("sregym-lite", "", sorted(SREGYM_LITE_PROBLEMS)),
+        (
+            "network_policy_block,kafka_producer_leak",
+            "",
+            sorted(["network_policy_block", "kafka_producer_leak"]),
+        ),
+        (
+            "sregym-lite,kafka_producer_leak",
+            "",
+            sorted(set(SREGYM_LITE_PROBLEMS) | {"kafka_producer_leak"}),
+        ),
+        (
+            "sregym-lite",
+            "network_policy_block wrong_dns_policy_astronomy_shop",
+            sorted(["network_policy_block", "wrong_dns_policy_astronomy_shop"]),
+        ),
+    ],
+    ids=["named-set", "bare-ids", "set-plus-bare-id", "narrowed-by-override"],
+)
+def test_the_manifest_records_the_resolved_list_regardless_of_how_selection_was_expressed(
+    tmp_path, problem_set, problems_override, expected
+):
+    fields = _write_manifest(tmp_path, problem_set, problems_override)
+    assert sorted(fields["problems"].split()) == expected
+
+
+def test_the_manifest_leaves_problems_empty_when_the_selection_does_not_resolve(tmp_path):
+    """write_run_manifest.sh is best-effort (its own caller uses `|| true`).
+
+    A bad PROBLEM_SET must not blank out the rest of the manifest: only the
+    problems line goes empty, and run_shard.sh is still what hard-stops the
+    run itself over the same input.
+    """
+    fields = _write_manifest(tmp_path, "not-a-real-set")
+    assert fields["problems"] == ""
+    assert fields["problem_set"] == "not-a-real-set"
+    # A field with no dependency on problem selection: proves the rest of
+    # the manifest still wrote rather than the whole script bailing out.
+    assert fields.get("stages") == "diagnosis,mitigation"
 
 
 def test_the_shard_handoff_is_declared_once():
