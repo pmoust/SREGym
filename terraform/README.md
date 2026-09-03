@@ -64,6 +64,24 @@ three instances boots. Two runs a week apart, or two instances minutes apart,
 can then be running different code with no record of which. The manifest records
 what was pinned.
 
+### Running your own branch
+
+Set `sregym_ref` or `brain_go_ref` in a scenario's tfvars to a branch, a tag,
+or a full SHA, instead of leaving it unset, to run an engineer's own code
+instead of `origin/main`. `launch.sh` resolves whatever is there to a full SHA
+before it reaches terraform, and refuses to proceed, before any AWS call, if:
+
+- the ref does not resolve to a commit at all
+- the commit resolves locally but was never pushed (the fleet clones from the
+  remote, so a local-only commit is invisible to it)
+- the checkout that resolved it is dirty (a run whose code exists nowhere on
+  disk in the form it ran is unreproducible)
+
+`scripts/benchmark/experiment.sh` exercises the same resolution and the same
+three checks from the command line, `--sregym-ref` / `--brain-go-ref`, ahead
+of the fuller cost-preview-and-selection wrapper still to come; today it only
+prints what it resolved to.
+
 Run the smoke scenario before any scored run. It costs two problems and answers
 the one question the local gates cannot: whether a real instance gets through
 boot, cluster creation, brain-go setup, the port-forward, tenant seeding, and
