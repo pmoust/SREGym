@@ -165,25 +165,65 @@ def _lite_problem_count() -> int:
     return len(re.findall(r'"([a-z0-9_]+)"', src.split("SREGYM_LITE_PROBLEMS = (")[1].split(")")[0]))
 
 
-def test_the_scored_run_is_exactly_lite_width_and_splits_evenly():
-    """Both splits are static modulo, so a width that does not divide is silent.
+def _slot_depths(problems: int, instances: int, slots_per_instance: int) -> list[int]:
+    """Problems per slot, sharded the way run_shard.sh actually shards.
 
-    instance_count x runs_per_instance above the problem count leaves slots
-    that draw nothing and log "drew no problems, skipping", which reads like a
-    clean short run. Below it, slots go two problems deep and the run takes as
-    long as the deepest slot. Neither fails, and neither is visible in the
-    results.
+    Two static modulo splits, no queue and no work stealing: a problem goes to
+    shard `index % shard_count`, and within a shard to slot
+    `index % runs_per_instance`. Reproduced here rather than approximated,
+    because divisibility is a misleading proxy for it.
+    """
+    depths = []
+    for shard in range(instances):
+        in_shard = [p for p in range(problems) if p % instances == shard]
+        for slot in range(slots_per_instance):
+            depths.append(len([j for j in range(len(in_shard)) if j % slots_per_instance == slot]))
+
+    return depths
+
+
+def test_the_scored_run_leaves_no_slot_idle_and_no_shard_deeper_than_another():
+    """Two assertions doing different jobs, and only one guards the config.
+
+    The idle-slot one is the real guard. Slots beyond the problem count draw
+    nothing, log "drew no problems, skipping" and exit, which reads like a
+    clean short run rather than a misconfiguration.
+
+    The depth-spread one guards the sharding scheme, not the box count. Both
+    splits are static modulo, and that self-balances: swept over problem counts
+    of 7 to 133 against every instance count to 21 and slot count to 13, the
+    spread never exceeds one whenever no slot is idle. So it cannot fire on a
+    badly chosen box count. It fires if the distribution in run_shard.sh ever
+    changes -- a queue, a different modulo, work stealing -- and stops being
+    balanced. Kept for that, and labelled so nobody reads it as protecting the
+    shape.
+
+    What a bad box count actually costs is wall clock, not balance: three boxes
+    puts two extra problems in the deepest slot and adds 1.3 hours. That is a
+    trade the comment in run.tfvars documents, not an invariant.
+
+    Checked against the real distribution rather than divisibility, because
+    divisibility is a proxy that is wrong here. 21 does not divide by 4, and at
+    three slots per box it costs nothing: shards are 6/5/5/5, a shard of six
+    goes 2/2/2 and a shard of five goes 2/2/1, so the deepest slot is two
+    either way. An earlier version asserted instance_count x runs_per_instance
+    == 21 and 21 % instance_count == 0, both inherited from a seven-slot shape
+    that lost a whole run, and the second rejected a config strictly better
+    than the ones it allowed.
     """
     problems = _lite_problem_count()
     instances = int(_tfvar("run", "instance_count"))
     slots = int(_tfvar("run", "runs_per_instance"))
 
-    assert instances * slots == problems, (
+    depths = _slot_depths(problems, instances, slots)
+
+    assert 0 not in depths, (
         f"{instances} x {slots} = {instances * slots} slots for {problems} problems: "
-        "over-provisioned slots skip, under-provisioned slots go deep"
+        f"{depths.count(0)} slot(s) draw nothing and skip"
     )
-    assert problems % instances == 0, (
-        f"{problems} problems across {instances} instances is uneven, so the run is as slow as the largest shard"
+    assert max(depths) - min(depths) <= 1, (
+        f"slot depths {sorted(depths)} differ by more than one problem, so the run "
+        f"waits on its deepest slot for {max(depths) - min(depths)} extra problems"
     )
 
 

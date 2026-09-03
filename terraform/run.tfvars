@@ -18,45 +18,60 @@
 # on purpose, and its own note says why. Read the next run as paired with
 # 20260902 on everything except the cap.
 
-# Full Lite width: 3 x 7 = 21 slots for 21 problems, so every slot owns exactly
-# one problem and runs its 3 attempts back to back. Both splits are static
-# index-based (problem % shard_count, then index % runs_per_instance), so an
-# even 7/7/7 needs an instance_count that divides 21.
+# Four boxes at three slots: 12 slots for 21 problems, two problems deep.
 #
-# Width is what buys wall clock, because attempts are serial inside a slot
-# (main.py loops problems, then attempts, with no gather). Measured per slot on
-# run-20260902-0606: a 24.8 min median attempt cycle, and a setup cost before
-# the first attempt that is bimodal, four slots at 16 to 21 min and five at 56
-# to 58, median 55.7. That run ran nine slots up to nine attempts deep and
-# finished in about 4.9 hours, which is when its slowest slot finished, not
-# when a typical one did (median slot: 3.2 hours).
+# Not full width, and not by preference. run-20260903-0822 tried three boxes at
+# seven slots and lost all 63 problem-runs: 61 deploy failures, 32 in the
+# openebs namespace and 27 in observe, 39 of them ImagePullBackOff, and not one
+# problem reached its agent. Seven was interpolated from #49's per-slot figures,
+# which were taken at THREE slots on an r7a.24xlarge with three times the CPU
+# and six times the memory of this box. On m8i.8xlarge the only density with
+# evidence behind it is three, and even that is inherited from the larger
+# machine (#73 measures it properly).
 #
-# At 21 slots the depth is 3, so the same 63 problem-runs land in about 2.2
-# hours. Read that as the slowest slot again: the run ends when the last slot
-# does, and every slot pays its own setup.
+# So three slots per box, and the box count picked from wall clock rather than
+# width. Measured per slot on run-20260902-0606: a 24.8 min median attempt
+# cycle, and ~20 min of setup on a clean deploy. The deepest slot sets the run:
 #
-# The tail is a first deploy that fails before fault injection and silently
-# restarts the whole problem, so the slot pays the deploy twice (#53). Twelve
-# deploys in that run produced no attempt, and a restart logs as an ordinary
-# "Start testing on problem", so nothing distinguishes a run that lost twelve
-# from one that lost none.
+#   boxes  slots  shard split   deepest slot  cycles   wall    ec2
+#     3      9    7/7/7         3 problems      9      4.1h   $20.59
+#     4     12    6/5/5/5       2 problems      6      2.8h   $19.06
+#     7     21    3 each        1 problem       3      1.6h   $18.65
 #
-# It scales the wrong way with width: every slot pays its own setup, so 21
-# slots is 21 chances to draw the retry against 9 before. Setup is roughly
-# half the projected wall clock above, which makes #53 the next thing worth
-# fixing for speed, ahead of anything else in this file.
+# EC2 cost is flat across all three, because box count trades rate against
+# duration. So the choice is blast radius against wall clock, and four is 1.3
+# hours faster than three for a dollar less and one extra machine. Seven buys
+# another 1.2 hours for four more machines and is the shape that just failed.
 #
-# Going wider than 21 needs more problems, not more slots: a problem maps to
-# one slot, so extra slots draw nothing and skip.
+# 21 does not divide by 4, and here that costs nothing. Both splits are static
+# modulo (problem % shard_count, then index % runs_per_instance), so the shards
+# are 6/5/5/5, and across three slots a shard of six goes 2/2/2 while a shard of
+# five goes 2/2/1. The deepest slot is two either way: the extra problem lands
+# where there was room. Uneven sharding only costs wall clock when
+# ceil(max_shard / slots) exceeds ceil(min_shard / slots), which at 4 x 3 it
+# does not. A test checks the depths rather than divisibility, because
+# divisibility is a proxy that is wrong in exactly this case.
+#
+# Setup is roughly a third of the projected wall clock, and #53's silently
+# retried first deploy is what makes it bimodal. That scales with slot count,
+# so twelve slots is twelve chances to draw it against nine.
+#
 # Pinned rather than left to the variable default, which was us-east-1 until
 # recently: omitting it put the results bucket in a region archive_run.sh
 # does not look in, and the symptom was "no bucket matching" after the run
 # had already been billed. Every run to date has been us-east-2.
 region = "us-east-2"
 
-instance_count    = 3
-runs_per_instance = 7
+instance_count    = 4
+runs_per_instance = 3
 n_attempts        = 3
+
+# Explicit, rather than inheriting the variables.tf default of 12. The deepest
+# slot is two problems at three attempts, so six cycles at the 2400s cap plus
+# setup needs about 3.3 hours; six leaves room for a slow run without leaving a
+# 12-hour tail. At four boxes that default would expose $81 of idle billing if
+# self-termination ever failed to fire, for no reason anyone chose.
+max_runtime_hours = 6
 
 # 2400s, up from the paper's 1800s, because 1800s was censoring the run rather
 # than bounding it. 11 of the 60 scored attempts in run-20260902-0606 were
