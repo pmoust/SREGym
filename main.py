@@ -3,8 +3,10 @@ import asyncio
 import contextlib
 import csv
 import importlib
+import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -160,6 +162,47 @@ def _configure_model_environment(args) -> tuple[str, str]:
             os.environ["JUDGE_API_KEY"] = "dummy"
 
     return agent_model, judge_model
+
+
+_TOKEN_DELTA = Path(os.path.dirname(os.path.abspath(__file__))) / "scripts" / "benchmark" / "token_delta.py"
+
+
+def _token_snapshot(out: Path) -> None:
+    """Capture LLM counters. Silent on any failure, by design.
+
+    A run's numbers are the product; its price tag is a nice-to-have. So every
+    path here swallows: no scraper on this checkout, no metrics endpoint, a
+    local run with no brain-go at all. The delta then reads as zero, and zero
+    is distinguishable from a real count by the calls column beside it.
+    """
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [sys.executable, str(_TOKEN_DELTA), "snapshot", str(out)],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception as exc:  # noqa: BLE001 - pricing must never fail a run
+        console.log(f"⚠️  token snapshot failed (non-fatal): {type(exc).__name__}: {exc}")
+
+
+def _token_delta(before: Path, after: Path) -> dict[str, int]:
+    """What the attempt spent, or an empty dict if it cannot be known."""
+    try:
+        done = subprocess.run(
+            [sys.executable, str(_TOKEN_DELTA), "delta", str(before), str(after)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            return json.loads(done.stdout)
+    except Exception as exc:  # noqa: BLE001 - pricing must never fail a run
+        console.log(f"⚠️  token delta failed (non-fatal): {type(exc).__name__}: {exc}")
+
+    return {}
 
 
 @contextlib.contextmanager
@@ -392,6 +435,16 @@ def driver_loop(
                 )
                 agent_proc = None
 
+                # Bracket the attempt with a counter scrape, so its token spend
+                # is a delta rather than a thread_id join. brain-go's counters
+                # are labelled by thread, and since #28 the driver uses the
+                # investigation's thread (cli:inv-<uuid>), which carries no
+                # problem id, so a single scrape cannot attribute spend to a
+                # problem. Best effort throughout: pricing a run must never be
+                # able to fail one (sregym#67).
+                tokens_before = run.active_dir / "tokens-before.prom"
+                _token_snapshot(tokens_before)
+
                 with _artifact_environment(run):
                     reg = get_agent(
                         agent_to_run,
@@ -464,6 +517,12 @@ def driver_loop(
                     "attempt": attempt,
                     "deploy_attempts": deploy_attempts,
                 }
+                tokens_after = run.active_dir / "tokens-after.prom"
+                _token_snapshot(tokens_after)
+                for name, count in _token_delta(tokens_before, tokens_after).items():
+                    # llm_calls rather than calls, so a column name says which
+                    # calls it counts. Tool calls are a different number.
+                    snapshot["llm_calls" if name == "calls" else f"tokens_{name}"] = count
                 for stage, outcome in conductor.results.items():
                     if isinstance(outcome, dict):
                         for k, v in outcome.items():

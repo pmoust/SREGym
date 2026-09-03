@@ -90,6 +90,43 @@ def _int(raw: str) -> int:
         return 0
 
 
+# The four token types brain-go reports, all input-side except output. Both
+# providers report cache reads and writes OUTSIDE the input count, so these sum
+# to real consumption without double counting. There is no cached output:
+# output tokens are generated every time.
+_TOKEN_COLUMNS = ("tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write")
+
+
+def _per_problem_tokens(rows: list[dict]) -> list[dict]:
+    """Per-attempt token spend, from the row rather than from a scrape.
+
+    Recorded by main.py as a delta bracketing each attempt (sregym#67). Before
+    that column existed a run had one total and no attribution, because the
+    counters are labelled by thread and the driver's thread is the
+    investigation's cli:inv-<uuid>, which carries no problem id.
+
+    Rows with no token columns are skipped rather than reported as zero, so an
+    older archive reads as unmeasured instead of free.
+    """
+    out = []
+    for row in rows:
+        if not any(_val(row, column) for column in _TOKEN_COLUMNS):
+            continue
+
+        counts = {column.removeprefix("tokens_"): _int(_val(row, column)) for column in _TOKEN_COLUMNS}
+        out.append(
+            {
+                "problem_id": _val(row, "problem_id"),
+                "attempt": _val(row, "attempt"),
+                "llm_calls": _int(_val(row, "llm_calls")),
+                **counts,
+                "total": sum(counts.values()),
+            }
+        )
+
+    return out
+
+
 def _rate(correct: int, total: int) -> float | None:
     return None if total == 0 else round(100.0 * correct / total, 1)
 
@@ -223,6 +260,7 @@ def score(rows: list[dict]) -> dict:
             "graded": len(both_graded),
         },
         "censored": len(censored),
+        "per_problem_tokens": _per_problem_tokens(rows),
         "wasted_deploys": wasted_deploys,
         "retried_attempts": len(retried),
         "deploy_attempts_known": deploy_attempts_known,
@@ -442,10 +480,28 @@ def render(s: dict, tok: dict | None) -> str:
             # actually consumed and is priced differently.
             out.append("  input and output are the fresh tokens; cache_read and cache_write")
             out.append("  are billed at different rates, so quote which total you mean.")
+            out.append("  There is no cached output: output tokens are generated every time.")
+
     else:
         out.append("  Tokens             not archived for this run")
         out.append("  scrape_tokens.sh writes sregym-tokens.prom into the log tree; check")
         out.append("  that sync_logs ran, or point SREGYM_TOKEN_DIR at it.")
+
+    per_problem = s.get("per_problem_tokens") or []
+    if per_problem:
+        out.append("")
+        out.append("  Per attempt, from the result rows rather than the scrape:")
+        out.append(
+            f"    {'problem':<44} {'att':>3} {'calls':>6} {'input':>9} {'output':>8} {'cache_rd':>10} {'cache_wr':>9}"
+        )
+        for row in sorted(per_problem, key=lambda r: (r["problem_id"], r["attempt"])):
+            out.append(
+                f"    {row['problem_id'][:44]:<44} {row['attempt']:>3} {row['llm_calls']:>6,}"
+                f" {row['input']:>9,} {row['output']:>8,} {row['cache_read']:>10,} {row['cache_write']:>9,}"
+            )
+        out.append("")
+        out.append("  A row of zeros means the counters did not move, not that they were")
+        out.append("  unmeasured: an attempt with no token columns at all is omitted here.")
 
     out.append("")
     out.append(
