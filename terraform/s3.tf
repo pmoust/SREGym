@@ -34,19 +34,43 @@ resource "aws_s3_bucket" "results" {
   bucket        = "sregym-bench-results-${data.aws_caller_identity.current.account_id}"
   force_destroy = false # results are the point of the run
 
-  # The tags argument is load-bearing even though default_tags already supplies
-  # every value that matters. With no tags argument the provider puts this
-  # resource's tags_all in the plan as a static empty map rather than "known
-  # after apply", and default_tags then adds Project, ManagedBy and RunId during
-  # apply. Terraform rejects that as "Provider produced inconsistent final plan
-  # ... tags_all: new element has appeared" and fails the whole apply.
+  # RunId is pinned here, overriding default_tags' RunId for this resource
+  # only. default_tags.RunId comes from local.run_id, which falls through to
+  # timestamp() in every real launch (launch.sh never sets var.run_id), and
+  # Terraform documents timestamp() as unknown until apply. That taints
+  # tags_all for every resource carrying default_tags, but it only breaks
+  # apply here: instances, the security group and its egress rule all get
+  # destroyed and recreated each run, so apply never reconciles a stale known
+  # tags_all against a newly unknown one. This bucket is the one resource
+  # updated in place instead of recreated -- it is deliberately one shared
+  # bucket across every run, not per-run, which is the whole point of the
+  # rename fix above -- so apply does that reconciliation, and it failed it
+  # outright: "Provider produced inconsistent final plan ... tags_all: new
+  # element has appeared", for ManagedBy, Project and RunId together, on
+  # every apply.
   #
-  # network.tf carries the same note for the egress rule, which hit this first.
-  # This bucket hit it later and for a different reason: RunId derives from
-  # timestamp(), so default_tags differ on every plan, and unlike the instances
-  # this bucket outlives the run, so every apply wants a tag update on it and
-  # every apply failed on that update.
-  tags = { Name = "sregym-bench-results" }
+  # A per-run RunId tag was never the right value for a bucket that holds
+  # every run's results, independent of the bug it triggers. Pinning it to
+  # "shared" here means this resource's own tags fully override that key, so
+  # tags_all for this resource no longer depends on the unknown local.run_id
+  # at all.
+  # Duplicated rather than left to default_tags, and not just for RunId. The
+  # first attempt pinned only RunId and still hit "Provider produced
+  # inconsistent final plan ... tags_all: new element has appeared" for
+  # ManagedBy and Project, which are static literals with no timestamp()
+  # dependency -- so the unknown-value theory above only explains part of
+  # this. aws_s3_bucket tags go through a separate tagging API from the
+  # resource's main create/update call, and default_tags reaches that API by
+  # a different path than the resource's own tags do; reconciling the two
+  # against this bucket's pre-existing state is what fails. Giving the
+  # resource its own copy of every value removes the reconciliation
+  # entirely: nothing here depends on default_tags for this resource.
+  tags = {
+    Name      = "sregym-bench-results"
+    ManagedBy = "terraform"
+    Project   = "sregym-benchmark"
+    RunId     = "shared"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "results" {
