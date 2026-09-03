@@ -36,6 +36,7 @@ _COLUMNS = [
     "tokens_output",
     "tokens_cache_read",
     "tokens_cache_write",
+    "tool_calls",
 ]
 
 
@@ -68,6 +69,7 @@ def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy
         "tokens_output": tokens.get("output", ""),
         "tokens_cache_read": tokens.get("cache_read", ""),
         "tokens_cache_write": tokens.get("cache_write", ""),
+        "tool_calls": tokens.get("tool_calls", ""),
     }
 
 
@@ -569,4 +571,36 @@ def test_a_measured_attempt_that_spent_nothing_still_appears(tmp_path):
     s = score_run.score(score_run.load(run))
 
     assert len(s["per_problem_tokens"]) == 1
+    assert s["per_problem_tokens"][0]["total"] == 0
+
+
+def test_tool_calls_are_reported_beside_llm_calls(tmp_path):
+    """Two different questions. 88 model calls and 286 tool calls describe very
+    different attempts, and neither number implies the other."""
+    run = _run(
+        tmp_path,
+        [_row("p1", diag="True", tokens={"llm_calls": "88", "tool_calls": "286", "input": "17000"})],
+    )
+    s = score_run.score(score_run.load(run))
+    row = s["per_problem_tokens"][0]
+
+    assert row["llm_calls"] == 88
+    assert row["tool_calls"] == 286
+
+    out = score_run.render(s, None)
+    assert "llm is model calls, tool is tool invocations" in out
+    assert "286" in out
+
+
+def test_an_attempt_with_only_tool_calls_still_appears(tmp_path):
+    """An agent that records tool calls but no tokens is still measured.
+
+    The row is included when any of these columns is present, so a future
+    agent supplying one and not the other is not silently dropped.
+    """
+    run = _run(tmp_path, [_row("p1", diag="True", tokens={"tool_calls": "12"})])
+    s = score_run.score(score_run.load(run))
+
+    assert len(s["per_problem_tokens"]) == 1
+    assert s["per_problem_tokens"][0]["tool_calls"] == 12
     assert s["per_problem_tokens"][0]["total"] == 0
