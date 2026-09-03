@@ -112,6 +112,17 @@ def test_the_shard_handoff_is_declared_once():
     assert len(re.findall(r"^export PROBLEM_SET", tpl, re.M)) == 1
 
 
+def _is_scenario(path: Path) -> bool:
+    """A tfvars that defines a run, as opposed to a local or generated one.
+
+    <something>.local.tfvars is gitignored, and experiment.sh will write one
+    per ad-hoc run. Subjecting a throwaway file to the scenario checks below
+    would fail the suite on a file nobody committed, so the exclusion lives
+    here once rather than at each call site where the two could drift.
+    """
+    return not path.name.endswith(".local.tfvars")
+
+
 def _scenarios() -> list[str]:
     """Every scenario file, so adding one does not quietly opt out of these.
 
@@ -119,7 +130,7 @@ def _scenarios() -> list[str]:
     would then have been unchecked on both counts below, which is the failure
     these tests exist to prevent.
     """
-    return sorted(p.stem for p in (ROOT / "terraform").glob("*.tfvars"))
+    return sorted(p.stem for p in (ROOT / "terraform").glob("*.tfvars") if _is_scenario(p))
 
 
 @pytest.mark.parametrize("name", _scenarios())
@@ -261,7 +272,7 @@ def test_every_scenario_file_on_disk_is_tracked_by_git():
     So assert the filesystem and the index agree. Discovery is what makes the
     other scenario tests robust and is also what makes them blind to this.
     """
-    on_disk = {p.name for p in (ROOT / "terraform").glob("*.tfvars") if not p.name.endswith(".local.tfvars")}
+    on_disk = {p.name for p in (ROOT / "terraform").glob("*.tfvars") if _is_scenario(p)}
     tracked = set(
         subprocess.run(
             ["git", "ls-files", "--", "terraform/*.tfvars"],
@@ -429,3 +440,23 @@ def test_every_interpolation_in_the_template_is_a_variable_terraform_passes():
                 offenders.append(f"{TEMPLATE.name}:{number}: {found.group(0)}")
 
     assert not offenders, "terraform will try to interpolate these:\n  " + "\n  ".join(offenders)
+
+
+def test_a_generated_local_tfvars_is_not_treated_as_a_scenario(tmp_path, monkeypatch):
+    """experiment.sh will write one of these per ad-hoc run.
+
+    They are gitignored and disposable, so the scenario checks must not see
+    them: an ad-hoc run at 24 slots for 7 problems, or at an agent timeout
+    above the derived-turn-timeout ceiling, is the operator's business and not
+    a repo invariant. Without the exclusion the first generated run fails the
+    suite on a file nobody committed.
+    """
+    generated = ROOT / "terraform" / "experiment.local.tfvars"
+    assert not generated.exists(), "a real one is in the way; this test would be meaningless"
+
+    generated.write_text('instance_count = 1\nruns_per_instance = 9\nproblems = ["network_policy_block"]\n')
+    try:
+        assert "experiment.local" not in _scenarios()
+        assert not _is_scenario(generated)
+    finally:
+        generated.unlink()
