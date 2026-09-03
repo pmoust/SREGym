@@ -313,34 +313,44 @@ def test_brain_go_can_parse_the_window_out_of_the_prompt(monkeypatch, template):
 
     bounds = [_ISO_DATE.search(g) for g in (match.group(1), match.group(2))]
     assert all(bounds), "an anchor did not parse as an ISO timestamp"
+    # 06:27:08 rounds up to 06:28, so the window never includes pre-fault time.
     assert [b.groups() for b in bounds] == [
-        ("2026", "09", "02", "06", "27"),
-        ("2026", "09", "02", "07", "07"),
+        ("2026", "09", "02", "06", "28"),
+        ("2026", "09", "02", "07", "08"),
     ]
 
 
 def test_the_window_ends_one_agent_budget_after_the_fault(monkeypatch):
     """brain-go freezes a thread's window on turn 1, so the end has to cover
-    the whole investigation rather than the moment the prompt was built."""
+    the whole investigation rather than the moment the prompt was built.
+
+    Measured from the rounded start, not from the fault, so the window is a
+    full budget long rather than a budget minus the rounding.
+    """
     monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "600")
     window = driver.incident_window(_INJECTED_AT.timestamp())
 
-    assert "between 2026-09-02T06:27 and 2026-09-02T06:37" in window
+    assert "between 2026-09-02T06:28 and 2026-09-02T06:38" in window
 
 
-def test_the_window_carries_no_seconds_and_no_zulu_suffix(monkeypatch):
+def test_the_window_bounds_carry_no_seconds_and_no_zulu_suffix(monkeypatch):
     """Both break the parse outright, and neither is obvious to a later editor.
 
     brain-go's token pattern ends at the minute, so ":08" does not match, and a
     trailing "Z" stops both the gate and the anchor from matching at all.
+
+    Scoped to the two bounds rather than every timestamp in the sentence: the
+    prose deliberately carries the exact instant with seconds, which is for the
+    model rather than for the parser, and sits before the word "between" where
+    it cannot reach the match.
     """
     monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
     window = driver.incident_window(_INJECTED_AT.timestamp())
-    stamps = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?:\S*)", window)
+    match = re.search(r"between (\S+) and (\S+)", window)
 
-    assert stamps, "no timestamp in the window sentence"
-    for stamp in stamps:
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", stamp), f"unparseable stamp: {stamp}"
+    assert match, "no window bounds in the sentence"
+    for bound in match.groups():
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", bound), f"unparseable bound: {bound}"
 
 
 @pytest.mark.parametrize("unknown", [None, 0, 0.0])
@@ -352,3 +362,50 @@ def test_an_unknown_incident_start_sends_no_window_rather_than_a_guess(unknown):
     prompt = _rendered(driver.DIAGNOSIS_PROMPT, "")
     assert "between" not in prompt
     assert not prompt.endswith("\n"), "an absent window must not leave trailing blank lines"
+
+
+@pytest.mark.parametrize(
+    ("injected", "expected_start"),
+    [
+        ((2026, 9, 2, 20, 35, 38), "2026-09-02T20:36"),  # the real failure
+        ((2026, 9, 2, 20, 20, 24), "2026-09-02T20:21"),
+        ((2026, 9, 2, 20, 35, 1), "2026-09-02T20:36"),
+        ((2026, 9, 2, 20, 35, 59), "2026-09-02T20:36"),
+        ((2026, 9, 2, 20, 35, 0), "2026-09-02T20:35"),  # already on the minute
+    ],
+)
+def test_the_window_never_starts_before_the_fault(monkeypatch, injected, expected_start):
+    """Rounding down is what broke run-20260902-2008.
+
+    The fault landed at 20:35:38, the window went out as 20:35, and all seven
+    findings the agent cited fell between 20:35:13 and 20:35:28: inside the
+    window it was given, and before the fault. It diagnosed otel-collector
+    shutdown churn and scored 0.0 on a problem that scored 100 the run before.
+
+    brain-go's token pattern has no seconds field, so minute precision is the
+    only option and the only choice is which way to round.
+    """
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "1800")
+    moment = datetime.datetime(*injected, tzinfo=datetime.UTC)
+    window = driver.incident_window(moment.timestamp())
+
+    match = re.search(r"between (\S+) and (\S+)", window)
+    assert match, window
+    assert match.group(1) == expected_start
+
+    started = datetime.datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M").replace(tzinfo=datetime.UTC)
+    assert started >= moment, "the window must not hand the agent any pre-fault time"
+    assert (started - moment).total_seconds() < 60, "and must not skip a whole minute of the incident"
+
+
+def test_the_prose_carries_the_exact_instant_the_window_cannot(monkeypatch):
+    """The window is minute-rounded for brain-go's parser; the model reading
+    the prose has no such limit, and the true instant is better for the tool
+    calls it makes itself."""
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "1800")
+    window = driver.incident_window(datetime.datetime(2026, 9, 2, 20, 35, 38, tzinfo=datetime.UTC).timestamp())
+
+    assert "introduced at 2026-09-02T20:35:38 UTC" in window
+    # And an ISO stamp before the word "between" must not disturb the parse,
+    # since reFromTo matches from "between" onward.
+    assert _FROM_TO.search(window.strip())
