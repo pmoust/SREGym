@@ -33,6 +33,20 @@ resource "aws_s3_bucket" "results" {
   count         = var.results_bucket == "" ? 1 : 0
   bucket        = "sregym-bench-results-${data.aws_caller_identity.current.account_id}"
   force_destroy = false # results are the point of the run
+
+  # The tags argument is load-bearing even though default_tags already supplies
+  # every value that matters. With no tags argument the provider puts this
+  # resource's tags_all in the plan as a static empty map rather than "known
+  # after apply", and default_tags then adds Project, ManagedBy and RunId during
+  # apply. Terraform rejects that as "Provider produced inconsistent final plan
+  # ... tags_all: new element has appeared" and fails the whole apply.
+  #
+  # network.tf carries the same note for the egress rule, which hit this first.
+  # This bucket hit it later and for a different reason: RunId derives from
+  # timestamp(), so default_tags differ on every plan, and unlike the instances
+  # this bucket outlives the run, so every apply wants a tag update on it and
+  # every apply failed on that update.
+  tags = { Name = "sregym-bench-results" }
 }
 
 resource "aws_s3_bucket_public_access_block" "results" {

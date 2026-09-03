@@ -26,6 +26,11 @@ resource "aws_iam_role" "bench" {
   count              = var.instance_profile_name == "" ? 1 : 0
   name               = "${local.name}-role"
   assume_role_policy = data.aws_iam_policy_document.assume.json
+
+  # Explicit tags for the reason s3.tf spells out. Unreached today, since every
+  # scenario sets instance_profile_name and this is count = 0, but it would fail
+  # its create the first time someone unset it.
+  tags = { Name = "${local.name}-role" }
 }
 
 # SSM Session Manager instead of SSH. No keys to distribute, no inbound rules,
@@ -103,4 +108,6 @@ resource "aws_iam_instance_profile" "bench" {
   count = var.instance_profile_name == "" ? 1 : 0
   name  = "${local.name}-profile"
   role  = aws_iam_role.bench[0].name
+
+  tags = { Name = "${local.name}-profile" }
 }
