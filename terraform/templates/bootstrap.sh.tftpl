@@ -43,16 +43,27 @@ IID=$(curl -sf -H "X-aws-ec2-metadata-token: $(curl -sf -X PUT http://169.254.16
       http://169.254.169.254/latest/meta-data/instance-id)
 echo "[bootstrap] instance=$IID"
 
+# terminate <reason> [outcome]. outcome is "success" only from run_shard.sh's
+# shard-complete exit; the other ten call sites are failures and omit it.
+# keep_alive_on_failure applies to failures only, as its name says. Without
+# that split it held finished boxes up to the runtime cap too: an hour of idle
+# m8i.8xlarge on run-20260902-2008 and again on run-20260903-0558. See
+# run_shard.sh for the rest.
 terminate() {
   local reason="$1"
+  local outcome="${2:-failure}"
   echo "[bootstrap] terminating: $reason"
   sync_results || true
   sync_logs || true
   %{ if keep_alive_on_failure }
-  echo "[bootstrap] keep_alive_on_failure is set, staying up. hard_stop still terminates at the runtime cap."
-  %{ else }
-  aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" || shutdown -h now
+  if [ "$outcome" = "success" ]; then
+    echo "[bootstrap] keep_alive_on_failure is set but this run succeeded, so terminating anyway."
+  else
+    echo "[bootstrap] keep_alive_on_failure is set and this was a failure, staying up. hard_stop still terminates at the runtime cap."
+    return 0
+  fi
   %{ endif }
+  aws ec2 terminate-instances --region "$REGION" --instance-ids "$IID" || shutdown -h now
 }
 
 # Unconditional kill, used only by the runtime cap below. keep_alive_on_failure
