@@ -199,10 +199,21 @@ say which one you are quoting. `visualizer/queries.py` maps an empty string to
 `False`, so it applies the strict reading silently. See #39.
 
 Instances terminate themselves when their shard finishes. `terraform destroy`
-then removes the bucket, security group, and the role (unless
-`instance_profile_name` pointed at a pre-existing one, which this never
-touches). It does not need to remove the instances, and if you run it early
-it will.
+then removes the security group and the role (unless `instance_profile_name`
+pointed at a pre-existing one, which this never touches). It does not need to
+remove the instances, and if you run it early it will.
+
+It will **not** remove the results bucket, and will fail rather than try, since
+`force_destroy = false`. That is deliberate: one bucket holds every run under
+its own `<run-id>/` prefix (#48), so destroying it would take every previous
+run's results with it. Nothing in the bucket bills meaningfully and the
+lifecycle rule expires noncurrent versions after 30 days, so leaving it is the
+normal state. Destroy is housekeeping for the security group, not the thing
+that ends a run.
+
+To get a clean destroy, empty the bucket first and deliberately, having
+archived what you want (`sregym-results/archive_run.sh` in the brain-go
+checkout).
 
 ## How the pieces fit
 

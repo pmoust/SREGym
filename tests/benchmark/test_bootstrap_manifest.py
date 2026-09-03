@@ -29,6 +29,7 @@ _VALUES = {
     "agent_timeout_seconds": "1800",
     "runs_per_instance": "3",
     "instance_type": "test-instance-type",
+    "bucket": "sregym-bench-results-123456789012",
     "agent_model": "test-agent-model",
     "judge_model": "test-judge-model",
     "sregym_ref": "a" * 40,
@@ -84,6 +85,7 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "agent_timeout_seconds",
         "runs_per_instance",
         "instance_type",
+        "results_bucket",
         "agent_model",
         "judge_model",
         "sregym_ref",
@@ -344,3 +346,47 @@ def test_brain_go_logs_are_dumped_and_shipped():
     assert (ROOT / "scripts" / "benchmark" / "dump_brain_go_logs.sh").stat().st_mode & 0o111, (
         "the dump script is not executable, and sync_logs guards on -x"
     )
+
+
+def test_the_results_bucket_name_does_not_move_with_the_run():
+    """A bucket named from the run id is replaced on every plan.
+
+    That is #48. local.run_id derives from timestamp(), so "${local.name}-results"
+    renamed the bucket on each plan, and a rename is a replace: every apply
+    tried to delete the previous run's bucket and failed on BucketNotEmpty,
+    because versioning leaves object versions behind. It cost a manual paged
+    purge before every launch, and once cost a run's logs, purged to unblock the
+    next apply before they had been downloaded.
+
+    Checked at the source rather than by planning, because planning needs
+    credentials and this needs to fail in CI.
+    """
+    s3 = (ROOT / "terraform" / "s3.tf").read_text()
+    bucket_line = next(
+        line for line in s3.splitlines() if re.match(r"\s*bucket\s*=\s*\"", line.strip()) or "bucket  " in line
+    )
+
+    assert "local.name" not in bucket_line, (
+        f"the bucket name interpolates local.name, which carries the run id: {bucket_line.strip()}"
+    )
+    assert "run_id" not in bucket_line, f"the bucket name interpolates the run id: {bucket_line.strip()}"
+
+
+def test_the_bucket_terraform_creates_keeps_its_protections():
+    """Every bucket resource is gated on var.results_bucket being empty.
+
+    So handing the job to an existing bucket, which is what #48 originally
+    proposed, drops the public-access block, the encryption default, the
+    versioning and the lifecycle expiry onto whoever created it by hand. This
+    pins that terraform still owns all four, so a later change cannot quietly
+    swap ownership without noticing what goes with it.
+    """
+    s3 = (ROOT / "terraform" / "s3.tf").read_text()
+
+    for resource in (
+        "aws_s3_bucket_public_access_block",
+        "aws_s3_bucket_server_side_encryption_configuration",
+        "aws_s3_bucket_versioning",
+        "aws_s3_bucket_lifecycle_configuration",
+    ):
+        assert f'resource "{resource}" "results"' in s3, f"{resource} is no longer managed here"

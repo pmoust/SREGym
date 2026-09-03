@@ -404,7 +404,17 @@ variable "github_token_ssm_path" {
 }
 
 variable "results_bucket" {
-  description = "Existing bucket for results. Empty creates one owned by this config."
+  description = <<-EOT
+    Existing bucket for results. Empty creates one owned by this config, named
+    from the account so it is stable across runs, holding every run under its
+    own <run-id>/ prefix.
+
+    Setting this is not the way to fix a bucket problem. Every resource in
+    s3.tf is gated on this being empty, so a value here drops the
+    public-access block, the AES256 default, the versioning and the
+    noncurrent-version expiry along with the bucket itself, leaving all four to
+    whoever created it. Use it only for a bucket that already has them.
+  EOT
   type        = string
   default     = ""
 }
