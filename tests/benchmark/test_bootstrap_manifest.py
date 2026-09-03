@@ -390,3 +390,42 @@ def test_the_bucket_terraform_creates_keeps_its_protections():
         "aws_s3_bucket_lifecycle_configuration",
     ):
         assert f'resource "{resource}" "results"' in s3, f"{resource} is no longer managed here"
+
+
+def _template_vars_passed_by_terraform() -> set[str]:
+    """The names compute.tf actually hands templatefile().
+
+    Read from the config rather than listed here, so adding a variable to the
+    templatefile block does not need a matching edit in this file.
+    """
+    compute = (ROOT / "terraform" / "compute.tf").read_text()
+    block = compute.split('bootstrap.sh.tftpl", {', 1)[1].split("\n  }))", 1)[0]
+
+    return set(re.findall(r"^\s*(\w+)\s*=", block, re.M))
+
+
+def test_every_interpolation_in_the_template_is_a_variable_terraform_passes():
+    """A shell brace expansion in this file is a terraform interpolation.
+
+    `local outcome="${2:-failure}"` broke the plan with "Template interpolation
+    doesn't expect a colon at this location", after passing bash -n, ruff,
+    terraform fmt, terraform validate and a unit test that rendered the file
+    with a Python regex. None of those parse the template the way terraform
+    does, and the failure surfaced only at apply time on a launch.
+
+    So check it here: every ${...} must name a variable the templatefile call
+    supplies. A shell construct needs $${...} to escape, or rewriting to avoid
+    braces, which is what that line did.
+    """
+    known = _template_vars_passed_by_terraform()
+    assert known, "could not read the templatefile variable list from compute.tf"
+
+    offenders = []
+    for number, line in enumerate(TEMPLATE.read_text().split("\n"), 1):
+        # (?<!\$) so an escaped $${...} is not reported: that form is already
+        # a literal by the time terraform is done with it.
+        for found in re.finditer(r"(?<!\$)\$\{([^}]*)\}", line):
+            if found.group(1).strip() not in known:
+                offenders.append(f"{TEMPLATE.name}:{number}: {found.group(0)}")
+
+    assert not offenders, "terraform will try to interpolate these:\n  " + "\n  ".join(offenders)

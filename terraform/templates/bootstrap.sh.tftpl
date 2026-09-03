@@ -51,7 +51,17 @@ echo "[bootstrap] instance=$IID"
 # run_shard.sh for the rest.
 terminate() {
   local reason="$1"
-  local outcome="${2:-failure}"
+  # No brace expansion anywhere in this file. terraform's templatefile reads
+  # dollar-brace as an interpolation, so a default-value expansion on $2 failed
+  # the plan with "Template interpolation doesn't expect a colon at this
+  # location". Doubling the dollar escapes it, but nothing else here sets that
+  # precedent, and a bare $2 needs no one to know the rule.
+  #
+  # This applies to comments too, which is how the first version of this note
+  # broke the plan a second time by quoting the construct it warns about. A
+  # test scans the whole file, comments included.
+  local outcome="$2"
+  [ -n "$outcome" ] || outcome=failure
   echo "[bootstrap] terminating: $reason"
   sync_results || true
   sync_logs || true
