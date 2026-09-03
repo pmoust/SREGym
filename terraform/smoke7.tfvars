@@ -1,4 +1,13 @@
-# Does one brain-go stack hold seven slots?
+# Superseded: seven slots does not work. Use density.tfvars.
+
+# This asked whether one brain-go stack holds seven slots, and
+# run-20260903-0822 answered it at scale: three boxes at seven slots lost all
+# 63 problem-runs to 61 deploy failures, none of which reached an agent, so the
+# shared stack was never even the binding constraint. density.tfvars replaces
+# this by measuring the number instead of testing one guess at it.
+#
+# Kept rather than deleted because the reasoning below about problem choice and
+# about one box versus three still holds, and density.tfvars inherits it.
 
 # The scored run moved to 3 x 7 slots (#54) on arithmetic, not on a measurement:
 # every slot on a box shares one brain-go stack with its Postgres and Temporal,
