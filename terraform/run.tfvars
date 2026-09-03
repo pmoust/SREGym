@@ -116,3 +116,9 @@ use_spot = false
 # than the profile, and is named -instance-role; passing that gets
 # "Invalid IAM Instance Profile name" part way through an apply.
 instance_profile_name = "sregym-benchmark-instance-profile"
+
+# gp3 IOPS, not throughput, is what image pulls hit. At the 3000 baseline
+# a 500 MB/s setting is unreachable: gp3 caps throughput at 0.25 MB/s per
+# provisioned IOPS, so small-block layer writes throttle near 48 MB/s across
+# 12 containerd stores. 16000 is the gp3 max and costs ~$1.25 for this run.
+disk_iops = 16000
