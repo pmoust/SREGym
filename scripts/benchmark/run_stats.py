@@ -384,9 +384,11 @@ def _pct(value) -> str:
 
 
 def _ci(interval) -> str:
+    """Plain-language framing: not "the 95% CI is (x, y)" but "could reasonably
+    be anywhere from x to y", which needs no statistics background to read."""
     if interval is None:
-        return "(n/a)"
-    return f"({interval[0]:.1f}-{interval[1]:.1f})"
+        return "(too few attempts to say)"
+    return f"(likely {interval[0]:.1f}-{interval[1]:.1f})"
 
 
 def _render_group(name: str, g: dict) -> list[str]:
@@ -394,17 +396,17 @@ def _render_group(name: str, g: dict) -> list[str]:
     for metric, key in (("Diagnosis", "diagnosis"), ("Mitigation", "mitigation"), ("End to end", "e2e")):
         m = g[key]
         lines.append(
-            f"    {metric:<11} strict {_pct(m['strict_pct'])} {_ci(m['strict_ci95']):<14}"
-            f" graded {_pct(m['graded_pct'])} {_ci(m['graded_ci95']):<14} n={g['attempts']}"
+            f"    {metric:<11} strict {_pct(m['strict_pct'])} {_ci(m['strict_ci95']):<20}"
+            f" graded {_pct(m['graded_pct'])} {_ci(m['graded_ci95']):<20} (from {g['attempts']} attempts)"
         )
     for label, col_key in (("TTD", "ttd_seconds"), ("TTM", "ttm_seconds")):
         st = g[col_key]
         if st is None:
-            lines.append(f"    {label:<11} n/a")
+            lines.append(f"    {label:<11} not enough data")
         else:
             ci = _ci(st["ci95"])
             lines.append(
-                f"    {label:<11} mean {st['mean']:>8.1f}s  median {st['median']:>8.1f}s  95% CI {ci}  n={st['n']}"
+                f"    {label:<11} typically {st['mean']:>8.1f}s  (middle value {st['median']:>8.1f}s)  {ci}  (from {st['n']} attempts)"
             )
     for label, col_key in (
         ("LLM calls", "llm_calls"),
@@ -416,11 +418,11 @@ def _render_group(name: str, g: dict) -> list[str]:
     ):
         st = g[col_key]
         if st is None:
-            lines.append(f"    {label:<11} n/a")
+            lines.append(f"    {label:<11} not enough data")
         else:
             ci = _ci(st["ci95"])
             lines.append(
-                f"    {label:<11} mean {st['mean']:>10.1f}  median {st['median']:>10.1f}  95% CI {ci}  n={st['n']}"
+                f"    {label:<11} typically {st['mean']:>10.1f}  (middle value {st['median']:>10.1f})  {ci}  (from {st['n']} attempts)"
             )
     lines.append("")
     return lines
@@ -447,11 +449,12 @@ def render(overall: dict, by_category: dict[str, dict], unresolved: list[str]) -
         out.append("These attempts still count in OVERALL; only the per-category split omits them.")
 
     out.append("-" * 78)
-    out.append("Wilson score interval on every rate (not Wald: stable at small n and")
-    out.append("near 0%/100%). t-distribution interval on every duration/count (not")
-    out.append("normal: correct for the single-digit n common per category). n < 2 in a")
-    out.append("group prints no interval rather than a false one. A wide interval means")
-    out.append("the number is not pinned down yet, not that the run is wrong.")
+    out.append("How to read the ranges: each number has a range next to it showing how")
+    out.append("much it could reasonably move if this exact test ran again. A narrow")
+    out.append('range means the number is solid. A wide range, or "too few attempts to')
+    out.append('say", means there is not yet enough data to trust the number on its own')
+    out.append("-- treat it as a rough estimate, not a precise score. That is a fact")
+    out.append("about how much data exists, not a sign that the run went wrong.")
     return "\n".join(out)
 
 
