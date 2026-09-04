@@ -78,9 +78,19 @@ before it reaches terraform, and refuses to proceed, before any AWS call, if:
   disk in the form it ran is unreproducible)
 
 `scripts/benchmark/experiment.sh` exercises the same resolution and the same
-three checks from the command line, `--sregym-ref` / `--brain-go-ref`, ahead
-of the fuller cost-preview-and-selection wrapper still to come; today it only
-prints what it resolved to.
+three checks from the command line, `--sregym-ref` / `--brain-go-ref`. It
+also takes `--problems` (a comma-separated mix of named sets and bare ids,
+resolved through `resolve_problems()`) and `--attempts`, and prints a cost
+preview before anything gets deployed: the shape (`instance_count` at
+`--runs-per-instance` slots each, depth 1), the expected wall clock (an
+order-statistic setup estimate, not a plain average, since a box's own
+setup time is set by its slowest slot), the expected EC2 cost, a Bedrock
+token estimate (dollar cost printed only once a rate exists in
+`terraform/rates.yml`, never guessed), and the statistical resolution that
+shape buys at 80% power. The arithmetic lives in
+`scripts/benchmark/cost_model.py`, unit-tested in
+`tests/benchmark/test_cost_model.py`. Still no terraform invocation; that is
+the wrapper still to come.
 
 Run the smoke scenario before any scored run. It costs two problems and answers
 the one question the local gates cannot: whether a real instance gets through
