@@ -10,6 +10,15 @@
 # gives under "Running": both default to a branch name, and a branch is not a
 # pinned input.
 #
+# A scenario that leaves sregym_ref / brain_go_ref unset (every scenario
+# checked in today) gets origin/main, refetched and re-resolved on every
+# launch. Set either to something else in the scenario's tfvars, a branch, a
+# tag or a SHA, to run an engineer's own code instead: this script resolves
+# that ref to a full SHA, refuses it if it does not resolve, was never pushed
+# (the fleet clones from the remote and cannot see a local-only commit), or
+# the worktree that resolved it is dirty (a run whose code exists nowhere is
+# unreproducible), and pins the result exactly like the origin/main case.
+#
 # A note on `set -e` here, because two bugs in the first version of this file
 # came from trusting it.
 #
@@ -102,35 +111,99 @@ if [ -z "${BRAIN_GO_DIR:-}" ]; then
   exit 1
 fi
 
+# A `key = "value"` scalar out of a tfvars file, comment and quotes stripped.
+# Same tradeoff the problems-list grep below already makes: good enough for
+# this repo's flat tfvars, not a general HCL parser. A commented-out line
+# does not match. `[[:space:]]*` before the key allows only whitespace there,
+# never `#`, and a match takes everything up to the closing quote so a
+# trailing `# ...` comment is discarded with the rest of the line.
+tfvars_ref() {
+  sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" | tail -1
+}
+
 resolve() {
-  local dir="$1" name="$2" sha
-  # Checked explicitly. Relying on set -e here is what let the first version
-  # pin a stale SHA after an offline fetch: the fetch failed, rev-parse
-  # succeeded against the cached ref, the 40-char check passed because a stale
-  # SHA is still 40 chars, and the run pinned last week's code silently.
-  if ! git -C "$dir" fetch -q origin main; then
-    echo "launch: cannot fetch origin/main for $name in $dir" >&2
-    echo "launch: refusing to pin a possibly stale ref" >&2
+  local dir="$1" name="$2" ref="${3:-}" sha
+
+  if [ -z "$ref" ]; then
+    # Default: origin/main, refetched every time. Checked explicitly rather
+    # than trusted to set -e, for the reason in the file header: a failed
+    # fetch under bash 3.2 does not abort a multi-statement substitution, so
+    # this used to fall through to rev-parse against a stale cached ref, pass
+    # the 40-char check because a stale SHA is still 40 chars, and pin last
+    # week's code silently.
+    if ! git -C "$dir" fetch -q origin main; then
+      echo "launch: cannot fetch origin/main for $name in $dir" >&2
+      echo "launch: refusing to pin a possibly stale ref" >&2
+      return 1
+    fi
+    if ! sha=$(git -C "$dir" rev-parse origin/main 2>/dev/null); then
+      echo "launch: $name has no origin/main in $dir" >&2
+      return 1
+    fi
+    if [ ${#sha} -ne 40 ]; then
+      echo "launch: $name resolved to something that is not a full SHA: $sha" >&2
+      return 1
+    fi
+    printf '%s\n' "$sha"
+    return 0
+  fi
+
+  # An engineer-supplied ref: the scenario's tfvars sets sregym_ref or
+  # brain_go_ref to something other than main. Three checks, in the order
+  # they can fail, each named because each fails quietly otherwise.
+  #
+  # 1. Does it resolve to a commit here at all.
+  if ! sha=$(git -C "$dir" rev-parse --verify -q "${ref}^{commit}" 2>/dev/null); then
+    echo "launch: $name ref '$ref' does not resolve to a commit in $dir" >&2
     return 1
   fi
-  if ! sha=$(git -C "$dir" rev-parse origin/main 2>/dev/null); then
-    echo "launch: $name has no origin/main in $dir" >&2
+
+  # 2. Is that commit reachable on origin. `fetch origin` with no refspec
+  # updates every refs/remotes/origin/* branch tip per the remote's default
+  # fetch refspec, so `branch -r --contains` after it is the same reachable
+  # check the fleet's own clone would make, not just "did this name exist
+  # once." A commit that only lives in this worktree is invisible to the
+  # fleet, which clones from the remote, and that failure mode is otherwise a
+  # silent one three minutes into boot rather than a named error here.
+  if ! git -C "$dir" fetch -q origin; then
+    echo "launch: cannot fetch origin for $name in $dir" >&2
     return 1
   fi
-  if [ ${#sha} -ne 40 ]; then
-    echo "launch: $name resolved to something that is not a full SHA: $sha" >&2
+  if [ -z "$(git -C "$dir" branch -r --contains "$sha" 2>/dev/null)" ]; then
+    echo "launch: $name ref '$ref' ($sha) is not on origin in $dir" >&2
+    echo "launch: push it first; the fleet clones from the remote and cannot see an unpushed commit" >&2
     return 1
   fi
+
+  # 3. Is the worktree that resolved it clean. A run whose code exists
+  # nowhere, neither pinned nor on disk in the form it ran, is unreproducible.
+  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+    echo "launch: $name worktree in $dir is dirty, refusing to pin ref '$ref'" >&2
+    echo "launch: a run whose code exists nowhere is unreproducible; commit or stash first" >&2
+    return 1
+  fi
+
   printf '%s\n' "$sha"
 }
 
+SREGYM_REF_OVERRIDE=$(tfvars_ref "$VARS" sregym_ref)
+BRAIN_GO_REF_OVERRIDE=$(tfvars_ref "$VARS" brain_go_ref)
+
 # `|| exit 1` rather than trusting errexit through the substitution.
-SREGYM_SHA=$(resolve "$ROOT" sregym) || exit 1
-BRAIN_GO_SHA=$(resolve "$BRAIN_GO_DIR" brain-go) || exit 1
+SREGYM_SHA=$(resolve "$ROOT" sregym "$SREGYM_REF_OVERRIDE") || exit 1
+BRAIN_GO_SHA=$(resolve "$BRAIN_GO_DIR" brain-go "$BRAIN_GO_REF_OVERRIDE") || exit 1
 
 echo "launch: scenario   $SCENARIO  ($VARS)"
-echo "launch: sregym     $SREGYM_SHA"
-echo "launch: brain-go   $BRAIN_GO_SHA"
+if [ -n "$SREGYM_REF_OVERRIDE" ]; then
+  echo "launch: sregym     $SREGYM_SHA  (ref: $SREGYM_REF_OVERRIDE)"
+else
+  echo "launch: sregym     $SREGYM_SHA"
+fi
+if [ -n "$BRAIN_GO_REF_OVERRIDE" ]; then
+  echo "launch: brain-go   $BRAIN_GO_SHA  (ref: $BRAIN_GO_REF_OVERRIDE)"
+else
+  echo "launch: brain-go   $BRAIN_GO_SHA"
+fi
 
 # `|| true` on both: a scenario that sets none of these keys, or leaves
 # problems unset, is legitimate. Without it grep's empty-match exit 1 takes the
