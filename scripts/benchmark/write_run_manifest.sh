@@ -24,14 +24,44 @@ set -uo pipefail
 
 OUT="${1:?usage: write_run_manifest.sh <output-path>}"
 
+# The fully resolved problem id list, not PROBLEM_SET or PROBLEMS_OVERRIDE
+# verbatim: a run's provenance should not depend on whether the selection
+# was one named set, a mix of sets and bare ids, or a narrowed override, only
+# on which ids actually ran. Resolved with the same resolve_problems() that
+# run_shard.sh uses, so the two cannot read the same PROBLEM_SET two
+# different ways.
+#
+# This script runs before run_shard.sh (see bootstrap.sh.tftpl) and its own
+# caller already tolerates its failure with `|| true`, so a bad PROBLEM_SET
+# here must not blank out every other field: only this line goes empty, and
+# run_shard.sh is still what hard-stops the run over it.
+PROBLEMS_RESOLVED=$(PROBLEM_SET="${PROBLEM_SET:-}" PROBLEMS_OVERRIDE="${PROBLEMS_OVERRIDE:-}" uv run python -c "
+import os, sys
+from sregym.conductor.problem_sets import resolve_problems
+
+try:
+    ids = resolve_problems(os.environ['PROBLEM_SET'])
+except ValueError as exc:
+    sys.stderr.write(str(exc) + chr(10))
+    sys.exit(1)
+
+want = os.environ.get('PROBLEMS_OVERRIDE', '').split()
+if want:
+    ids = [p for p in ids if p in set(want)]
+
+print(' '.join(ids))
+" 2>/dev/null) || PROBLEMS_RESOLVED=""
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
   echo "shard_count=${SHARD_COUNT:-}"
   echo "problem_set=${PROBLEM_SET:-}"
-  # Empty means the whole set. A narrowed run is not comparable with a full one,
-  # so the archive has to be able to tell them apart.
-  echo "problems=${PROBLEMS_OVERRIDE:-}"
+  # The resolved list, independent of how selection was expressed. Empty
+  # here means resolution failed (see above), not that the whole registry
+  # ran: an unresolvable PROBLEM_SET makes run_shard.sh terminate the run
+  # with nothing scored.
+  echo "problems=$PROBLEMS_RESOLVED"
   echo "n_attempts=${N_ATTEMPTS:-}"
   echo "noise=${NOISE:-}"
   echo "agent_timeout_seconds=${AGENT_TIMEOUT_SECONDS:-}"

@@ -35,20 +35,24 @@ aws s3 sync "$S3_PREFIX/slots/" "$SLOTS_DIR" --region "$REGION" --only-show-erro
 # problem_sets.py is pure data. The registry is not: ProblemRegistry() loads a
 # kubeconfig on construction, and at this point the cluster may not exist yet.
 # The full-suite path is blocked on NOFireAI/brain-go#2221 anyway, which has to
-# reconstruct which 90 of the 137 registered problems the paper used.
+# reconstruct which 90 of the 123 registered problems the paper used.
 if [ -z "$PROBLEM_SET" ]; then
   echo "[bootstrap] problem_set is empty, which means the full registry."
-  echo "[bootstrap] That set is undefined: 137 problems are registered, the paper"
+  echo "[bootstrap] That set is undefined: 123 problems are registered, the paper"
   echo "[bootstrap] used 90, and nothing in the repo says which. See NOFireAI/brain-go#2221."
   terminate "full-suite runs need a defined problem set"
   exit 1
 fi
 
-# PROBLEMS_OVERRIDE narrows the set to a named list, which is how a smoke run
-# costs ten minutes instead of a full suite. Filtered through the set rather
+# PROBLEM_SET is resolved by problem_sets.py's resolve_problems(): a
+# comma-separated mix of named sets and bare problem ids, unioned and
+# deduped, hard-stopping on any token that is neither. PROBLEMS_OVERRIDE then
+# narrows that resolved set further, which is how a smoke run costs ten
+# minutes instead of a full suite. Filtered through the resolved set rather
 # than trusted: a typo would otherwise shard to nothing and terminate looking
 # like a clean short run, which is the failure mode this whole file keeps
-# hitting. An id not in the set is a hard stop, listing what was rejected.
+# hitting. An id not in the resolved set is a hard stop, listing what was
+# rejected.
 # Every value reaches python through the environment, none through string
 # interpolation. $PROBLEM_SET used to be spliced into the source as
 # PROBLEM_SETS['$PROBLEM_SET'], where a value containing a quote breaks out of
@@ -58,15 +62,14 @@ fi
 # terraform.
 PROBLEMS=$(PROBLEMS_OVERRIDE="${PROBLEMS_OVERRIDE:-}" PROBLEM_SET="$PROBLEM_SET" uv run python -c "
 import os, sys
-from sregym.conductor.problem_sets import PROBLEM_SETS
+from sregym.conductor.problem_sets import resolve_problems
 
-name = os.environ['PROBLEM_SET']
-if name not in PROBLEM_SETS:
-    sys.stderr.write('unknown problem_set: ' + name + chr(10))
-    sys.stderr.write('known: ' + ', '.join(sorted(PROBLEM_SETS)) + chr(10))
+try:
+    ids = resolve_problems(os.environ['PROBLEM_SET'])
+except ValueError as exc:
+    sys.stderr.write(str(exc) + chr(10))
     sys.exit(2)
 
-ids = sorted(PROBLEM_SETS[name])
 want = os.environ.get('PROBLEMS_OVERRIDE', '').split()
 if want:
     unknown = [p for p in want if p not in ids]
