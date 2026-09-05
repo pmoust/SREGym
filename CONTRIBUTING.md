@@ -384,3 +384,7 @@ Before submitting, ensure:
 By contributing to SREGym, you agree that your contributions will be licensed under the [MIT License](LICENSE.txt).
 
 ---
+
+## AI policy
+
+AI-assisted development is welcome in sregym. See [AI_POLICY.md](AI_POLICY.md).
