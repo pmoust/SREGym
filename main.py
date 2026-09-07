@@ -32,7 +32,7 @@ from sregym.conductor.conductor import Conductor, ConductorConfig
 from sregym.conductor.conductor_api import request_shutdown, run_api
 from sregym.conductor.constants import StartProblemResult
 from sregym.conductor.problem_sets import PROBLEM_SETS
-from sregym.run_artifacts import ArtifactFinalizationError, RunArtifacts
+from sregym.run_artifacts import ArtifactFinalizationError, RunArtifacts, stabilize_run_csv_headers
 from sregym.service.container_runner import ContainerRunner, ExecInput
 from sregym.traces import postprocess as trace_postprocess
 from sregym.traces import store as trace_store
@@ -632,6 +632,17 @@ def driver_loop(
         if not use_external_harness:
             console.log("🔓 Stopping Kubernetes API proxy...")
             conductor.stop_k8s_proxy()
+
+        # Each per-attempt CSV was published against whatever fieldnames the
+        # loop above had accumulated so far, so a file from early in this run
+        # can be missing a column a later attempt's oracle introduced. Now
+        # that every attempt is in, reconcile them all to one header (#39).
+        try:
+            rewritten = stabilize_run_csv_headers(base_dir)
+            if rewritten:
+                console.log(f"🧹 Normalized headers on {len(rewritten)} per-attempt result file(s)")
+        except (OSError, csv.Error) as exc:
+            console.log(f"⚠️  Result CSV header normalization failed (non-fatal): {exc}")
 
         return [{agent_to_run: all_results_for_agent}]
 

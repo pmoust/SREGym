@@ -28,6 +28,15 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
 - `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, and it sets `API_PORT`,
   `MCP_SERVER_PORT` and friends as defaults rather than overrides so several
   runs can share a host. Candidate for upstreaming.
+- `sregym/run_artifacts.py` (`stabilize_run_csv_headers`, called once at the
+  end of `main.py`'s driver loop) — reconciles every per-attempt result CSV
+  under a run to one shared header. Upstream's `finalize_and_publish` writes
+  each attempt's header from whatever fieldnames the driver had accumulated
+  so far, so a file published early in a run can be missing a column a later
+  attempt's oracle introduced: nine header shapes across 63 files in one run,
+  13 to 19 columns wide, 11 with no `TTM` column at all
+  ([NOFireAI/sregym#39](https://github.com/NOFireAI/sregym/issues/39)). Not
+  benchmark-specific — candidate for upstreaming.
 - `llm_backend/init_backend.py` — routes the judge to `ClaudeCliBackend` when
   `is_claude_cli_judge()` says so. Keep that branch when merging upstream: it
   conflicts with any upstream change to `get_llm_backend_for_judge`, and losing

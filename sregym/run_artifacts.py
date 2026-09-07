@@ -267,6 +267,50 @@ def _csv_problem_ids(path: Path) -> list[str]:
         return [row.get("problem_id", "") for row in reader] if reader.fieldnames else []
 
 
+def stabilize_run_csv_headers(root: Path) -> list[Path]:
+    """Give every per-attempt result CSV under root the same header.
+
+    finalize_and_publish() writes each attempt's row against whatever
+    fieldnames the driver had accumulated by that point in the run, so a
+    file published early sees fewer columns than one published once some
+    later attempt's oracle has contributed a key of its own: nine header
+    shapes across 63 files in one run, 13 to 19 columns wide (#39).
+
+    Call this once a run's attempts are all in. It rewrites every already-
+    published per-attempt CSV to the union of every header seen under root,
+    so a reader can trust the first line regardless of which file it opens
+    first. A column a specific row never produced comes back empty
+    (csv.DictWriter's own restval=""), distinct from a column that ran and
+    recorded False -- the row for that column is simply absent from that
+    file's original data, not written as "".
+
+    Returns the paths actually rewritten (whose header was not already the
+    union), so a caller can log how much it did; a run with a uniform
+    header, or fewer than two files, is left untouched.
+    """
+    paths = sorted(root.rglob("*/run_*/*_results.csv"))
+    if len(paths) < 2:
+        return []
+
+    parsed: list[tuple[Path, list[str], list[dict[str, Any]]]] = []
+    fields: set[str] = set()
+    for path in paths:
+        with path.open(newline="", encoding="utf-8") as csvfile:
+            reader = csv.DictReader(csvfile)
+            file_fields = list(reader.fieldnames or [])
+            rows = list(reader)
+        parsed.append((path, file_fields, rows))
+        fields.update(file_fields)
+
+    union = sorted(fields)
+    rewritten = []
+    for path, file_fields, rows in parsed:
+        if file_fields != union:
+            _write_csv(path, union, rows)
+            rewritten.append(path)
+    return rewritten
+
+
 def _write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
     tmp = _temp_path(path)
     try:
