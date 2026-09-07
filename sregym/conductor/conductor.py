@@ -233,9 +233,7 @@ class Conductor:
         # gated by SREGYM_BASELINE_SYNC_SECONDS so it never affects normal runs.
         baseline_wait = int(os.environ.get("SREGYM_BASELINE_SYNC_SECONDS", "0"))
         if baseline_wait > 0:
-            self.logger.info(
-                f"[ENV] Baseline-sync wait {baseline_wait}s before fault injection"
-            )
+            self.logger.info(f"[ENV] Baseline-sync wait {baseline_wait}s before fault injection")
             time.sleep(baseline_wait)
 
         # Snapshot the healthy cluster before breaking it. The oracle is built
@@ -368,7 +366,19 @@ class Conductor:
             problem.app.cleanup()
         self.logger.info("[CLEANUP] App undeployed")
 
-        # Reconcile cluster state to baseline
+        # Reconcile cluster state to baseline. Since deploy_app now captures
+        # the baseline after the infra stack deploys rather than before
+        # (sregym#56), _baseline_captured stays False for longer than it
+        # used to: a slot's very first deploy attempt, if it fails partway
+        # through infra setup, skips reconciliation here instead of scrubbing
+        # whatever infra namespace had partially come up, since there is no
+        # baseline yet to reconcile against. The retry that follows relies on
+        # each infra component's own deploy() being idempotent (Prometheus,
+        # MCP server, etc. all check whether they're already running) to
+        # converge on a half-installed state rather than on this cleanup
+        # step scrubbing it first. Not observed to cause a problem, but this
+        # is a real, silent narrowing of what this cleanup step covers,
+        # specific to the first attempt of the first problem a slot deploys.
         if self._baseline_captured:
             self.logger.info("[CLEANUP] Reconciling cluster state to baseline...")
             try:
@@ -801,17 +811,6 @@ class Conductor:
         problem = self.current_problem
         self.submission_stage = "setup"
 
-        # Load or capture baseline state BEFORE any infrastructure deployment.
-        # This captures the bare cluster state so reconciliation can clean up
-        # everything added during a problem run (including infrastructure drift).
-        if not self._baseline_captured:
-            if self.cluster_state.load_baseline_state(CLUSTER_BASELINE_STATE_FILE):
-                self.logger.info("[DEPLOY] Loaded persisted cluster baseline state")
-            else:
-                self.logger.info("[DEPLOY] No persisted baseline state found, capturing and saving...")
-                self.cluster_state.save_baseline_state(CLUSTER_BASELINE_STATE_FILE)
-            self._baseline_captured = True
-
         self.logger.info("[DEPLOY] Setting up metrics-server…")
         self.kubectl.exec_command(
             "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/"
@@ -860,6 +859,21 @@ class Conductor:
         self.mcp_server.deploy()
 
         self.logger.info("[ENV] Set up necessary components: metrics-server, Khaos, OpenEBS, Prometheus, Jaeger, Loki")
+
+        # Load or capture baseline state AFTER the infra stack above is up, not
+        # before. Captured before, the stack's own namespaces (openebs,
+        # observe, ...) are absent from the baseline, so the reconciler that
+        # runs between problems treats them as unexpected drift and deletes
+        # them, forcing a full stack reinstall on every problem instead of
+        # once per slot (sregym#56). This runs once per slot, guarded by
+        # _baseline_captured, same as before the move.
+        if not self._baseline_captured:
+            if self.cluster_state.load_baseline_state(CLUSTER_BASELINE_STATE_FILE):
+                self.logger.info("[DEPLOY] Loaded persisted cluster baseline state")
+            else:
+                self.logger.info("[DEPLOY] No persisted baseline state found, capturing and saving...")
+                self.cluster_state.save_baseline_state(CLUSTER_BASELINE_STATE_FILE)
+            self._baseline_captured = True
 
         # train-ticket pods need jaeger at startup; create ExternalName before deploy.
         # Other apps get it after deploy to avoid Helm ownership conflicts.

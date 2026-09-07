@@ -45,6 +45,17 @@ def _is_chaos_mesh_resource(name: str) -> bool:
     )
 
 
+# Bumped whenever what capture_baseline() is called against, or what it
+# records, changes in a way that makes an older persisted file misleading
+# rather than merely absent. A machine with a baseline file cached from
+# before deploy_app started capturing after the infra stack deploys
+# (sregym#56) would otherwise load a baseline missing the stack's own
+# namespaces and silently reproduce that same bug on every run until the
+# file is manually cleared -- load_baseline_state() below rejects a file
+# whose version does not match, forcing a fresh capture instead.
+BASELINE_STATE_VERSION = 2
+
+
 @dataclass
 class ClusterBaseline:
     """Snapshot of cluster state to reconcile back to."""
@@ -82,6 +93,7 @@ class ClusterBaseline:
     def to_json(self) -> dict:
         """Lossless serialization to a JSON-compatible dict (for persisting to disk)."""
         return {
+            "schema_version": BASELINE_STATE_VERSION,
             "namespaces": sorted(self.namespaces),
             "cluster_roles": sorted(self.cluster_roles),
             "cluster_role_bindings": sorted(self.cluster_role_bindings),
@@ -166,6 +178,13 @@ class ClusterStateManager:
         """
         Load a previously saved baseline state snapshot and use it as the baseline.
         Returns True if the baseline state was loaded successfully, False otherwise.
+
+        A file with no schema_version, or an older one, was written by code
+        that captured the baseline at a different point in deploy_app than
+        the current code does (sregym#56): loading it would silently carry
+        that stale content forward as if it were current. Rejected here so
+        the caller falls back to recapturing, the same path a first boot
+        with no file at all takes.
         """
         if not path.exists():
             logger.debug(f"No baseline state file found at {path}")
@@ -174,6 +193,12 @@ class ClusterStateManager:
         try:
             with open(path) as f:
                 data = json.load(f)
+            if data.get("schema_version") != BASELINE_STATE_VERSION:
+                logger.warning(
+                    f"Baseline state at {path} has schema_version={data.get('schema_version')!r}, "
+                    f"expected {BASELINE_STATE_VERSION}; recapturing instead of loading stale content"
+                )
+                return False
             self.baseline = ClusterBaseline.from_json(data)
             logger.info(f"Baseline state loaded from {path}")
             return True
@@ -262,14 +287,15 @@ class ClusterStateManager:
                     logger.warning(f"Failed to delete PersistentVolume {pv}: {e}")
 
         # 4b. Garbage-collect orphaned OpenEBS LocalPV hostpath dirs.
-        # The openebs namespace is itself "unexpected" and gets deleted in step 1
-        # above, which kills the openebs-localpv-provisioner before it can run
-        # cleanup helper pods for any PVs it provisioned. Additionally, on
-        # control-plane nodes the dm-flakey path is intentionally skipped, so
-        # those nodes never get the rm -rf wipe that workers do at dm-flakey
-        # setup. Either path leaks /var/openebs/local/pvc-* dirs, eventually
-        # filling the disk and breaking subsequent deploys. Sweep them now that
-        # all unexpected PVs are gone from the API. Best-effort.
+        # Control-plane nodes skip the dm-flakey path, so they never get the
+        # rm -rf wipe that workers do at dm-flakey setup, which leaks
+        # /var/openebs/local/pvc-* dirs there, eventually filling the disk and
+        # breaking subsequent deploys. openebs used to leak here too, when
+        # step 1 deleted the namespace as "unexpected" and killed the
+        # provisioner before it could clean up; deploy_app now captures the
+        # baseline after the infra stack is up, so openebs is no longer
+        # unexpected and that source is closed. Sweep for the control-plane
+        # leak now that all unexpected PVs are gone from the API. Best-effort.
         try:
             gc_results = self.kubectl.gc_orphan_localpv_dirs()
             total = sum(c for c in gc_results.values() if c > 0)
