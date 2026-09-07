@@ -625,7 +625,7 @@ def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
         by_node = tok.get("by_node") or {}
         if by_node:
             out.append("")
-            out.append("  By node (brain-go#2687 -- which RCI node or signal spent them):")
+            out.append("  By node (which RCI node or signal spent them):")
             for node in sorted(by_node):
                 node_counts = by_node[node]
                 node_fresh = node_counts.get("input", 0) + node_counts.get("output", 0)
