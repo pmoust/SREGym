@@ -366,7 +366,19 @@ class Conductor:
             problem.app.cleanup()
         self.logger.info("[CLEANUP] App undeployed")
 
-        # Reconcile cluster state to baseline
+        # Reconcile cluster state to baseline. Since deploy_app now captures
+        # the baseline after the infra stack deploys rather than before
+        # (sregym#56), _baseline_captured stays False for longer than it
+        # used to: a slot's very first deploy attempt, if it fails partway
+        # through infra setup, skips reconciliation here instead of scrubbing
+        # whatever infra namespace had partially come up, since there is no
+        # baseline yet to reconcile against. The retry that follows relies on
+        # each infra component's own deploy() being idempotent (Prometheus,
+        # MCP server, etc. all check whether they're already running) to
+        # converge on a half-installed state rather than on this cleanup
+        # step scrubbing it first. Not observed to cause a problem, but this
+        # is a real, silent narrowing of what this cleanup step covers,
+        # specific to the first attempt of the first problem a slot deploys.
         if self._baseline_captured:
             self.logger.info("[CLEANUP] Reconciling cluster state to baseline...")
             try:
