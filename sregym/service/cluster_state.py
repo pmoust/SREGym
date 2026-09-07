@@ -262,14 +262,15 @@ class ClusterStateManager:
                     logger.warning(f"Failed to delete PersistentVolume {pv}: {e}")
 
         # 4b. Garbage-collect orphaned OpenEBS LocalPV hostpath dirs.
-        # The openebs namespace is itself "unexpected" and gets deleted in step 1
-        # above, which kills the openebs-localpv-provisioner before it can run
-        # cleanup helper pods for any PVs it provisioned. Additionally, on
-        # control-plane nodes the dm-flakey path is intentionally skipped, so
-        # those nodes never get the rm -rf wipe that workers do at dm-flakey
-        # setup. Either path leaks /var/openebs/local/pvc-* dirs, eventually
-        # filling the disk and breaking subsequent deploys. Sweep them now that
-        # all unexpected PVs are gone from the API. Best-effort.
+        # Control-plane nodes skip the dm-flakey path, so they never get the
+        # rm -rf wipe that workers do at dm-flakey setup, which leaks
+        # /var/openebs/local/pvc-* dirs there, eventually filling the disk and
+        # breaking subsequent deploys. openebs used to leak here too, when
+        # step 1 deleted the namespace as "unexpected" and killed the
+        # provisioner before it could clean up; deploy_app now captures the
+        # baseline after the infra stack is up, so openebs is no longer
+        # unexpected and that source is closed. Sweep for the control-plane
+        # leak now that all unexpected PVs are gone from the API. Best-effort.
         try:
             gc_results = self.kubectl.gc_orphan_localpv_dirs()
             total = sum(c for c in gc_results.values() if c > 0)

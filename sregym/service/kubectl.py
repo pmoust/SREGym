@@ -233,8 +233,10 @@ class KubeCtl:
             namespace: The namespace to check
             service_names: If provided (str or list), only wait for pods belonging to these services.
                            If None, wait for all pods in the namespace.
-            sleep: Seconds between checks
-            max_wait: Maximum seconds to wait
+            sleep: Seconds to sleep between checks (a poll interval, not a
+                   countdown step: max_wait is enforced against wall-clock
+                   time regardless of what sleep is, including 0).
+            max_wait: Maximum wall-clock seconds to wait
         """
 
         # Normalize to list
@@ -261,13 +263,18 @@ class KubeCtl:
 
         console.log(f"[bold yellow]Waiting for all pods in {display_name} to be ready...")
 
-        wait = 0
+        # A monotonic deadline, not an accumulated-sleep counter: the counter
+        # form (`wait += sleep`) both ignores time spent in the API calls
+        # inside the loop, so a real wait can run materially longer than
+        # max_wait states, and never advances at all when a caller passes
+        # sleep=0, making max_wait unenforceable (sregym#56).
+        deadline = time.monotonic() + max_wait
         # What the last successful poll saw, for the timeout message. None means
         # no poll ever returned, which is a different failure from pods that
         # returned and stayed unready, so the two must not read alike.
         last_not_ready: list[str] | None = None
 
-        while wait < max_wait:
+        while time.monotonic() < deadline:
             try:
                 if label_selectors:
                     # Collect pods from all services
@@ -306,7 +313,6 @@ class KubeCtl:
                 console.log(f"[red]Error checking pod statuses: {e}")
 
             time.sleep(sleep)
-            wait += sleep
 
         # Name them. The caller of this is main.py's deploy retry, which tears
         # the problem down and redeploys on the exception, so a message that
