@@ -27,7 +27,58 @@ IMDS_TOKEN=$(curl -sf -X PUT http://169.254.169.254/latest/api/token \
 INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id || echo unknown)
 MANIFEST="/var/log/sregym-run-manifest-$INSTANCE_ID.txt"
-WORKDIR=/opt/sregym
+
+# --- instance store -----------------------------------------------------
+# On a Nitro-based instance type -- which covers every family this project
+# launches, "d" or not -- both the EBS root volume and a local NVMe instance
+# store disk enumerate as /dev/nvme*n1, so neither the device name nor its
+# size tells them apart. The controller's sysfs "model" string does: AWS
+# reports "Amazon Elastic Block Store" for EBS and "Amazon EC2 NVMe Instance
+# Storage" for a local disk. Read from sysfs rather than `nvme id-ctrl`
+# because it needs no package this box has not installed yet at this point in
+# bootstrap.
+#
+# Absent on every non-"d" instance type, in which case INSTANCE_STORE_MOUNT
+# stays empty and WORKDIR and docker's data-root fall back to the EBS root
+# below, unchanged from before this section existed.
+#
+# Formatted unconditionally when found, with no fstab entry and nothing that
+# reads back a previous run's contents: this box was launched for this run
+# alone and self-terminates at the end of it, and instance store does not
+# survive a stop/start regardless.
+INSTANCE_STORE_MOUNT=""
+INSTANCE_STORE_DEV=""
+for ctrl in /sys/class/nvme/nvme*; do
+  [ -e "$ctrl/model" ] || continue
+  grep -qi "instance storage" "$ctrl/model" 2>/dev/null || continue
+  candidate="/dev/$(basename "$ctrl")n1"
+  [ -b "$candidate" ] || continue
+  INSTANCE_STORE_DEV="$candidate"
+  break
+done
+
+if [ -n "$INSTANCE_STORE_DEV" ]; then
+  echo "[bootstrap] instance store found at $INSTANCE_STORE_DEV, formatting and mounting"
+  mkdir -p /mnt/instance-store
+  if mkfs.ext4 -F -q "$INSTANCE_STORE_DEV" \
+     && mount "$INSTANCE_STORE_DEV" /mnt/instance-store \
+     && mkdir -p /mnt/instance-store/docker /mnt/instance-store/sregym; then
+    INSTANCE_STORE_MOUNT=/mnt/instance-store
+    echo "[bootstrap] instance store mounted at $INSTANCE_STORE_MOUNT"
+  else
+    echo "[bootstrap] found $INSTANCE_STORE_DEV but could not format, mount, or prepare it, falling back to the EBS root"
+  fi
+else
+  echo "[bootstrap] no instance-store device found, using the EBS root"
+fi
+
+# WORKDIR_BASE, not a bash default-value expansion on INSTANCE_STORE_MOUNT:
+# terraform's templatefile reads any $${...} in this file as its own
+# interpolation (see the no-brace-expansion note on terminate() below), so a
+# plain if/else is used everywhere in this file instead.
+WORKDIR_BASE=/opt
+[ -n "$INSTANCE_STORE_MOUNT" ] && WORKDIR_BASE="$INSTANCE_STORE_MOUNT"
+WORKDIR="$WORKDIR_BASE/sregym"
 # Each slot writes its own results tree at slots/<slot>/results (main.py
 # resolves "results" relative to the slot's own working directory -- see the
 # slot-workers section below). Syncing the whole slots/ tree in one call is
@@ -175,6 +226,31 @@ echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.d
   >/etc/apt/sources.list.d/docker.list
 apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# Repoint docker's data-root at the instance store before its first real
+# start, not after: this box installs docker-ce and then never again before
+# anything pulls an image, so there is no second chance to move it without
+# also moving whatever it already pulled. kind's node containers are
+# themselves docker containers (the "docker" provider, which is all this
+# project uses), so their overlay filesystem and containerd content store
+# already live under whatever docker calls its data-root, with no separate
+# kind setting to make -- moving docker's moves kind's too.
+#
+# Stopped explicitly first: Debian's docker-ce package can start the daemon
+# from its own postinst before this line runs, and `systemctl enable --now`
+# on an already-running unit does not restart it, which would leave the
+# default data-root in place for the rest of the run.
+if [ -n "$INSTANCE_STORE_MOUNT" ]; then
+  systemctl stop docker.socket docker.service 2>/dev/null || true
+  mkdir -p /etc/docker
+  cat >/etc/docker/daemon.json <<DOCKER_DAEMON_JSON
+{
+  "data-root": "$INSTANCE_STORE_MOUNT/docker"
+}
+DOCKER_DAEMON_JSON
+  echo "[bootstrap] docker data-root set to $INSTANCE_STORE_MOUNT/docker"
+fi
+
 systemctl enable --now docker
 
 curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
