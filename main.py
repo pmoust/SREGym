@@ -254,6 +254,27 @@ def _artifact_environment(run: RunArtifacts):
             _restore_env_var(name, value)
 
 
+def _deploy_exhausted_problems(agent_results: list[dict]) -> set[str]:
+    """Problem ids with a deploy_failed marker row: every deploy retry was
+    spent and no attempt for that problem was ever scored.
+
+    driver_loop() appends the marker as a bool; a row read back in through
+    --resume is a string, since it round-tripped through a CSV first. Both
+    are checked so a resumed run does not lose the signal a fresh one has.
+
+    A row with no problem_id at all is skipped rather than folded into the
+    result as the literal string "None": not reachable today (every
+    snapshot dict and every CSV-resumed row carries the column), but a
+    caller matching against this set should never see a value that was
+    never a real problem id.
+    """
+    return {
+        str(row["problem_id"])
+        for row in agent_results
+        if row.get("problem_id") is not None and row.get("deploy_failed") in (True, "True")
+    }
+
+
 def driver_loop(
     conductor: Conductor,
     problem_selection: Sequence[str] | None = None,
@@ -782,6 +803,8 @@ def main(args):
     # When API shuts down, collect results from driver
     results = _driver_results
 
+    deploy_exhausted_problems: set[str] = set()
+
     if results:
         aggregated = {}
         for entry in results:
@@ -797,12 +820,23 @@ def main(args):
                 writer.writeheader()
                 writer.writerows(agent_results)
             logger.info(f"✅ Benchmark complete! Results for {agent_name} written to {csv_path}")
+
+            deploy_exhausted_problems.update(_deploy_exhausted_problems(agent_results))
     else:
         logger.warning("⚠️ No results to write.")
 
+    if deploy_exhausted_problems:
+        logger.error(
+            "❌ Deploy retries exhausted for "
+            f"{len(deploy_exhausted_problems)} problem(s), no attempt recorded: "
+            f"{sorted(deploy_exhausted_problems)}"
+        )
+
     if __name__ == "__main__":
-        # separate run, use exit
-        sys.exit(0)
+        # separate run, use exit. Non-zero when a problem exhausted its deploy
+        # retries: that problem produced no attempt at all, which is not a
+        # clean run, and run_shard.sh's `|| echo` guard only fires on this.
+        sys.exit(1 if deploy_exhausted_problems else 0)
     else:
         # function call run, return results
         return results

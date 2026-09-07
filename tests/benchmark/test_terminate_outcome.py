@@ -85,10 +85,15 @@ def test_without_the_flag_everything_terminates(outcome, tmp_path):
 
 
 def test_the_shard_complete_path_declares_success():
-    """The template's half is useless if the caller never says it succeeded."""
+    """The template's half is useless if the caller never says it succeeded.
+
+    The reason string now names problem coverage (#51: "shard complete" on
+    its own said only that the slot loop ended, not that the work landed), so
+    this matches the coverage note rather than the old fixed string.
+    """
     shard = (ROOT / "scripts" / "benchmark" / "run_shard.sh").read_text()
 
-    assert 'terminate "shard complete" success' in shard, (
+    assert re.search(r'terminate "shard complete \([^"]*\)" success', shard), (
         "run_shard.sh's completion exit must pass success, or the flag holds the box up"
     )
 
