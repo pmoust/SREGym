@@ -205,6 +205,45 @@ def _token_delta(before: Path, after: Path) -> dict[str, int]:
     return {}
 
 
+def _token_delta_by_node(before: Path, after: Path) -> dict[str, dict[str, int]]:
+    """The same attempt's spend, broken out by brain-go's own RCI node
+    attribution (brain-go#2687), or an empty dict if it cannot be known.
+
+    Kept separate from the row entirely (see _write_token_usage_by_node):
+    the node set is bounded, but multiplying it against five token/call
+    columns is still the kind of sparse, per-attempt-varying header #39
+    already fixed once.
+    """
+    try:
+        done = subprocess.run(
+            [sys.executable, str(_TOKEN_DELTA), "delta-by-node", str(before), str(after)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            return json.loads(done.stdout)
+    except Exception as exc:  # noqa: BLE001 - pricing must never fail a run
+        console.log(f"⚠️  token delta by node failed (non-fatal): {type(exc).__name__}: {exc}")
+
+    return {}
+
+
+def _write_token_usage_by_node(active_dir: Path, by_node: dict[str, dict[str, int]]) -> None:
+    """Record the per-attempt node breakdown beside the attempt it belongs to,
+    the same way write_tool_calls (brain_go/driver.py) already does for tool
+    calls. Best effort: a bookkeeping failure must not cost a run its result.
+    """
+    if not by_node:
+        return
+
+    try:
+        (active_dir / "token-usage-by-node.json").write_text(json.dumps(by_node, indent=2, sort_keys=True))
+    except OSError as exc:
+        console.log(f"⚠️  could not write token usage by node (non-fatal): {type(exc).__name__}: {exc}")
+
+
 def _tool_calls(active_dir: Path) -> dict[str, int]:
     """The agent's tool calls, if it recorded them.
 
@@ -578,6 +617,7 @@ def driver_loop(
                     # llm_calls rather than calls, so a column name says which
                     # calls it counts. Tool calls are a different number.
                     snapshot["llm_calls" if name == "calls" else f"tokens_{name}"] = count
+                _write_token_usage_by_node(run.active_dir, _token_delta_by_node(tokens_before, tokens_after))
                 for stage, outcome in conductor.results.items():
                     if isinstance(outcome, dict):
                         for k, v in outcome.items():

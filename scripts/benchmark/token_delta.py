@@ -26,6 +26,7 @@ tokens are generated every time.
 Usage:
   token_delta.py snapshot <out.prom>          # capture, via scrape_tokens.sh
   token_delta.py delta <before.prom> <after.prom>   # emit JSON on stdout
+  token_delta.py delta-by-node <before.prom> <after.prom>  # same, per node
 """
 
 from __future__ import annotations
@@ -62,15 +63,23 @@ def snapshot(out: Path) -> int:
     return subprocess.run(["bash", str(SCRAPER), str(out)], check=False).returncode
 
 
-def _totals(path: Path) -> dict[str, float]:
-    """Sum each counter across every label set in one scrape.
+def _totals_by_node(path: Path) -> dict[str, dict[str, float]]:
+    """Sum each counter across every label set in one scrape, broken out by
+    node.
 
-    Summed rather than kept per thread on purpose. The delta is taken around a
-    single attempt, so every increment inside it belongs to that attempt
-    whatever thread carried it, and summing means a mid-attempt thread change
-    cannot lose counts.
+    Summed across every label except node -- in particular thread, on
+    purpose. The delta is taken around a single attempt, so every increment
+    inside it belongs to that attempt whatever thread carried it, and summing
+    means a mid-attempt thread change cannot lose counts. node is kept apart
+    rather than folded into that same sum: a single attempt's hypothesis
+    planner or worker can touch several nodes in the course of one turn, and
+    collapsing them away would lose exactly the per-node question
+    brain-go#2687 added the label to answer. Every real sample carries a node
+    value (brain-go defaults an unattributed call to "unknown" rather than
+    omitting the label), so grouping by it is safe even against a scrape
+    taken before that label existed.
     """
-    out: dict[str, float] = {}
+    out: dict[str, dict[str, float]] = {}
     if not path.exists():
         return out
 
@@ -91,19 +100,39 @@ def _totals(path: Path) -> dict[str, float]:
         if not math.isfinite(amount):
             continue
 
+        label_map = dict(_LABEL.findall(labels))
+        node = label_map.get("node") or "unknown"
+        bucket = out.setdefault(node, {})
+
         if metric == "llm_calls_total":
-            out["calls"] = out.get("calls", 0.0) + amount
+            bucket["calls"] = bucket.get("calls", 0.0) + amount
             continue
 
-        token_type = dict(_LABEL.findall(labels)).get("token_type")
+        token_type = label_map.get("token_type")
         if token_type in TOKEN_TYPES:
-            out[token_type] = out.get(token_type, 0.0) + amount
+            bucket[token_type] = bucket.get(token_type, 0.0) + amount
+
+    return out
+
+
+def _totals(path: Path) -> dict[str, float]:
+    """Sum each counter across every label set in one scrape, node included.
+
+    Summed rather than kept per thread on purpose. The delta is taken around a
+    single attempt, so every increment inside it belongs to that attempt
+    whatever thread carried it, and summing means a mid-attempt thread change
+    cannot lose counts.
+    """
+    out: dict[str, float] = {}
+    for node_totals in _totals_by_node(path).values():
+        for key, amount in node_totals.items():
+            out[key] = out.get(key, 0.0) + amount
 
     return out
 
 
 def delta(before: Path, after: Path) -> dict[str, int]:
-    """What one attempt spent. Never negative.
+    """What one attempt spent, in total. Never negative.
 
     A counter that goes backwards means the process restarted mid-attempt, and
     its pre-restart total is unrecoverable. Reporting a negative would corrupt
@@ -116,12 +145,35 @@ def delta(before: Path, after: Path) -> dict[str, int]:
     return {k: max(0, int(end.get(k, 0.0) - start.get(k, 0.0))) for k in keys}
 
 
+def delta_by_node(before: Path, after: Path) -> dict[str, dict[str, int]]:
+    """What one attempt spent, broken out by node. Never negative per node.
+
+    Not summed across node the way delta()'s total is summed across thread:
+    see _totals_by_node for why. Same never-negative floor as delta(), applied
+    per node independently, so one node's counter resetting cannot corrupt
+    another node's figure.
+    """
+    start, end = _totals_by_node(before), _totals_by_node(after)
+    keys = ("calls", *TOKEN_TYPES)
+    nodes = sorted(set(start) | set(end))
+
+    return {
+        node: {k: max(0, int(end.get(node, {}).get(k, 0.0) - start.get(node, {}).get(k, 0.0))) for k in keys}
+        for node in nodes
+    }
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "snapshot":
         return snapshot(Path(argv[2]))
 
     if len(argv) == 4 and argv[1] == "delta":
         print(json.dumps(delta(Path(argv[2]), Path(argv[3]))))
+
+        return 0
+
+    if len(argv) == 4 and argv[1] == "delta-by-node":
+        print(json.dumps(delta_by_node(Path(argv[2]), Path(argv[3]))))
 
         return 0
 

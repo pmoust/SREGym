@@ -450,12 +450,19 @@ def tokens(run_dir: Path) -> dict | None:
     realistic 63-thread scrape, printed in the same format as a correct number,
     for the one Table 3 metric that has never been measured at all. A silently
     low figure is worse than the "not archived" line this returns without data.
+
+    Also breaks the same totals out by node (brain-go#2687: which RCI node or
+    signal issued the call), under "by_node" -- this is the whole-run answer
+    to the question token_delta.py's delta_by_node() answers per attempt.
+    node is one more label on the same series, not a new dimension to scrape,
+    so it costs nothing extra to keep alongside token_type.
     """
     # Keyed by the full label set, so two processes scraping the same run (chat
     # on 9091 and tworker on 9092) contribute their own series rather than one
     # overwriting the other.
     series: dict[str, float] = {}
     kinds: dict[str, str] = {}
+    nodes: dict[str, str] = {}
     found = False
 
     for prom in sorted(_token_files(run_dir)):
@@ -472,18 +479,26 @@ def tokens(run_dir: Path) -> dict | None:
             if 'token_type="' not in labels:
                 continue
             kind = labels.split('token_type="', 1)[1].split('"', 1)[0]
+            node = labels.split('node="', 1)[1].split('"', 1)[0] if 'node="' in labels else "unknown"
             series[labels] = max(series.get(labels, 0.0), value)
             kinds[labels] = kind
+            nodes[labels] = node
 
     if not found:
         return None
 
     totals: dict[str, float] = {}
+    by_node: dict[str, dict[str, float]] = {}
     for labels, value in series.items():
         totals[kinds[labels]] = totals.get(kinds[labels], 0.0) + value
+        node_totals = by_node.setdefault(nodes[labels], {})
+        node_totals[kinds[labels]] = node_totals.get(kinds[labels], 0.0) + value
 
     out = {k: int(v) for k, v in sorted(totals.items())}
     out["series"] = len(series)
+    out["by_node"] = {
+        node: {k: int(v) for k, v in sorted(node_totals.items())} for node, node_totals in sorted(by_node.items())
+    }
 
     return out
 
@@ -593,7 +608,7 @@ def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
 
     out.append("")
     if tok:
-        counts = {k: v for k, v in tok.items() if k != "series"}
+        counts = {k: v for k, v in tok.items() if k not in ("series", "by_node")}
         fresh = counts.get("input", 0) + counts.get("output", 0)
         cached = counts.get("cache_read", 0) + counts.get("cache_write", 0)
         out.append(f"  Tokens             {fresh + cached:,} across {tok.get('series', 0)} thread series")
@@ -606,6 +621,16 @@ def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
             out.append("  input and output are the fresh tokens; cache_read and cache_write")
             out.append("  are billed at different rates, so quote which total you mean.")
             out.append("  There is no cached output: output tokens are generated every time.")
+
+        by_node = tok.get("by_node") or {}
+        if by_node:
+            out.append("")
+            out.append("  By node (brain-go#2687 -- which RCI node or signal spent them):")
+            for node in sorted(by_node):
+                node_counts = by_node[node]
+                node_fresh = node_counts.get("input", 0) + node_counts.get("output", 0)
+                node_cached = node_counts.get("cache_read", 0) + node_counts.get("cache_write", 0)
+                out.append(f"    {node:<24} {node_fresh + node_cached:>12,}")
 
     else:
         out.append("  Tokens             not archived for this run")
