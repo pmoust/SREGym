@@ -61,12 +61,12 @@ if [ -n "$INSTANCE_STORE_DEV" ]; then
   echo "[bootstrap] instance store found at $INSTANCE_STORE_DEV, formatting and mounting"
   mkdir -p /mnt/instance-store
   if mkfs.ext4 -F -q "$INSTANCE_STORE_DEV" \
-     && mount "$INSTANCE_STORE_DEV" /mnt/instance-store; then
-    mkdir -p /mnt/instance-store/docker /mnt/instance-store/sregym
+     && mount "$INSTANCE_STORE_DEV" /mnt/instance-store \
+     && mkdir -p /mnt/instance-store/docker /mnt/instance-store/sregym; then
     INSTANCE_STORE_MOUNT=/mnt/instance-store
     echo "[bootstrap] instance store mounted at $INSTANCE_STORE_MOUNT"
   else
-    echo "[bootstrap] found $INSTANCE_STORE_DEV but could not format or mount it, falling back to the EBS root"
+    echo "[bootstrap] found $INSTANCE_STORE_DEV but could not format, mount, or prepare it, falling back to the EBS root"
   fi
 else
   echo "[bootstrap] no instance-store device found, using the EBS root"
