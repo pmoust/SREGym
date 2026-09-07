@@ -825,3 +825,22 @@ def test_main_warns_but_does_not_fail_when_no_manifest_is_archived(tmp_path, cap
 
     assert rc == 0
     assert "no run manifest found" in err
+
+
+def test_main_warns_when_a_manifest_exists_but_has_no_usable_coverage_fields(tmp_path, capsys):
+    """A manifest is archived (so 'no manifest found' would be a wrong and
+    misleading message) but its problems field is empty -- exactly what
+    write_run_manifest.sh itself writes on a PROBLEM_SET resolution
+    failure, per its own comment. coverage() correctly returns None here,
+    same as the no-manifest case, but a caller checking only `manifest is
+    None` would stay silent: a report indistinguishable from a fully
+    covered run, on a run this file could not actually check at all."""
+    _manifest(tmp_path, [], 3)
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+
+    rc = score_run.main(["score_run.py", str(tmp_path)])
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert err, "a manifest with no usable problems/n_attempts must still warn, not stay silent"
+    assert "missing a usable problems/n_attempts" in err

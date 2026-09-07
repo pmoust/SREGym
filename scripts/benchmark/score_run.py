@@ -672,12 +672,20 @@ def main(argv: list[str]) -> int:
         print(json.dumps({**s, "coverage": cov, "tokens": tok}, indent=2))
     else:
         print(render(s, tok, cov))
-        if manifest is None:
-            print(
-                "\nscore_run: no run manifest found under this run's log tree; cannot tell "
-                "whether every expected problem and attempt made it into this report",
-                file=sys.stderr,
-            )
+        if cov is None:
+            if manifest is None:
+                print(
+                    "\nscore_run: no run manifest found under this run's log tree; cannot tell "
+                    "whether every expected problem and attempt made it into this report",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "\nscore_run: run manifest found but missing a usable problems/n_attempts "
+                    "field; cannot tell whether every expected problem and attempt made it "
+                    "into this report",
+                    file=sys.stderr,
+                )
 
     if cov is not None and cov["missing"]:
         print(

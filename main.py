@@ -261,8 +261,18 @@ def _deploy_exhausted_problems(agent_results: list[dict]) -> set[str]:
     driver_loop() appends the marker as a bool; a row read back in through
     --resume is a string, since it round-tripped through a CSV first. Both
     are checked so a resumed run does not lose the signal a fresh one has.
+
+    A row with no problem_id at all is skipped rather than folded into the
+    result as the literal string "None": not reachable today (every
+    snapshot dict and every CSV-resumed row carries the column), but a
+    caller matching against this set should never see a value that was
+    never a real problem id.
     """
-    return {str(row.get("problem_id")) for row in agent_results if row.get("deploy_failed") in (True, "True")}
+    return {
+        str(row["problem_id"])
+        for row in agent_results
+        if row.get("problem_id") is not None and row.get("deploy_failed") in (True, "True")
+    }
 
 
 def driver_loop(
