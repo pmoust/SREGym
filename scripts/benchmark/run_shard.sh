@@ -380,6 +380,40 @@ for p in $SLOT_PIDS; do
   wait "$p" || echo "[bootstrap] a slot exited non-zero"
 done
 
+# --- coverage ----------------------------------------------------------
+# A problem that lost every attempt to an exhausted deploy retry writes no
+# row under any run_N directory: main.py's marker for it lives only in the
+# _ALL_ rollup, a sibling this glob does not match on purpose (the same
+# pattern score_run.py's load() uses, to avoid double-counting that rollup).
+# Every slot still exits 0 and prints "complete" for a shard that lost a
+# problem this way, so "shard complete" said only that the for loop above
+# ended, not that the work landed -- exactly how run-20260902-0606 read as
+# clean at this layer. Count what actually landed instead.
+#
+# Through the environment, not string interpolation: this file already
+# learned that lesson once, splicing PROBLEM_SET straight into a python
+# literal until a value containing a quote could break out of it (see
+# PROBLEMS' own resolution above).
+COVERED_PROBLEMS=$(PROBLEMS="$PROBLEMS" SLOTS_DIR="$SLOTS_DIR" uv run python -c "
+import csv
+import os
+from pathlib import Path
+
+problems = set(os.environ.get('PROBLEMS', '').split())
+covered = set()
+for path in Path(os.environ['SLOTS_DIR']).rglob('*/run_*/*_results.csv'):
+    with path.open(newline='', encoding='utf-8', errors='replace') as fh:
+        for row in csv.DictReader(fh):
+            pid = (row.get('problem_id') or '').strip()
+            if pid in problems:
+                covered.add(pid)
+print(len(covered))
+" 2>/dev/null)
+TOTAL_PROBLEMS=$(echo $PROBLEMS | wc -w | tr -d ' ')
+# Empty rather than trusted: a failure in the python above (an unreadable
+# CSV, no uv on PATH) must not make a lost problem print as covered.
+[ -n "$COVERED_PROBLEMS" ] || COVERED_PROBLEMS=0
+
 echo "[bootstrap] shard $SHARD_INDEX complete (all $RUNS_PER_INSTANCE slots)"
 # "success" so keep_alive_on_failure does not hold a finished box up. Every
 # other terminate call omits it, which reads as a failure and is.
@@ -390,4 +424,4 @@ echo "[bootstrap] shard $SHARD_INDEX complete (all $RUNS_PER_INSTANCE slots)"
 # smoke could not finish inside its runtime cap, since hard_stop ignores the
 # flag and the cap was the only exit smoke ever reached. Raising that cap
 # surfaced it on run-20260902-2008 and again on run-20260903-0558.
-terminate "shard complete" success
+terminate "shard complete ($COVERED_PROBLEMS/$TOTAL_PROBLEMS problems)" success

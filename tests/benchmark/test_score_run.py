@@ -604,3 +604,224 @@ def test_an_attempt_with_only_tool_calls_still_appears(tmp_path):
     assert len(s["per_problem_tokens"]) == 1
     assert s["per_problem_tokens"][0]["tool_calls"] == 12
     assert s["per_problem_tokens"][0]["total"] == 0
+
+
+# --- deploy_failed markers and expected-count coverage (#51) ----------------
+#
+# A run that loses a problem to an exhausted deploy retry produces no row a
+# normal load() sees at all: the marker lives only in the slot's _ALL_
+# rollup, which the run_N glob excludes on purpose (#41). Nothing above this
+# point notices such a loss unless something reads that rollup specifically
+# and compares the result against a population the run declared for itself.
+
+
+def _all_rollup(tmp_path, slot, timestamp, rows):
+    """A slot's _ALL_ rollup file: the sibling load()'s glob excludes."""
+    d = tmp_path / "slots" / str(slot) / "results" / timestamp
+    d.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({key for row in rows for key in row})
+    with (d / "brain_go_ALL_results.csv").open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    return tmp_path
+
+
+def _deploy_failed_row(pid, attempt, deploy_attempts=3):
+    return {
+        "problem_id": pid,
+        "attempt": str(attempt),
+        "deploy_failed": "True",
+        "deploy_attempts": str(deploy_attempts),
+    }
+
+
+def _manifest(tmp_path, problems, n_attempts, **extra):
+    """A run manifest the way write_run_manifest.sh writes one, minus the
+    fields this file never reads."""
+    fields = {
+        "run_id": "run-x",
+        "shard_index": "0",
+        "shard_count": "1",
+        "problem_set": "sregym-lite",
+        "problems": " ".join(problems),
+        "n_attempts": str(n_attempts),
+    }
+    fields.update(extra)
+    d = tmp_path / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    text = "\n".join(f"{k}={v}" for k, v in fields.items()) + "\n"
+    (d / "sregym-run-manifest-i-0123456789abcdef0.txt").write_text(text)
+    return tmp_path
+
+
+def test_deploy_failed_rows_are_read_from_the_all_rollup_not_the_run_glob(tmp_path):
+    """The marker is real and archived, but only in the file load() skips."""
+    _all_rollup(tmp_path, 1, "0902_0616", [_deploy_failed_row("p1", 1)])
+
+    assert score_run.load(tmp_path) == []
+    failed = score_run.load_deploy_failed(tmp_path)
+    assert len(failed) == 1
+    assert failed[0]["problem_id"] == "p1"
+
+
+def test_a_completed_row_in_the_all_rollup_is_not_read_as_deploy_failed(tmp_path):
+    """The rollup also carries every completed attempt for that problem;
+    reading it for deploy_failed rows must not pick those up too, or a
+    completed attempt would be double-counted against #41's fix."""
+    _all_rollup(
+        tmp_path,
+        1,
+        "0902_0616",
+        [
+            {"problem_id": "p1", "attempt": "1", "deploy_failed": ""},
+            _deploy_failed_row("p2", 1),
+        ],
+    )
+
+    failed = score_run.load_deploy_failed(tmp_path)
+    assert [r["problem_id"] for r in failed] == ["p2"]
+
+
+def test_deploy_failed_is_reported_as_its_own_category_not_folded_into_a_rate(tmp_path):
+    """Neither a graded failure nor an absent verdict: nothing ran."""
+    rows = [_row("a", diag="True", mitig="True", ttl="1", ttm="2")]
+    run = _run(tmp_path, rows)
+    _all_rollup(tmp_path, 0, "t0", [_deploy_failed_row("b", 1)])
+
+    s = score_run.score(score_run.load(run), score_run.load_deploy_failed(run))
+
+    assert s["deploy_failed"]["count"] == 1
+    assert s["deploy_failed"]["attempts"] == [("b", 1)]
+    # The rate that does exist is untouched by it.
+    assert s["diagnosis"]["correct"] == 1
+    assert s["attempts"] == 1
+
+    out = score_run.render(s, None)
+    assert "deploy exhausted: 1 attempt(s)" in out
+    assert "b attempt 1" in out
+
+
+def test_coverage_is_none_without_a_manifest(tmp_path):
+    """No manifest archived means no expected count to check against --
+    unknown, not clean."""
+    run = _run(tmp_path, [_row("a", diag="True", mitig="True")])
+    assert score_run.read_manifest(run) is None
+    assert score_run.coverage(score_run.load(run), [], None) is None
+
+
+def test_read_manifest_parses_key_value_lines(tmp_path):
+    _manifest(tmp_path, ["a", "b", "c"], 3)
+    manifest = score_run.read_manifest(tmp_path)
+
+    assert manifest is not None
+    assert manifest["problems"] == "a b c"
+    assert manifest["n_attempts"] == "3"
+
+
+def test_a_problem_that_lost_every_attempt_is_named_as_missing(tmp_path):
+    """The scenario the issue describes: 'c' produced no row anywhere, not
+    even a deploy_failed marker, and the run manifest is what says it should
+    have."""
+    _manifest(tmp_path, ["a", "b", "c"], 1)
+    run = _run(
+        tmp_path,
+        [
+            _row("a", diag="True", mitig="True", ttl="1", ttm="2"),
+            _row("b", diag="True", mitig="True", ttl="1", ttm="2"),
+        ],
+    )
+
+    manifest = score_run.read_manifest(run)
+    rows = score_run.load(run)
+    cov = score_run.coverage(rows, score_run.load_deploy_failed(run), manifest)
+
+    assert cov == {"expected": 3, "found": 2, "deploy_failed": 0, "missing": [("c", 1)]}
+
+
+def test_a_deploy_failed_marker_counts_as_accounted_for_not_missing(tmp_path):
+    """A named, visible loss is not the same failure this coverage check
+    exists to catch; only a silent one is."""
+    _manifest(tmp_path, ["a", "b"], 1)
+    run = _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+    _all_rollup(run, 0, "t0", [_deploy_failed_row("b", 1)])
+
+    cov = score_run.coverage(score_run.load(run), score_run.load_deploy_failed(run), score_run.read_manifest(run))
+
+    assert cov["missing"] == []
+    assert cov["deploy_failed"] == 1
+    assert cov["found"] == 1
+
+
+def test_a_full_run_reports_zero_missing(tmp_path):
+    _manifest(tmp_path, ["a", "b"], 1)
+    run = _run(
+        tmp_path,
+        [
+            _row("a", diag="True", mitig="True", ttl="1", ttm="2"),
+            _row("b", diag="True", mitig="True", ttl="1", ttm="2"),
+        ],
+    )
+
+    cov = score_run.coverage(score_run.load(run), score_run.load_deploy_failed(run), score_run.read_manifest(run))
+
+    assert cov == {"expected": 2, "found": 2, "deploy_failed": 0, "missing": []}
+
+
+def test_render_prints_the_missing_pairs_when_a_manifest_is_given(tmp_path):
+    _manifest(tmp_path, ["a", "b", "c"], 1)
+    run = _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+
+    rows = score_run.load(run)
+    deploy_failed_rows = score_run.load_deploy_failed(run)
+    cov = score_run.coverage(rows, deploy_failed_rows, score_run.read_manifest(run))
+    out = score_run.render(score_run.score(rows, deploy_failed_rows), None, cov)
+
+    assert "coverage: 1/3 expected attempts on record" in out
+    assert "b attempt 1" in out
+    assert "c attempt 1" in out
+
+
+def test_render_omits_coverage_when_no_manifest_was_given(tmp_path):
+    """render()'s existing callers pass no cov argument at all; adding
+    coverage reporting must not change their output."""
+    rows = [_row("a", diag="True", mitig="True", ttl="1", ttm="2")]
+    out = score_run.render(score_run.score(score_run.load(_run(tmp_path, rows))), None)
+
+    assert "coverage" not in out
+
+
+def test_main_exits_nonzero_and_names_what_is_missing(tmp_path, capsys):
+    """The end-to-end path: a lost problem must fail the run loudly rather
+    than being read as a clean 20/21."""
+    _manifest(tmp_path, ["a", "b"], 1)
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+
+    rc = score_run.main(["score_run.py", str(tmp_path)])
+    out = capsys.readouterr()
+
+    assert rc == 1
+    assert "b attempt 1" in out.out
+    assert "1 expected attempt(s) never landed" in out.err
+
+
+def test_main_exits_zero_when_every_expected_attempt_is_on_record(tmp_path, capsys):
+    _manifest(tmp_path, ["a"], 1)
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+
+    rc = score_run.main(["score_run.py", str(tmp_path)])
+
+    assert rc == 0
+
+
+def test_main_warns_but_does_not_fail_when_no_manifest_is_archived(tmp_path, capsys):
+    """An archive predating the manifest, or one from a layout this file does
+    not derive, should not read as a failure -- there is nothing to check
+    against, which is different from a check that failed."""
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+
+    rc = score_run.main(["score_run.py", str(tmp_path)])
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert "no run manifest found" in err

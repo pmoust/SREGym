@@ -82,6 +82,63 @@ def load(run_dir: Path) -> list[dict]:
     return [r for r in rows if _val(r, "problem_id")]
 
 
+def load_deploy_failed(run_dir: Path) -> list[dict]:
+    """deploy_failed marker rows: a deploy that exhausted every retry before
+    an attempt ever ran.
+
+    main.py writes the marker only into the slot's _ALL_ rollup, never into a
+    run_N directory, because no run happened for that attempt. load()'s glob
+    excludes the rollups on purpose, to avoid double-counting the completed
+    attempts they also carry (#41); widening that glob to see the marker would
+    reintroduce exactly that. Reading the rollups here for deploy_failed rows
+    only, and nothing else in them, does not.
+    """
+    rows: list[dict] = []
+    for path in sorted(run_dir.rglob("*_ALL_results.csv")):
+        with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+            rows.extend(
+                row for row in csv.DictReader(fh) if _val(row, "problem_id") and _val(row, "deploy_failed") == "True"
+            )
+
+    return rows
+
+
+def coverage(rows: list[dict], deploy_failed_rows: list[dict], manifest: dict[str, str] | None) -> dict | None:
+    """Attempts on record against the run's own declared population.
+
+    The manifest's "problems" field is the fully resolved list
+    write_run_manifest.sh recorded this run as intending to cover -- after
+    PROBLEMS_OVERRIDE narrowing and named-set union, not a re-derivation from
+    PROBLEM_SETS[problem_set], which would overcount whenever a run narrowed
+    its selection.
+
+    None when there is nothing to compare against: no manifest archived, or
+    one missing the fields needed to compute an expected population. That is
+    "unknown", not "clean" -- the caller decides how to say so.
+    """
+    if not manifest:
+        return None
+
+    problems = manifest.get("problems", "").split()
+    try:
+        n_attempts = int(manifest.get("n_attempts", ""))
+    except ValueError:
+        return None
+    if not problems or n_attempts <= 0:
+        return None
+
+    expected = {(pid, attempt) for pid in problems for attempt in range(1, n_attempts + 1)}
+    found = {(_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in rows}
+    failed = {(_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in deploy_failed_rows}
+
+    return {
+        "expected": len(expected),
+        "found": len(expected & found),
+        "deploy_failed": len(expected & failed),
+        "missing": sorted(expected - found - failed),
+    }
+
+
 def _int(raw: str) -> int:
     """A CSV cell as an int, with anything unparseable reading as 0."""
     try:
@@ -132,8 +189,9 @@ def _rate(correct: int, total: int) -> float | None:
     return None if total == 0 else round(100.0 * correct / total, 1)
 
 
-def score(rows: list[dict]) -> dict:
+def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dict:
     attempts = len(rows)
+    deploy_failed_rows = deploy_failed_rows or []
 
     diag_graded = [r for r in rows if _val(r, "Diagnosis.success")]
     diag_ok = [r for r in diag_graded if _val(r, "Diagnosis.success") == "True"]
@@ -236,9 +294,20 @@ def score(rows: list[dict]) -> dict:
 
     problems = {_val(r, "problem_id") for r in rows}
 
+    # A deploy_failed row is neither a graded failure nor an absent verdict:
+    # nothing ran, so there is no result to grade and no oracle that was
+    # skipped. This file's own absent-is-not-false reasoning for mitigation
+    # applies here too and did not yet cover it (#51): counting it as either
+    # would understate or overstate the agent for something the harness, not
+    # the agent, gave up on.
+    deploy_failed = sorted(
+        (_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in deploy_failed_rows if _val(r, "problem_id")
+    )
+
     return {
         "attempts": attempts,
         "problems": len(problems),
+        "deploy_failed": {"count": len(deploy_failed), "attempts": deploy_failed},
         "diagnosis": {
             "correct": len(diag_ok),
             "graded": len(diag_graded),
@@ -275,25 +344,24 @@ def score(rows: list[dict]) -> dict:
     }
 
 
-def _token_files(run_dir: Path) -> list[Path]:
-    """Every token scrape belonging to this run, in both trees it can land in.
+def _log_roots(run_dir: Path, env_override: str | None = None) -> list[Path]:
+    """Every directory that might hold this run's logs, results tree excluded.
 
     archive_run.sh splits a run in two: results under sregym-results/<run-id>
-    and logs under sregym-run-logs/<run-id>, siblings of each other. The scrape
-    is a log, so passing the results directory, which is the directory a person
-    passes, found nothing and the report said "not archived" while the file sat
-    one directory over. The smoke run on 2026-09-01 archived 8 real series and
-    was reported as having none.
+    and logs under sregym-run-logs/<run-id>, siblings of each other. A caller
+    passing the results directory, which is the directory a person passes,
+    finds nothing in the log tree unless it is derived. The smoke run on
+    2026-09-01 archived 8 real token-scrape series and was reported as having
+    none, for exactly this reason.
 
-    SREGYM_TOKEN_DIR adds a third root, for an archive laid out some other way.
-    It adds rather than replaces: a scrape found by the default derivation still
-    counts, so setting it cannot silently hide data that was already being read.
+    env_override adds a third root, for an archive laid out some other way. It
+    adds rather than replaces: a file found by the default derivation still
+    counts, so setting it cannot silently hide data that was already found.
     """
     roots = [run_dir]
 
-    override = os.environ.get("SREGYM_TOKEN_DIR")
-    if override:
-        roots.append(Path(override))
+    if env_override:
+        roots.append(Path(env_override))
 
     # The sibling log tree, derived rather than assumed: only added when the
     # path really does contain the results directory name.
@@ -301,8 +369,8 @@ def _token_files(run_dir: Path) -> list[Path]:
     # Both the given path and the resolved one, because resolve() dereferences
     # symlinks first. Review found that a symlinked sregym-results directory
     # resolves to a name without "sregym-results" in it, so the derivation was
-    # skipped and the scrape went unfound: the same "not archived" failure this
-    # function exists to remove, reached a different way.
+    # skipped and the target file went unfound: the same "not archived"
+    # failure this function exists to remove, reached a different way.
     for candidate in (run_dir, run_dir.resolve()):
         parts = list(candidate.parts)
         if "sregym-results" not in parts:
@@ -314,17 +382,55 @@ def _token_files(run_dir: Path) -> list[Path]:
         parts[last] = "sregym-run-logs"
         roots.append(Path(*parts))
 
-    # No file-level dedupe. Reading the same scrape twice is harmless: a series
-    # is keyed by its whole label set and collapsed with max(), so a repeat of
-    # the same line contributes nothing. An earlier version resolved paths into
-    # a seen-set for this, which no mutation could reach, because the max was
-    # already doing the work.
+    return [root for root in roots if root.is_dir()]
+
+
+def _token_files(run_dir: Path) -> list[Path]:
+    """Every token scrape belonging to this run, in both trees it can land in.
+
+    No file-level dedupe. Reading the same scrape twice is harmless: a series
+    is keyed by its whole label set and collapsed with max(), so a repeat of
+    the same line contributes nothing. An earlier version resolved paths into
+    a seen-set for this, which no mutation could reach, because the max was
+    already doing the work.
+    """
     files: list[Path] = []
-    for root in roots:
-        if root.is_dir():
-            files.extend(root.rglob("*tokens*.prom"))
+    for root in _log_roots(run_dir, os.environ.get("SREGYM_TOKEN_DIR")):
+        files.extend(root.rglob("*tokens*.prom"))
 
     return files
+
+
+def _manifest_files(run_dir: Path) -> list[Path]:
+    """Every archived run manifest, in the log tree write_run_manifest.sh's
+    output lands in (see _log_roots). One per shard, since each instance
+    writes and ships its own; they agree on everything but shard_index."""
+    files: list[Path] = []
+    for root in _log_roots(run_dir):
+        files.extend(root.rglob("sregym-run-manifest-*.txt"))
+
+    return files
+
+
+def read_manifest(run_dir: Path) -> dict[str, str] | None:
+    """This run's own recorded configuration, or None if none was archived.
+
+    write_run_manifest.sh writes one KEY=VALUE per line; a line with no "="
+    (the free-form BRAIN_ENV_EXTRA block can be blank) is skipped rather than
+    raising. None rather than {} when nothing is found, so a caller can tell
+    "no manifest archived" apart from "a manifest with nothing useful in it"
+    without checking key membership twice.
+    """
+    files = _manifest_files(run_dir)
+    if not files:
+        return None
+
+    # Any one: every shard's manifest resolves the same full problem list and
+    # n_attempts, because write_run_manifest.sh derives them the same way
+    # run_shard.sh does, before either shards by index. Sorted for a
+    # deterministic pick across runs.
+    text = sorted(files)[0].read_text(encoding="utf-8", errors="replace")
+    return dict(line.split("=", 1) for line in text.strip("\n").split("\n") if "=" in line)
 
 
 def tokens(run_dir: Path) -> dict | None:
@@ -387,7 +493,7 @@ def _pct(value: float | None) -> str:
     return "  n/a" if value is None else f"{value:>4}%"
 
 
-def render(s: dict, tok: dict | None) -> str:
+def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
     out: list[str] = []
     d, m, e = s["diagnosis"], s["mitigation"], s["e2e"]
     out.append(f"{s['problems']} problems, {s['attempts']} attempts, {s['censored']} censored by the agent timeout")
@@ -398,6 +504,24 @@ def render(s: dict, tok: dict | None) -> str:
             f"  deploy retries: {s['wasted_deploys']} deploy(s) produced no attempt, "
             f"across {s['retried_attempts']} of {s['deploy_attempts_known']} attempts"
         )
+    dep_failed = s.get("deploy_failed") or {"count": 0, "attempts": []}
+    if dep_failed["count"]:
+        out.append(
+            f"  deploy exhausted: {dep_failed['count']} attempt(s) never ran at all, "
+            "not a graded failure and not an absent verdict:"
+        )
+        for pid, attempt in dep_failed["attempts"]:
+            out.append(f"    {pid} attempt {attempt}")
+
+    if cov is not None:
+        out.append(
+            f"  coverage: {cov['found']}/{cov['expected']} expected attempts on record"
+            + (f", {cov['deploy_failed']} more exhausted their deploy" if cov["deploy_failed"] else "")
+        )
+        if cov["missing"]:
+            out.append(f"  {len(cov['missing'])} expected attempt(s) missing with no record at all:")
+            for pid, attempt in cov["missing"]:
+                out.append(f"    {pid} attempt {attempt}")
     out.append("")
     out.append("                 strict          graded          note")
     out.append(
@@ -538,12 +662,30 @@ def main(argv: list[str]) -> int:
         print("score_run: expected files matching */run_N/*_results.csv", file=sys.stderr)
         return 1
 
-    s = score(rows)
+    deploy_failed_rows = load_deploy_failed(args.run_dir)
+    manifest = read_manifest(args.run_dir)
+    cov = coverage(rows, deploy_failed_rows, manifest)
+
+    s = score(rows, deploy_failed_rows)
     tok = tokens(args.run_dir)
     if args.json:
-        print(json.dumps({**s, "tokens": tok}, indent=2))
+        print(json.dumps({**s, "coverage": cov, "tokens": tok}, indent=2))
     else:
-        print(render(s, tok))
+        print(render(s, tok, cov))
+        if manifest is None:
+            print(
+                "\nscore_run: no run manifest found under this run's log tree; cannot tell "
+                "whether every expected problem and attempt made it into this report",
+                file=sys.stderr,
+            )
+
+    if cov is not None and cov["missing"]:
+        print(
+            f"score_run: {len(cov['missing'])} expected attempt(s) never landed "
+            f"({cov['found']}/{cov['expected']}); see the missing list above",
+            file=sys.stderr,
+        )
+        return 1
 
     return 0
 
