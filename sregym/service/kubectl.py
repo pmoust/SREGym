@@ -332,13 +332,19 @@ class KubeCtl:
         )
 
     def wait_for_namespace_deletion(self, namespace, sleep=2, max_wait=300):
-        """Wait for a namespace to be fully deleted before proceeding."""
+        """Wait for a namespace to be fully deleted before proceeding.
+
+        max_wait bounds wall-clock time via a monotonic deadline, not
+        accumulated sleep() calls: the latter both ignores time spent in
+        the read_namespace call and never advances at all if a caller
+        passes sleep=0, making max_wait unenforceable (sregym#56).
+        """
 
         console.log("[bold yellow]Waiting for namespace deletion...")
 
-        wait = 0
+        deadline = time.monotonic() + max_wait
 
-        while wait < max_wait:
+        while time.monotonic() < deadline:
             try:
                 self.core_v1_api.read_namespace(name=namespace)
             except Exception:
@@ -346,7 +352,6 @@ class KubeCtl:
                 return
 
             time.sleep(sleep)
-            wait += sleep
 
         raise Exception(f"[red]Timeout: Namespace '{namespace}' was not deleted within {max_wait} seconds.")
 
@@ -376,11 +381,14 @@ class KubeCtl:
         return False
 
     def wait_for_stable(self, namespace: str, sleep: int = 2, max_wait: int = 300):
+        """max_wait bounds wall-clock time via a monotonic deadline, not
+        accumulated sleep() calls: see wait_for_namespace_deletion above
+        (sregym#56)."""
         console.log(f"[bold yellow]Waiting for namespace '{namespace}' to be stable...")
 
-        wait = 0
+        deadline = time.monotonic() + max_wait
 
-        while wait < max_wait:
+        while time.monotonic() < deadline:
             try:
                 pod_list = self.list_pods(namespace)
 
@@ -392,7 +400,6 @@ class KubeCtl:
                 console.log(f"[red]Error checking pod statuses: {e}")
 
             time.sleep(sleep)
-            wait += sleep
 
         raise Exception(f"[red]Timeout: Namespace '{namespace}' was not deleted within {max_wait} seconds.")
 
