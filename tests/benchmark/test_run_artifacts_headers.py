@@ -132,3 +132,59 @@ def test_only_the_files_whose_header_actually_changed_are_reported(tmp_path):
 
     assert rewritten == [narrower]
     assert _header(already_full) == ["Mitigation.success", "attempt", "problem_id"]
+
+
+def test_rollup_and_per_problem_aggregate_files_are_not_touched(tmp_path):
+    """Neither of the two other CSVs living in a run tree has a run_N path
+    component, which is exactly what the *_ALL_ rollup relies on to avoid
+    double-counting (#41): sweeping either of these into the union rewrite
+    would corrupt that guard, not just widen a header."""
+    narrow = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
+    wide = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+
+    rollup = tmp_path / "agent_ALL_results.csv"
+    rollup.write_text("attempt,deploy_failed,problem_id\n1,True,p3\n")
+    rollup_before = rollup.read_text()
+
+    aggregate = tmp_path / "agent" / "p1" / "p1_agent_results.csv"
+    aggregate.parent.mkdir(parents=True, exist_ok=True)
+    aggregate.write_text("attempt,problem_id\n0,p1\n0,p1\n0,p1\n")
+    aggregate_before = aggregate.read_text()
+
+    rewritten = stabilize_run_csv_headers(tmp_path)
+
+    assert set(rewritten) == {narrow}  # only the genuine per-attempt file
+    assert rollup.read_text() == rollup_before
+    assert aggregate.read_text() == aggregate_before
+
+
+def test_a_ragged_rows_unlabeled_overflow_is_dropped_not_raised(tmp_path):
+    """A row with more values than its own file's header lands DictReader's
+    overflow under a None key (restkey). DictWriter has no fieldname to
+    write that under and raises ValueError by default -- this must not
+    propagate out of an optional, best-effort cleanup pass."""
+    ragged = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1,unexpected,extra\n")
+    other = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+
+    rewritten = stabilize_run_csv_headers(tmp_path)  # must not raise
+
+    assert set(rewritten) == {ragged}  # other already had the full header
+    assert _header(ragged) == ["Mitigation.success", "attempt", "problem_id"]
+    assert _rows(ragged)[0]["problem_id"] == "p1"
+
+
+def test_a_file_that_cannot_be_decoded_is_skipped_not_fatal(tmp_path):
+    """A file with a byte that is not valid UTF-8 must not crash the whole
+    normalization pass -- skip it, same as _rewrite_csv's own guard on the
+    same failure mode, and still reconcile every file that can be read."""
+    good_a = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
+    good_b = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+    bad = _publish(tmp_path, "agent", "p3", 0, "attempt,problem_id\n0,p3\n")
+    bad.write_bytes(b"attempt,problem_id\n0,\xffp3\n")
+    bad_before = bad.read_bytes()
+
+    rewritten = stabilize_run_csv_headers(tmp_path)  # must not raise
+
+    assert set(rewritten) == {good_a}  # good_b was already the full header
+    assert _header(good_a) == ["Mitigation.success", "attempt", "problem_id"]
+    assert bad.read_bytes() == bad_before  # left exactly as it was, not rewritten

@@ -287,6 +287,14 @@ def stabilize_run_csv_headers(root: Path) -> list[Path]:
     Returns the paths actually rewritten (whose header was not already the
     union), so a caller can log how much it did; a run with a uniform
     header, or fewer than two files, is left untouched.
+
+    A file that cannot be decoded or parsed as CSV is skipped rather than
+    aborting the whole run, matching _rewrite_csv's own guard on the same
+    failure modes -- this is best-effort header normalization, not a
+    correctness-critical step. A row with more values than its file's own
+    header (a ragged row) has its unlabeled overflow dropped rather than
+    carried through to the rewrite: DictWriter has no fieldname to write it
+    under, and would otherwise raise instead of leaving this non-fatal.
     """
     paths = sorted(root.rglob("*/run_*/*_results.csv"))
     if len(paths) < 2:
@@ -295,10 +303,13 @@ def stabilize_run_csv_headers(root: Path) -> list[Path]:
     parsed: list[tuple[Path, list[str], list[dict[str, Any]]]] = []
     fields: set[str] = set()
     for path in paths:
-        with path.open(newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
-            file_fields = list(reader.fieldnames or [])
-            rows = list(reader)
+        try:
+            with path.open(newline="", encoding="utf-8") as csvfile:
+                reader = csv.DictReader(csvfile)
+                file_fields = list(reader.fieldnames or [])
+                rows = [{k: v for k, v in row.items() if k is not None} for row in reader]
+        except (UnicodeDecodeError, csv.Error):
+            continue
         parsed.append((path, file_fields, rows))
         fields.update(file_fields)
 
