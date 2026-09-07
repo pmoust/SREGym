@@ -267,7 +267,20 @@ def _csv_problem_ids(path: Path) -> list[str]:
         return [row.get("problem_id", "") for row in reader] if reader.fieldnames else []
 
 
-def stabilize_run_csv_headers(root: Path) -> list[Path]:
+@dataclass(frozen=True)
+class HeaderStabilizationResult:
+    """rewritten: files whose header was widened to the run's union.
+    overflow_dropped: files that had at least one row with more values than
+    that file's own header -- a real bug somewhere upstream (something wrote
+    a malformed line), not benign header drift, so a caller should surface
+    it distinctly rather than folding it into a routine "normalized N
+    files" count."""
+
+    rewritten: list[Path]
+    overflow_dropped: list[Path]
+
+
+def stabilize_run_csv_headers(root: Path) -> HeaderStabilizationResult:
     """Give every per-attempt result CSV under root the same header.
 
     finalize_and_publish() writes each attempt's row against whatever
@@ -284,9 +297,10 @@ def stabilize_run_csv_headers(root: Path) -> list[Path]:
     recorded False -- the row for that column is simply absent from that
     file's original data, not written as "".
 
-    Returns the paths actually rewritten (whose header was not already the
-    union), so a caller can log how much it did; a run with a uniform
-    header, or fewer than two files, is left untouched.
+    Returns which files were actually rewritten (header was not already the
+    union) and which had a ragged row's overflow dropped, so a caller can
+    log each distinctly; a run with a uniform header, or fewer than two
+    files, is left untouched.
 
     A file that cannot be decoded or parsed as CSV is skipped rather than
     aborting the whole run, matching _rewrite_csv's own guard on the same
@@ -298,18 +312,22 @@ def stabilize_run_csv_headers(root: Path) -> list[Path]:
     """
     paths = sorted(root.rglob("*/run_*/*_results.csv"))
     if len(paths) < 2:
-        return []
+        return HeaderStabilizationResult([], [])
 
     parsed: list[tuple[Path, list[str], list[dict[str, Any]]]] = []
     fields: set[str] = set()
+    overflow_dropped: list[Path] = []
     for path in paths:
         try:
             with path.open(newline="", encoding="utf-8") as csvfile:
                 reader = csv.DictReader(csvfile)
                 file_fields = list(reader.fieldnames or [])
-                rows = [{k: v for k, v in row.items() if k is not None} for row in reader]
+                raw_rows = list(reader)
         except (UnicodeDecodeError, csv.Error):
             continue
+        if any(None in row for row in raw_rows):
+            overflow_dropped.append(path)
+        rows = [{k: v for k, v in row.items() if k is not None} for row in raw_rows]
         parsed.append((path, file_fields, rows))
         fields.update(file_fields)
 
@@ -319,7 +337,7 @@ def stabilize_run_csv_headers(root: Path) -> list[Path]:
         if file_fields != union:
             _write_csv(path, union, rows)
             rewritten.append(path)
-    return rewritten
+    return HeaderStabilizationResult(rewritten, overflow_dropped)
 
 
 def _write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:

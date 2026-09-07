@@ -54,9 +54,10 @@ def test_header_stays_identical_across_files_even_when_only_some_rows_produce_a_
         "Mitigation.internalTrafficPolicy,TTL,attempt,problem_id\nLocal,9.0,0,p2\n",
     )
 
-    rewritten = stabilize_run_csv_headers(tmp_path)
+    result = stabilize_run_csv_headers(tmp_path)
 
-    assert set(rewritten) == {early}  # later already had the full header
+    assert set(result.rewritten) == {early}  # later already had the full header
+    assert result.overflow_dropped == []
     assert _header(early) == _header(later)
     assert _header(early) == ["Mitigation.internalTrafficPolicy", "TTL", "attempt", "problem_id"]
 
@@ -109,7 +110,9 @@ def test_already_uniform_files_are_left_untouched(tmp_path):
     a = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
     b = _publish(tmp_path, "agent", "p2", 0, "attempt,problem_id\n0,p2\n")
 
-    assert stabilize_run_csv_headers(tmp_path) == []
+    result = stabilize_run_csv_headers(tmp_path)
+    assert result.rewritten == []
+    assert result.overflow_dropped == []
     assert _header(a) == ["attempt", "problem_id"]
     assert _header(b) == ["attempt", "problem_id"]
 
@@ -118,8 +121,8 @@ def test_fewer_than_two_files_is_a_no_op(tmp_path):
     """Nothing to reconcile with only one (or zero) published files."""
     _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
 
-    assert stabilize_run_csv_headers(tmp_path) == []
-    assert stabilize_run_csv_headers(tmp_path / "nothing-here") == []
+    assert stabilize_run_csv_headers(tmp_path).rewritten == []
+    assert stabilize_run_csv_headers(tmp_path / "nothing-here").rewritten == []
 
 
 def test_only_the_files_whose_header_actually_changed_are_reported(tmp_path):
@@ -128,9 +131,10 @@ def test_only_the_files_whose_header_actually_changed_are_reported(tmp_path):
     already_full = _publish(tmp_path, "agent", "p1", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p1\n")
     narrower = _publish(tmp_path, "agent", "p2", 0, "attempt,problem_id\n0,p2\n")
 
-    rewritten = stabilize_run_csv_headers(tmp_path)
+    result = stabilize_run_csv_headers(tmp_path)
 
-    assert rewritten == [narrower]
+    assert result.rewritten == [narrower]
+    assert result.overflow_dropped == []
     assert _header(already_full) == ["Mitigation.success", "attempt", "problem_id"]
 
 
@@ -140,7 +144,7 @@ def test_rollup_and_per_problem_aggregate_files_are_not_touched(tmp_path):
     double-counting (#41): sweeping either of these into the union rewrite
     would corrupt that guard, not just widen a header."""
     narrow = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
-    wide = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+    _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
 
     rollup = tmp_path / "agent_ALL_results.csv"
     rollup.write_text("attempt,deploy_failed,problem_id\n1,True,p3\n")
@@ -151,9 +155,10 @@ def test_rollup_and_per_problem_aggregate_files_are_not_touched(tmp_path):
     aggregate.write_text("attempt,problem_id\n0,p1\n0,p1\n0,p1\n")
     aggregate_before = aggregate.read_text()
 
-    rewritten = stabilize_run_csv_headers(tmp_path)
+    result = stabilize_run_csv_headers(tmp_path)
 
-    assert set(rewritten) == {narrow}  # only the genuine per-attempt file
+    assert set(result.rewritten) == {narrow}  # only the genuine per-attempt file
+    assert result.overflow_dropped == []
     assert rollup.read_text() == rollup_before
     assert aggregate.read_text() == aggregate_before
 
@@ -164,11 +169,12 @@ def test_a_ragged_rows_unlabeled_overflow_is_dropped_not_raised(tmp_path):
     write that under and raises ValueError by default -- this must not
     propagate out of an optional, best-effort cleanup pass."""
     ragged = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1,unexpected,extra\n")
-    other = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+    _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
 
-    rewritten = stabilize_run_csv_headers(tmp_path)  # must not raise
+    result = stabilize_run_csv_headers(tmp_path)  # must not raise
 
-    assert set(rewritten) == {ragged}  # other already had the full header
+    assert set(result.rewritten) == {ragged}  # other already had the full header
+    assert result.overflow_dropped == [ragged]  # the signal a caller should warn on
     assert _header(ragged) == ["Mitigation.success", "attempt", "problem_id"]
     assert _rows(ragged)[0]["problem_id"] == "p1"
 
@@ -178,13 +184,14 @@ def test_a_file_that_cannot_be_decoded_is_skipped_not_fatal(tmp_path):
     normalization pass -- skip it, same as _rewrite_csv's own guard on the
     same failure mode, and still reconcile every file that can be read."""
     good_a = _publish(tmp_path, "agent", "p1", 0, "attempt,problem_id\n0,p1\n")
-    good_b = _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
+    _publish(tmp_path, "agent", "p2", 0, "Mitigation.success,attempt,problem_id\nTrue,0,p2\n")
     bad = _publish(tmp_path, "agent", "p3", 0, "attempt,problem_id\n0,p3\n")
     bad.write_bytes(b"attempt,problem_id\n0,\xffp3\n")
     bad_before = bad.read_bytes()
 
-    rewritten = stabilize_run_csv_headers(tmp_path)  # must not raise
+    result = stabilize_run_csv_headers(tmp_path)  # must not raise
 
-    assert set(rewritten) == {good_a}  # good_b was already the full header
+    assert set(result.rewritten) == {good_a}  # good_b was already the full header
+    assert result.overflow_dropped == []  # skipped, not the ragged-row case
     assert _header(good_a) == ["Mitigation.success", "attempt", "problem_id"]
     assert bad.read_bytes() == bad_before  # left exactly as it was, not rewritten

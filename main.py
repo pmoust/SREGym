@@ -638,9 +638,18 @@ def driver_loop(
         # can be missing a column a later attempt's oracle introduced. Now
         # that every attempt is in, reconcile them all to one header (#39).
         try:
-            rewritten = stabilize_run_csv_headers(base_dir)
-            if rewritten:
-                console.log(f"🧹 Normalized headers on {len(rewritten)} per-attempt result file(s)")
+            header_stabilization = stabilize_run_csv_headers(base_dir)
+            if header_stabilization.rewritten:
+                console.log(
+                    f"🧹 Normalized headers on {len(header_stabilization.rewritten)} per-attempt result file(s)"
+                )
+            if header_stabilization.overflow_dropped:
+                logger.warning(
+                    f"⚠️ {len(header_stabilization.overflow_dropped)} result file(s) had a row with more "
+                    "values than its own header -- something upstream wrote a malformed line. The "
+                    f"unlabeled overflow was dropped, not attributed to any column: "
+                    f"{header_stabilization.overflow_dropped}"
+                )
         except (OSError, csv.Error) as exc:
             console.log(f"⚠️  Result CSV header normalization failed (non-fatal): {exc}")
 
