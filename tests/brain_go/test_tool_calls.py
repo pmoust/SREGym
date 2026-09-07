@@ -70,6 +70,61 @@ def test_counting_is_optional_so_other_callers_are_unaffected():
         assert driver.run_turn("m", "t", set()) == "x"
 
 
+def test_every_tool_start_is_also_counted_by_node():
+    """brain-go's own attribution (brain-go#2687): which RCI node made the
+    call, not necessarily the same thing as which tool -- the hypothesis
+    planner unions several nodes' tools behind one label, so a caller cannot
+    infer node from tool name."""
+    by_tool = collections.Counter()
+    by_node = collections.Counter()
+    with mock.patch.object(
+        driver.requests,
+        "post",
+        return_value=sse(
+            "event: tool_start",
+            'data: {"tool": "get_logs", "node": "hypothesis_gen_tools"}',
+            "",
+            "event: tool_start",
+            'data: {"tool": "exec_kubectl_cmd_safely", "node": "hypothesis_gen_tools"}',
+            "",
+            "event: tool_start",
+            'data: {"tool": "get_logs", "node": "diagnosis"}',
+            "",
+            "event: response",
+            'data: {"content": "done"}',
+            "",
+        ),
+    ):
+        driver.run_turn("m", "t", set(), by_tool, by_node)
+
+    assert by_tool == {"get_logs": 2, "exec_kubectl_cmd_safely": 1}
+    assert by_node == {"hypothesis_gen_tools": 2, "diagnosis": 1}
+
+
+def test_a_tool_start_with_no_node_is_counted_as_unknown_not_dropped():
+    """An older brain-go with no node field, or a caller that never attributed
+    the call, must not undercount silently -- same fallback as an unnamed
+    tool."""
+    by_node = collections.Counter()
+    with mock.patch.object(
+        driver.requests,
+        "post",
+        return_value=sse(
+            "event: tool_start", 'data: {"tool": "get_logs"}', "", "event: response", 'data: {"content": "x"}', ""
+        ),
+    ):
+        driver.run_turn("m", "t", set(), collections.Counter(), by_node)
+
+    assert by_node == {"unknown": 1}
+
+
+def test_node_counting_is_optional_so_existing_callers_are_unaffected():
+    """run_turn is called with only a tool counter in older tests and by any
+    caller that predates node attribution."""
+    with mock.patch.object(driver.requests, "post", return_value=sse("event: response", 'data: {"content": "x"}', "")):
+        assert driver.run_turn("m", "t", set(), collections.Counter()) == "x"
+
+
 def test_the_sidecar_lands_in_the_artifact_directory(tmp_path, monkeypatch):
     """AGENT_LOGS_DIR is the run's artifact dir, exported by main.py around the
     agent launch, so this lands beside the attempt it belongs to."""
@@ -88,6 +143,24 @@ def test_the_sidecar_lands_in_the_artifact_directory(tmp_path, monkeypatch):
     # inverted between them in the reference run and that is the interesting bit.
     assert payload["by_tool"]["exec_kubectl_cmd_safely"] == 136
     assert payload["by_phase_and_tool"]["mitigation"]["get_logs"] == 59
+    # No node counters were passed in, so these read as empty rather than
+    # absent or erroring -- an older caller that predates node attribution.
+    assert payload["by_node"] == {}
+    assert payload["by_phase_and_node"] == {}
+
+
+def test_the_sidecar_includes_the_node_breakdown_when_given(tmp_path, monkeypatch):
+    """The same events, grouped by brain-go's node attribution (brain-go#2687)
+    instead of by tool name."""
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    driver.write_tool_calls(
+        {"diagnosis": collections.Counter({"get_logs": 2})},
+        {"diagnosis": collections.Counter({"hypothesis_gen_tools": 2})},
+    )
+    payload = json.loads((tmp_path / "tool-calls.json").read_text())
+
+    assert payload["by_node"] == {"hypothesis_gen_tools": 2}
+    assert payload["by_phase_and_node"] == {"diagnosis": {"hypothesis_gen_tools": 2}}
 
 
 def test_no_artifact_directory_is_not_an_error(tmp_path, monkeypatch):
@@ -114,7 +187,7 @@ def test_the_counts_are_recorded_on_every_exit_path():
     source = (ROOT / "clients" / "brain_go" / "driver.py").read_text()
     main_body = source.split("def main() -> int:", 1)[1]
 
-    assert "finally:\n        write_tool_calls(tool_calls)" in main_body, (
+    assert "finally:\n        write_tool_calls(tool_calls, tool_calls_by_node)" in main_body, (
         "write_tool_calls must run from a finally, or an early return records nothing"
     )
     # And it must be the only call, so the happy path cannot double-count.

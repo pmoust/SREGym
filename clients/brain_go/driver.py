@@ -144,6 +144,7 @@ def run_turn(
     thread_id: str,
     allowed_tools: set[str],
     tool_calls: collections.Counter[str] | None = None,
+    tool_calls_by_node: collections.Counter[str] | None = None,
 ) -> str:
     """Run one brain-go turn to completion over /cli/chat SSE.
 
@@ -202,6 +203,13 @@ def run_turn(
                     tool = data.get("tool") or "unknown"
                     if tool_calls is not None:
                         tool_calls[tool] += 1
+                    # brain-go's own extension (brain-go#2687): the RCI node
+                    # or signal that made the call, not necessarily the same
+                    # thing as which tool was called. Absent on an older
+                    # brain-go, same fallback as an unnamed tool.
+                    node = data.get("node") or "unknown"
+                    if tool_calls_by_node is not None:
+                        tool_calls_by_node[node] += 1
                     logger.info("tool_start: %s", tool)
                 elif event == "tool_end":
                     logger.info("tool_end: %s", data.get("tool"))
@@ -566,7 +574,10 @@ def incident_window(incident_start: float | None) -> str:
     )
 
 
-def write_tool_calls(per_phase: dict[str, collections.Counter[str]]) -> None:
+def write_tool_calls(
+    per_phase: dict[str, collections.Counter[str]],
+    per_phase_by_node: dict[str, collections.Counter[str]] | None = None,
+) -> None:
     """Record what the agent called, where the harness can read it back.
 
     The tool_start events already arrive on the SSE stream and were only
@@ -575,6 +586,12 @@ def write_tool_calls(per_phase: dict[str, collections.Counter[str]]) -> None:
     `grep -c "tool_start: get_logs"` undercounted by however many of that
     tool's calls happened to wrap. On run-20260903-0558, 193 of 286 wrapped
     (sregym#67).
+
+    per_phase_by_node is the same events grouped by brain-go's own node
+    attribution (brain-go#2687) instead of by tool name -- which underlying
+    node actually made the call, for the RCI callers where several nodes are
+    unioned behind one set of tools. Optional and defaulted for callers that
+    predate this field.
 
     AGENT_LOGS_DIR is the run's artifact directory, exported by main.py's
     _artifact_environment around the agent launch, so this lands beside the
@@ -589,11 +606,14 @@ def write_tool_calls(per_phase: dict[str, collections.Counter[str]]) -> None:
 
         return
 
+    per_phase_by_node = per_phase_by_node or {}
     payload = {
         "total": sum(sum(c.values()) for c in per_phase.values()),
         "by_phase": {phase: sum(counter.values()) for phase, counter in per_phase.items()},
         "by_tool": dict(sum(per_phase.values(), collections.Counter())),
         "by_phase_and_tool": {phase: dict(counter) for phase, counter in per_phase.items()},
+        "by_node": dict(sum(per_phase_by_node.values(), collections.Counter())),
+        "by_phase_and_node": {phase: dict(counter) for phase, counter in per_phase_by_node.items()},
     }
     try:
         path = Path(target) / "tool-calls.json"
@@ -698,6 +718,10 @@ def main() -> int:
     # from the diagnosis turn's, and in run-20260903-0558 the balance inverted
     # between them: kubectl-heavy while fixing, log-heavy while diagnosing.
     tool_calls: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
+    # Same events, grouped by which RCI node actually made the call rather
+    # than which tool (brain-go#2687) -- the two differ for a caller like the
+    # hypothesis planner, which unions several nodes' tools behind one label.
+    tool_calls_by_node: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
 
     # try/finally so a run always records what it spent, including the two
     # early returns below: a failed diagnosis turn and a conductor that goes
@@ -711,6 +735,7 @@ def main() -> int:
                 thread_id,
                 DIAGNOSIS_LOCAL_TOOLS,
                 tool_calls["diagnosis"],
+                tool_calls_by_node["diagnosis"],
             )
         except TurnFailed:
             logger.exception("diagnosis turn failed")
@@ -744,6 +769,7 @@ def main() -> int:
                 thread_id,
                 MITIGATION_LOCAL_TOOLS,
                 tool_calls["mitigation"],
+                tool_calls_by_node["mitigation"],
             )
             logger.info("mitigation (%d chars): %s", len(mitigation), mitigation[:300])
         except TurnFailed:
@@ -761,7 +787,7 @@ def main() -> int:
         return 0
 
     finally:
-        write_tool_calls(tool_calls)
+        write_tool_calls(tool_calls, tool_calls_by_node)
 
 
 if __name__ == "__main__":

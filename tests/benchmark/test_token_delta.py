@@ -25,9 +25,9 @@ def _prom(tmp_path, name, lines):
     return path
 
 
-def _sample(thread, token_type, value):
+def _sample(thread, token_type, value, node="unknown"):
     return (
-        f'llm_tokens_total{{account_id="2",model="m",provider="bedrock",'
+        f'llm_tokens_total{{account_id="2",model="m",node="{node}",provider="bedrock",'
         f'thread_id="{thread}",token_type="{token_type}",user_id="unknown"}} {value}'
     )
 
@@ -110,3 +110,76 @@ def test_unparseable_lines_are_skipped(tmp_path):
     )
 
     assert token_delta.delta(before, after)["input"] == 10
+
+
+def test_delta_by_node_keeps_nodes_apart_unlike_delta(tmp_path):
+    """delta() sums across node into one total; delta_by_node() is the same
+    data with node kept apart instead of folded in -- the per-node question
+    brain-go#2687 added the label to answer."""
+    before = _prom(
+        tmp_path,
+        "b.prom",
+        [_sample("t1", "input", "0", node="hypothesis_gen_tools"), _sample("t1", "input", "0", node="diagnosis")],
+    )
+    after = _prom(
+        tmp_path,
+        "a.prom",
+        [_sample("t1", "input", "70", node="hypothesis_gen_tools"), _sample("t1", "input", "30", node="diagnosis")],
+    )
+
+    assert token_delta.delta(before, after)["input"] == 100
+    by_node = token_delta.delta_by_node(before, after)
+    assert by_node["hypothesis_gen_tools"]["input"] == 70
+    assert by_node["diagnosis"]["input"] == 30
+
+
+def test_delta_by_node_sums_across_thread_the_same_way_delta_does(tmp_path):
+    """Node is the one label kept apart; every other label, thread included,
+    still collapses into one figure per node."""
+    before = _prom(tmp_path, "b.prom", [_sample("t1", "input", "10", node="diagnosis")])
+    after = _prom(
+        tmp_path,
+        "a.prom",
+        [_sample("t1", "input", "60", node="diagnosis"), _sample("t2", "input", "40", node="diagnosis")],
+    )
+
+    assert token_delta.delta_by_node(before, after)["diagnosis"]["input"] == 90
+
+
+def test_delta_by_node_floors_each_node_independently(tmp_path):
+    """One node's counter resetting must not corrupt another node's figure --
+    the same never-negative floor delta() applies to the total, applied here
+    per node."""
+    before = _prom(
+        tmp_path,
+        "b.prom",
+        [_sample("t1", "input", "5000", node="diagnosis"), _sample("t1", "input", "10", node="mitigation")],
+    )
+    after = _prom(
+        tmp_path,
+        "a.prom",
+        [_sample("t1", "input", "12", node="diagnosis"), _sample("t1", "input", "60", node="mitigation")],
+    )
+
+    by_node = token_delta.delta_by_node(before, after)
+    assert by_node["diagnosis"]["input"] == 0  # went backwards, floored
+    assert by_node["mitigation"]["input"] == 50  # unaffected by diagnosis's reset
+
+
+def test_a_node_absent_from_a_scrape_defaults_to_unknown(tmp_path):
+    """A scrape taken before the node label existed, or a sample some other
+    caller wrote without it, must not raise or get silently dropped -- same
+    fallback brain-go itself uses for an unattributed call."""
+    before = _prom(tmp_path, "b.prom", ['llm_tokens_total{token_type="input"} 5'])
+    after = _prom(tmp_path, "a.prom", ['llm_tokens_total{token_type="input"} 25'])
+
+    assert token_delta.delta_by_node(before, after)["unknown"]["input"] == 20
+
+
+def test_delta_by_node_is_reachable_from_the_cli(tmp_path):
+    """The same CLI entry point delta() is exposed through, so main.py can
+    shell out to it exactly the same way."""
+    before = _prom(tmp_path, "b.prom", [_sample("t1", "input", "0", node="diagnosis")])
+    after = _prom(tmp_path, "a.prom", [_sample("t1", "input", "15", node="diagnosis")])
+
+    assert token_delta.main(["token_delta.py", "delta-by-node", str(before), str(after)]) == 0

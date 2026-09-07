@@ -200,10 +200,12 @@ def _prom(tmp_path, lines):
     return tmp_path
 
 
-def _tok(kind, value, thread, port="9091"):
+def _tok(kind, value, thread, port="9091", node=None):
+    node_label = f',node="{node}"' if node else ""
+
     return (
         f'llm_tokens_total{{provider="bedrock",model="m",token_type="{kind}",'
-        f'account_id="1",user_id="1",thread_id="{thread}",job="{port}"}} {value}'
+        f'account_id="1",user_id="1",thread_id="{thread}",job="{port}"{node_label}}} {value}'
     )
 
 
@@ -260,6 +262,46 @@ def test_tokens_keep_both_processes(tmp_path):
 
 def test_tokens_are_none_when_nothing_was_archived(tmp_path):
     assert score_run.tokens(tmp_path) is None
+
+
+def test_tokens_are_broken_out_by_node(tmp_path):
+    """brain-go#2687: which RCI node or signal spent them, at the whole-run
+    level -- the same question token_delta.py's delta_by_node() answers per
+    attempt."""
+    d = _prom(
+        tmp_path,
+        [
+            _tok("input", 100, "cli:inv-1", node="hypothesis_gen_tools"),
+            _tok("output", 40, "cli:inv-1", node="hypothesis_gen_tools"),
+            _tok("input", 30, "cli:inv-2", node="diagnosis"),
+        ],
+    )
+    t = score_run.tokens(d)
+
+    assert t["by_node"]["hypothesis_gen_tools"] == {"input": 100, "output": 40}
+    assert t["by_node"]["diagnosis"] == {"input": 30}
+    # And the flat totals are unaffected by adding the breakdown alongside them.
+    assert t["input"] == 130
+    assert t["output"] == 40
+
+
+def test_a_series_with_no_node_label_reads_as_unknown(tmp_path):
+    """A scrape taken before the node label existed, or a sample without one,
+    must not raise or vanish from the breakdown."""
+    d = _prom(tmp_path, [_tok("input", 50, "cli:inv-1")])
+
+    assert score_run.tokens(d)["by_node"]["unknown"] == {"input": 50}
+
+
+def test_by_node_does_not_leak_into_the_flat_counts_rendered(tmp_path):
+    """render() iterates tok's keys to print flat totals; by_node must be
+    excluded from that loop the same way series already is, or it tries to
+    format a dict as a token count and breaks."""
+    d = _prom(tmp_path, [_tok("input", 10, "cli:inv-1", node="diagnosis")])
+    rendered = score_run.render(score_run.score([]), score_run.tokens(d))
+
+    assert "By node" in rendered
+    assert "diagnosis" in rendered
 
 
 def test_an_ungraded_diagnosis_is_excluded_from_the_graded_rate(tmp_path):
