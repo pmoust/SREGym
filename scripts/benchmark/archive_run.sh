@@ -37,8 +37,23 @@ REGION="${AWS_REGION:-us-east-2}"
 # worktree and look beside that. Falls back to the path when git is not
 # available or this is not a checkout at all.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PRIMARY="$(git -C "$SCRIPT_DIR" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
-[ -n "$PRIMARY" ] || PRIMARY="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# --git-common-dir rather than parsing `git worktree list`. That list prints
+# "<path> <sha> [branch]" unquoted, so any field-splitting truncates a path
+# containing a space, and the suffix is not even a fixed shape: a detached
+# worktree prints "(detached HEAD)" and a bare one prints "(bare)" with no sha
+# at all. --git-common-dir returns the primary repo's .git directory from
+# inside any linked worktree, and its own .git from the primary checkout, so
+# its parent is the primary worktree in both cases with nothing to parse.
+# Tested for emptiness before dirname, not after: `dirname ""` is "." rather
+# than empty, so folding the two into one expression made a missing git (or a
+# copy of this script outside any checkout) resolve the archive root to the
+# current directory and write there.
+GIT_COMMON="$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$GIT_COMMON" ]; then
+  PRIMARY="$(dirname "$GIT_COMMON")"
+else
+  PRIMARY="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
 
 if [ -n "${SREGYM_ARCHIVE_ROOT:-}" ]; then
   ROOT="$SREGYM_ARCHIVE_ROOT"
@@ -46,6 +61,16 @@ elif [ -d "$PRIMARY/../brain-go" ]; then
   ROOT="$(cd "$PRIMARY/../brain-go" && pwd)"
 else
   ROOT="$PRIMARY"
+fi
+
+# Validated rather than trusted, for both routes into it. A bad
+# SREGYM_ARCHIVE_ROOT and a PRIMARY derived outside any checkout both used to
+# get as far as mkdir before failing, and the failure named a path nobody had
+# chosen. Refusing here says which knob to turn instead.
+if [ ! -d "$ROOT" ] || [ ! -w "$ROOT" ]; then
+  echo "archive_run: archive root is not a writable directory: $ROOT" >&2
+  echo "archive_run: set SREGYM_ARCHIVE_ROOT to where sregym-results/ should live" >&2
+  exit 2
 fi
 
 # Resolve the bucket by prefix rather than constructing the name. run_id carries
@@ -58,7 +83,7 @@ fi
 # bucket named for the run; from sregym#48 there is one bucket named for the
 # account, holding every run under its own <run-id>/ prefix. Try the per-run
 # name first, since an older run only exists that way.
-# `|| true` on every aws lookup below, and an explicit credential check first.
+# Every aws lookup below tolerates failure, and credentials are checked first.
 # Without them a failed call (an expired SSO token is the common one) makes the
 # command substitution non-zero, set -e exits before a single line is printed,
 # and the script looks like it ran and found nothing to do. That is the worst
@@ -70,12 +95,27 @@ if ! aws sts get-caller-identity --output text >/dev/null 2>&1; then
   exit 2
 fi
 
-BUCKET=$(aws s3api list-buckets --region "$REGION" \
-  --query "Buckets[?starts_with(Name, 'sregym-bench-${PREFIX}')].Name" --output text 2>/dev/null | tr '\t' '\n' | head -1 || true)
+# Every match, not head -1. The shared-bucket branch below has always refused
+# an ambiguous prefix; this branch did not, so a prefix matching two per-run
+# buckets silently archived whichever sorted first and printed an ordinary
+# success line. "run-2026" matches two real buckets today, which is exactly the
+# "wrong run gets analysed" outcome the note above says to refuse.
+BUCKET_MATCHES=$(aws s3api list-buckets --region "$REGION" \
+  --query "Buckets[?starts_with(Name, 'sregym-bench-${PREFIX}')].Name" --output text 2>/dev/null | tr '\t' '\n' | grep . || true)
+
+if [ "$(printf '%s' "$BUCKET_MATCHES" | grep -c .)" -gt 1 ]; then
+  echo "archive_run: ${PREFIX} matches more than one per-run bucket:" >&2
+  printf '%s\n' "$BUCKET_MATCHES" | sed 's/^/  /' >&2
+  echo "archive_run: pass a longer prefix" >&2
+  exit 1
+fi
+
+BUCKET=$(printf '%s' "$BUCKET_MATCHES" | head -1)
 
 if [ -n "$BUCKET" ]; then
   # The object prefix inside a per-run bucket is the run id, which is the
-  # bucket name minus the fixed wrapper. Derive it rather than asking twice.
+  # bucket name minus the fixed wrapper. Both strips are load-bearing: real
+  # per-run buckets are named sregym-bench-<run-id>-results.
   RUN_ID="${BUCKET#sregym-bench-}"
   RUN_ID="${RUN_ID%-results}"
 else
@@ -106,11 +146,11 @@ if [ -z "${BUCKET:-}" ] || [ -z "${RUN_ID:-}" ]; then
   echo "archive_run: no run matching ${PREFIX} in $REGION" >&2
   echo "archive_run: buckets present:" >&2
   aws s3api list-buckets --query "Buckets[?starts_with(Name,'sregym-bench-')].Name" --output text 2>/dev/null \
-    | tr '\t' '\n' | sed 's/^/  /' >&2
+    | tr '\t' '\n' | sed 's/^/  /' >&2 || true
   if [ -n "${BUCKET:-}" ]; then
     echo "archive_run: runs in $BUCKET:" >&2
     aws s3api list-objects-v2 --bucket "$BUCKET" --region "$REGION" --delimiter / \
-      --query "CommonPrefixes[].Prefix" --output text 2>/dev/null | tr '\t' '\n' | sed 's/^/  /' >&2
+      --query "CommonPrefixes[].Prefix" --output text 2>/dev/null | tr '\t' '\n' | sed 's/^/  /' >&2 || true
   fi
   exit 1
 fi
@@ -129,8 +169,15 @@ mkdir -p "$RESULTS" "$LOGS"
 # despite writing 63 of each to S3, so anyone following the documented workflow
 # concluded the per-node data did not exist.
 echo "[archive] results -> $RESULTS"
+# The trailing excludes are not redundant. AWS CLI's "*" spans path separators,
+# so a bare --include "*.json" also swept kubectl's API-discovery cache (300 of
+# 478 objects on run-20260908-0739, nothing to do with token evidence), and
+# --include "*.prom" also matched the shard scrapes the logs sync below already
+# takes, landing the same bytes in both trees. Later filters win, so excluding
+# those two paths after the includes keeps exactly the per-attempt artifacts.
 aws s3 sync "$SRC" "$RESULTS/" --region "$REGION" \
-  --exclude "*" --include "*.csv" --include "*.json" --include "*.prom" --only-show-errors
+  --exclude "*" --include "*.csv" --include "*.json" --include "*.prom" \
+  --exclude "*/.kube/*" --exclude "*/logs/*" --only-show-errors
 
 echo "[archive] logs -> $LOGS"
 aws s3 sync "$SRC" "$LOGS/" --region "$REGION" \
