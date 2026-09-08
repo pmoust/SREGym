@@ -56,6 +56,14 @@ import statistics
 import sys
 from pathlib import Path
 
+# cost_model.py is a sibling script, not an installed package; putting its own
+# directory on sys.path first makes `import cost_model` resolve the same way
+# whether this file is run directly (python's own sys.path[0] already does
+# this) or loaded some other way, e.g. the test suite's
+# importlib.util.spec_from_file_location.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cost_model  # noqa: E402
+
 # The paper's Stratus / Sonnet-4.6 row, no noise, for orientation only. Not a
 # target: a different agent, a different judge, and 90 problems x 3 rather than
 # 21 x 3, so the populations differ. Printed so a number is never read in
@@ -513,12 +521,33 @@ def tokens(run_dir: Path) -> dict | None:
     return out
 
 
+def cost_summary(tok: dict | None, model_id: str | None) -> dict:
+    """Dollar cost of a run's tokens(), total and by node, at `model_id`'s
+    rate in terraform/rates.yml (cost_model.py's own convention: never
+    guessed, so total_usd/by_node_usd read None rather than a wrong number
+    when the model is unknown or unpriced).
+
+    `model_id` is expected to be the run's own manifest agent_model, since
+    tokens() is entirely brain-go's Prometheus counters and the judge model
+    runs via LiteLLM on the host, never through brain-go -- so there is
+    nothing here to attribute to the judge in the first place, priced or not.
+    """
+    by_node = (tok or {}).get("by_node") or {}
+    counts = {k: v for k, v in (tok or {}).items() if k not in ("series", "by_node")}
+
+    return {
+        "model": model_id,
+        "total_usd": cost_model.token_cost(counts, model_id) if tok else None,
+        "by_node_usd": {node: cost_model.token_cost(node_counts, model_id) for node, node_counts in by_node.items()},
+    }
+
+
 def _pct(value: float | None) -> str:
     """A rate with no denominator is not zero. Say so rather than print 0.0%."""
     return "  n/a" if value is None else f"{value:>4}%"
 
 
-def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
+def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | None = None) -> str:
     out: list[str] = []
     d, m, e = s["diagnosis"], s["mitigation"], s["e2e"]
     out.append(f"{s['problems']} problems, {s['attempts']} attempts, {s['censored']} censored by the agent timeout")
@@ -621,9 +650,19 @@ def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
         counts = {k: v for k, v in tok.items() if k not in ("series", "by_node")}
         fresh = counts.get("input", 0) + counts.get("output", 0)
         cached = counts.get("cache_read", 0) + counts.get("cache_write", 0)
+        cost = cost_summary(tok, model_id)
         out.append(f"  Tokens             {fresh + cached:,} across {tok.get('series', 0)} thread series")
         for kind in sorted(counts):
             out.append(f"    {kind:<16} {counts[kind]:>12,}")
+        if cost["total_usd"] is not None:
+            out.append(f"    {'cost':<16} {'$' + format(cost['total_usd'], ',.2f'):>12}")
+            out.append(f"  at {model_id}'s rate (terraform/rates.yml). Agent tokens only: the judge")
+            out.append("  runs via LiteLLM on the host, never through brain-go, so its cost is")
+            out.append("  not in these counters at all and is not included above.")
+        elif model_id is None:
+            out.append("    cost               unknown: no manifest model recorded for this run")
+        else:
+            out.append(f"    cost               unknown: no rate configured for {model_id!r} in terraform/rates.yml")
         if cached:
             # Reporting input+output alone hid a cache_read four times larger
             # than every other column combined, which is most of what the run
@@ -640,7 +679,9 @@ def render(s: dict, tok: dict | None, cov: dict | None = None) -> str:
                 node_counts = by_node[node]
                 node_fresh = node_counts.get("input", 0) + node_counts.get("output", 0)
                 node_cached = node_counts.get("cache_read", 0) + node_counts.get("cache_write", 0)
-                out.append(f"    {node:<24} {node_fresh + node_cached:>12,}")
+                node_cost = cost["by_node_usd"].get(node)
+                cost_suffix = f"   ${node_cost:,.2f}" if node_cost is not None else ""
+                out.append(f"    {node:<24} {node_fresh + node_cached:>12,}{cost_suffix}")
 
     else:
         out.append("  Tokens             not archived for this run")
@@ -709,10 +750,16 @@ def main(argv: list[str]) -> int:
 
     s = score(rows, deploy_failed_rows)
     tok = tokens(args.run_dir)
+    # The run's own recorded agent model, not an assumption: tokens() is
+    # entirely brain-go's counters, and brain-go only ever answers with
+    # agent_model (the judge runs via LiteLLM on the host, never through
+    # brain-go, so there is no judge rate to select here either).
+    model_id = (manifest or {}).get("agent_model") or None
+    cost = cost_summary(tok, model_id)
     if args.json:
-        print(json.dumps({**s, "coverage": cov, "tokens": tok}, indent=2))
+        print(json.dumps({**s, "coverage": cov, "tokens": tok, "tokens_cost": cost}, indent=2))
     else:
-        print(render(s, tok, cov))
+        print(render(s, tok, cov, model_id))
         if cov is None:
             if manifest is None:
                 print(
