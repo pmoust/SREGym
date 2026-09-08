@@ -1,0 +1,77 @@
+# Bedrock per-million-token rates, USD, us-east-2.
+#
+# Source: AWS Bedrock's own pricing table, supplied directly (not scraped or
+# estimated) 2026-09-08. Four token types per model because they differ by up
+# to 50x (cache_read is 1/50th of output on every row below) -- a single
+# blended "per million tokens" rate would misprice any run whose mix leans
+# toward one type, which every real run does (cache_read dominates: see
+# score_run.py's tokens()).
+#
+# brain-go's LLM client always requests bedrocktypes.CachePointTypeDefault
+# (internal/orchestration/llm/bedrock.go), which is Bedrock's 5-minute cache
+# checkpoint, so cache_write below is the 5-minute write rate and is the one
+# every figure this file produces uses today.
+#
+# cache_write_1h is recorded beside it even though nothing requests it yet.
+# The 5-minute assumption lives in a different repo, so nothing here can
+# assert it the way _assert_instance_type() pins the EC2 instance type against
+# terraform/variables.tf. If brain-go ever switches to the 1-hour checkpoint,
+# every cache-write figure silently underprices by 1.6x (3.75 vs 6.00 for
+# Sonnet 4.6) and no test fails. Having the real number already sitting here
+# means that change is a one-line correction rather than a research task, and
+# the gap between the two columns is a standing reminder that the assumption
+# is an assumption.
+#
+# Keys are the exact model id cost_model.py/score_run.py will look this run's
+# agent_model or judge_model up by, matched after stripping a leading
+# "bedrock/" (main.py's --judge-model needs that prefix for LiteLLM;
+# brain-go's own bedrockruntime.Converse call, which agent_model feeds, does
+# not). An id with no entry here prices as "unknown" rather than falling back
+# to a guess -- same convention score_run.py already uses for a missing rate.
+#
+# us.anthropic.claude-sonnet-4-6 and us.anthropic.claude-sonnet-5 are the
+# exact ids run-20260908-0739-4fc0249e's own manifest recorded as agent_model
+# and judge_model (judge_model there was "bedrock/us.anthropic.claude-sonnet-5",
+# the prefix this file's lookup strips). The remaining four rows below use the
+# same "us.anthropic.claude-<name>" shape by inference, not by having seen
+# them in a manifest -- confirm the exact id against Bedrock's console (it
+# sometimes carries a date/version suffix, the way terraform/variables.tf's
+# stale agent_model default still does) the first time a run actually uses
+# one, and correct the key here if it differs.
+models:
+  us.anthropic.claude-sonnet-4-6: # the agent model this run used
+    input: 3.00
+    output: 15.00
+    cache_write: 3.75
+    cache_write_1h: 6.00
+    cache_read: 0.30
+  us.anthropic.claude-sonnet-5: # the judge model this run used
+    input: 2.00
+    output: 10.00
+    cache_write: 2.50
+    cache_write_1h: 4.00
+    cache_read: 0.20
+  us.anthropic.claude-opus-5: # id unverified, see note above
+    input: 5.00
+    output: 25.00
+    cache_write: 6.25
+    cache_write_1h: 10.00
+    cache_read: 0.50
+  us.anthropic.claude-opus-4-8: # id unverified, see note above
+    input: 5.00
+    output: 25.00
+    cache_write: 6.25
+    cache_write_1h: 10.00
+    cache_read: 0.50
+  us.anthropic.claude-opus-4-7: # id unverified, same rate as opus-4-8
+    input: 5.00
+    output: 25.00
+    cache_write: 6.25
+    cache_write_1h: 10.00
+    cache_read: 0.50
+  us.anthropic.claude-fable-5: # id unverified, see note above
+    input: 10.00
+    output: 50.00
+    cache_write: 12.50
+    cache_write_1h: 20.00
+    cache_read: 1.00

@@ -435,6 +435,79 @@ def test_the_token_line_does_not_hide_the_cache_columns(tmp_path):
     assert "cache_read" in text
 
 
+def _tokens_dict(input_=0, output=0, cache_read=0, cache_write=0, by_node=None):
+    d = {"input": input_, "output": output, "cache_read": cache_read, "cache_write": cache_write, "series": 1}
+    d["by_node"] = by_node or {}
+    return d
+
+
+def test_cost_summary_is_unknown_without_a_model():
+    """No model, so nothing to look a rate up by -- unknown, not zero."""
+    cost = score_run.cost_summary(_tokens_dict(input_=100), model_id=None)
+    assert cost == {"model": None, "total_usd": None, "by_node_usd": {}}
+
+
+def test_cost_summary_is_unknown_for_an_unpriced_model():
+    """A real-looking model id, just not one anyone has priced."""
+    cost = score_run.cost_summary(_tokens_dict(input_=100), model_id="not-a-priced-model")
+    assert cost["total_usd"] is None
+
+
+def test_cost_summary_prices_the_real_committed_rate():
+    """terraform/rates.yml is real now, not a future decision. Prices
+    run-20260908-0739-4fc0249e's own whole-run totals at
+    us.anthropic.claude-sonnet-4-6's committed rate: $166.00 by hand (see
+    cost_model.py's TOKENS_PER_ATTEMPT_BY_TYPE comment for the per-type
+    arithmetic)."""
+    tok = _tokens_dict(input_=1_451_168, output=2_220_044, cache_write=20_143_259, cache_read=176_035_499)
+    cost = score_run.cost_summary(tok, model_id="us.anthropic.claude-sonnet-4-6")
+    assert cost["total_usd"] == pytest.approx(166.00, abs=0.01)
+
+
+def test_cost_summary_prices_each_node_independently():
+    tok = _tokens_dict(
+        input_=1000,
+        by_node={
+            "diagnosis": {"input": 400},
+            "hypothesis_gen_agent": {"input": 600},
+        },
+    )
+    cost = score_run.cost_summary(tok, model_id="us.anthropic.claude-sonnet-4-6")
+    assert cost["by_node_usd"]["diagnosis"] == pytest.approx(400 / 1e6 * 3.00)
+    assert cost["by_node_usd"]["hypothesis_gen_agent"] == pytest.approx(600 / 1e6 * 3.00)
+
+
+def test_render_shows_the_cost_beside_the_tokens_when_a_rate_is_configured(tmp_path):
+    results = tmp_path / "sregym-results" / "run-x"
+    results.mkdir(parents=True)
+    (results / "sregym-tokens.prom").write_text(_tok("input", 1_000_000, "cli:inv-a", node="diagnosis") + "\n")
+    tok = score_run.tokens(results)
+    text = score_run.render(score_run.score([]), tok, model_id="us.anthropic.claude-sonnet-4-6")
+
+    assert "$3.00" in text, "1M input tokens at $3.00/M should print as $3.00"
+    assert "judge" in text, "must say the judge's cost is not included"
+
+
+def test_render_says_plainly_when_no_model_is_recorded(tmp_path):
+    results = tmp_path / "sregym-results" / "run-x"
+    results.mkdir(parents=True)
+    (results / "sregym-tokens.prom").write_text(_tok("input", 100, "cli:inv-a") + "\n")
+    tok = score_run.tokens(results)
+    text = score_run.render(score_run.score([]), tok, model_id=None)
+
+    assert "unknown: no manifest model recorded" in text
+
+
+def test_render_says_plainly_when_the_model_has_no_rate(tmp_path):
+    results = tmp_path / "sregym-results" / "run-x"
+    results.mkdir(parents=True)
+    (results / "sregym-tokens.prom").write_text(_tok("input", 100, "cli:inv-a") + "\n")
+    tok = score_run.tokens(results)
+    text = score_run.render(score_run.score([]), tok, model_id="not-a-priced-model")
+
+    assert "unknown: no rate configured for 'not-a-priced-model'" in text
+
+
 def test_a_symlinked_results_directory_still_finds_the_sibling_tree(tmp_path):
     """resolve() dereferences before the name check.
 
@@ -867,6 +940,45 @@ def test_main_warns_but_does_not_fail_when_no_manifest_is_archived(tmp_path, cap
 
     assert rc == 0
     assert "no run manifest found" in err
+
+
+def test_main_prices_the_run_from_the_manifests_own_model(tmp_path, capsys):
+    """The production wiring, not just cost_summary in isolation.
+
+    render()/cost_summary() are covered directly elsewhere with a
+    hand-supplied model_id, but nothing asserted main() actually reads
+    agent_model out of the archived manifest and passes it down. Reverting
+    that one line to `model_id = None` left all of those tests green while
+    every real run silently reported its cost as unknown, so this goes
+    through main() and asserts a real dollar figure reaches stdout.
+    """
+    _manifest(tmp_path, ["a"], 1, agent_model="us.anthropic.claude-sonnet-4-6")
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "sregym-tokens.prom").write_text(_tok("input", 1_000_000, "cli:inv-a", node="diagnosis") + "\n")
+
+    rc = score_run.main(["score_run.py", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "$3.00" in out, "main() must price the run from the manifest's agent_model"
+    assert "unknown: no manifest model recorded" not in out
+
+
+def test_main_says_cost_is_unknown_when_the_manifest_records_no_model(tmp_path, capsys):
+    """The other half: an older archive whose manifest predates agent_model
+    must say so rather than silently printing nothing or guessing a rate."""
+    _manifest(tmp_path, ["a"], 1)
+    _run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "sregym-tokens.prom").write_text(_tok("input", 1_000_000, "cli:inv-a") + "\n")
+
+    score_run.main(["score_run.py", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert "unknown: no manifest model recorded" in out
 
 
 def test_main_warns_when_a_manifest_exists_but_has_no_usable_coverage_fields(tmp_path, capsys):

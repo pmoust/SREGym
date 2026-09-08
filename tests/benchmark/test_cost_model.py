@@ -151,14 +151,54 @@ def test_instance_type_pinned_against_terraform_default():
 # ---------------------------------------------------------------------------
 
 
-def test_bedrock_cost_is_unknown_without_a_configured_rate():
-    """No rates.yml exists yet (open decision, experiment-bench-plan.md).
-    The token estimate must still print; the dollar cost must not be
-    guessed."""
-    low, high, cost = cost_model.bedrock_estimate(63)
-    assert low == pytest.approx(63 * cost_model.TOKENS_PER_ATTEMPT_RANGE[0])
-    assert high == pytest.approx(63 * cost_model.TOKENS_PER_ATTEMPT_RANGE[1])
-    assert cost is None
+def test_bedrock_cost_is_unknown_without_a_model():
+    """No model given, so there is nothing to look a rate up by. The token
+    estimate must still print; the dollar cost must not be guessed."""
+    estimate = cost_model.bedrock_estimate(63)
+    assert estimate["total"] == pytest.approx(63 * cost_model.TOKENS_PER_ATTEMPT_TOTAL)
+    assert estimate["input"] == pytest.approx(63 * cost_model.TOKENS_PER_ATTEMPT_BY_TYPE["input"])
+    assert estimate["cost_usd"] is None
+
+
+def test_bedrock_cost_is_unknown_for_a_model_with_no_rates_entry():
+    """A real model, just not one anyone has priced yet -- still "unknown",
+    not a guess."""
+    estimate = cost_model.bedrock_estimate(63, model_id="not-a-priced-model")
+    assert estimate["cost_usd"] is None
+
+
+def test_bedrock_rates_for_model_strips_the_bedrock_prefix():
+    """main.py's --judge-model needs the "bedrock/" LiteLLM prefix; brain-go's
+    own agent_model does not. Both must resolve to the same rates.yml row."""
+    with_prefix = cost_model.bedrock_rates_for_model("bedrock/us.anthropic.claude-sonnet-4-6")
+    without_prefix = cost_model.bedrock_rates_for_model("us.anthropic.claude-sonnet-4-6")
+    assert with_prefix == without_prefix
+    assert with_prefix is not None
+
+
+def test_bedrock_rates_for_model_reads_the_real_committed_rates_file():
+    """rates.yml is a real, committed file now, not a future decision. This
+    pins the agent model's rate this repo actually priced, so a typo or a
+    reformat in the yaml is caught here rather than only in a $ figure being
+    silently wrong."""
+    rates = cost_model.bedrock_rates_for_model("us.anthropic.claude-sonnet-4-6")
+    assert rates == {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30}
+
+
+def test_bedrock_estimate_reproduces_the_measured_run_cost():
+    """Acceptance test: run-20260908-0739-4fc0249e's own real token counts,
+    priced at us.anthropic.claude-sonnet-4-6's committed rate, computed by
+    hand: input 1,451,168 @ $3.00/M = $4.35; output 2,220,044 @ $15.00/M =
+    $33.30; cache_write 20,143,259 @ $3.75/M = $75.54; cache_read 176,035,499
+    @ $0.30/M = $52.81. Total $166.00 (agent-only; the judge runs via LiteLLM
+    on the host, not through brain-go, so its tokens are not in these
+    counters at all)."""
+    estimate = cost_model.bedrock_estimate(63, model_id="us.anthropic.claude-sonnet-4-6")
+    assert estimate["input"] == pytest.approx(1_451_168)
+    assert estimate["output"] == pytest.approx(2_220_044)
+    assert estimate["cache_write"] == pytest.approx(20_143_259)
+    assert estimate["cache_read"] == pytest.approx(176_035_499)
+    assert estimate["cost_usd"] == pytest.approx(166.00, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -167,13 +207,13 @@ def test_bedrock_cost_is_unknown_without_a_configured_rate():
 
 
 def test_resolvable_effect_matches_the_63_attempt_reference_point():
-    """experiment-bench-plan.md and sregym-findings.md: 63 paired
-    problem-runs resolves "about 23pp" at 80% power. This is the reference
-    calculation Spec D asks to generalize, not re-derive; reproducing it
-    within the source text's own rounding is the check that the constant and
-    the formula are the ones actually cited."""
+    """At MCNEMAR_DISCORDANCE_RATE's current value (0.317, measured on
+    run-20260908-0739-4fc0249e) and n=63, resolvable_effect_pp's own
+    docstring cites ~19.5pp as its reference point. Reproducing it here
+    catches the constant and the formula drifting apart, the same way the
+    old 0.48-based ~24pp reference did before this constant moved."""
     pp = cost_model.resolvable_effect_pp(63)
-    assert pp == pytest.approx(24.0, abs=0.5)
+    assert pp == pytest.approx(19.5, abs=0.5)
 
 
 def test_resolvable_effect_decreases_as_attempts_grow():
