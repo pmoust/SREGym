@@ -65,10 +65,10 @@ for `--problem`.
   need the real cluster path (`kind/README.md` / `scripts/ansible/`), not
   this one.
 - **One local attempt has no statistical power.** RCI's own measured
-  flip rate between two runs of the *same* 21 problems is 48% (see Day 3's
-  cost model reasoning in `experiment-bench-plan.md`). A local run answers
-  "is this obviously broken," never "is this better" -- that question needs
-  the paired EC2 shape below, full stop.
+  discordant-verdict rate, within one run's 63 paired attempts, is 31.7%
+  (see `scripts/benchmark/cost_model.py`'s `MCNEMAR_DISCORDANCE_RATE`). A
+  local run answers "is this obviously broken," never "is this better" --
+  that question needs the paired EC2 shape below, full stop.
 - **This section documents composing existing building blocks, not a new
   script.** Every command above is verified against its own source and is
   exactly what the EC2 bootstrap already runs, just invoked by hand instead
@@ -101,9 +101,9 @@ experiment: sregym     563dd29b6b153d559f5622168792b73c8688e452
 experiment: brain-go   f1270a67cf2f8650543c4dc78829ad34fea1091c
 experiment: problems   21  (from 'sregym-lite')
 experiment: shape        instance_count = ceil(21/3) = 7, depth 1, 3 attempt(s) each (runs_per_instance: 3)
-experiment: resolution   63 paired attempts, resolves ~24pp at 80% power
-experiment: wall clock   ~2.2 h  (setup ~56 min expected [9-68 min range, 50% per-slot retry chance], then 3 x 24.8 min)
-experiment: ec2          ~$25.79  (7 instance(s) @ $1.6934/h x 2.2h, m8i.8xlarge, us-east-2)
+experiment: resolution   63 paired attempts, resolves ~20pp at 80% power
+experiment: wall clock   ~0.9 h  (setup ~30 min expected [9-68 min range, 14% per-slot retry chance], then 3 x 8.4 min)
+experiment: ec2          ~$10.84  (7 instance(s) @ $1.6934/h x 0.9h, m8i.8xlarge, us-east-2)
 experiment: bedrock      tokens ~100.8-138.6M (63 attempts x ~1.6-2.2M), dollar cost unknown (no rate configured; see terraform/rates.yml)
 ```
 
@@ -128,16 +128,15 @@ experiment: bedrock      tokens ~100.8-138.6M (63 attempts x ~1.6-2.2M), dollar 
   statistical power. A cheap run tells you whether you broke something; it
   does not tell you whether you improved it unless this number is small
   enough to matter for the effect you expect. RCI is flaky by measurement,
-  not by reputation (48% verdict flip between two runs of the same 21
-  problems), so this line exists to stop a 2-attempt smoke test from being
-  read as a real comparison.
+  not by reputation (31.7% of one run's own 63 paired attempts disagreed on
+  the diagnosis verdict), so this line exists to stop a 2-attempt smoke test
+  from being read as a real comparison.
 - `wall clock` and `ec2` — an *expected* time and cost, not a best case.
   Setup time is genuinely bimodal (a slot either deploys clean or hits a
-  deploy-retry cycle, at a measured ~50% probability per slot, holding
-  steady across two very different box sizes — see
-  `scripts/benchmark/cost_model.py`'s module docstring for the full
-  reasoning), so the number already accounts for the chance that at least
-  one slot on a box retries.
+  deploy-retry cycle, at a measured ~14% probability per slot post-#56-fix —
+  down from ~50% pre-fix, see `scripts/benchmark/cost_model.py`'s module
+  docstring for the full reasoning), so the number already accounts for the
+  chance that at least one slot on a box retries.
 - `bedrock` — a token range, and a dollar cost that stays "unknown" until
   someone puts a real committed rate in `terraform/rates.yml`. This is
   deliberate: never guess a rate that would then get quoted as a real cost.

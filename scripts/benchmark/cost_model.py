@@ -68,27 +68,55 @@ VARIABLES_TF = REPO_ROOT / "terraform" / "variables.tf"
 # Measured constants (Day 3 table, experiment-bench-plan.md)
 # ---------------------------------------------------------------------------
 
-# Midpoint of the observed clean-setup range: 9-21 min on run-20260902-0606
-# (r7a.24xlarge, 4 of 9 slots) and 6 of 12 slots on run-20260903-1259
-# (m8i.8xlarge). Same range on two box sizes 3x apart in CPU/memory.
-SETUP_CLEAN_MINUTES = 15.0
+# Observed clean-setup range, 9-21 min, unchanged by a third measurement:
+# run-20260902-0606 (r7a.24xlarge, 4 of 9 slots), run-20260903-1259
+# (m8i.8xlarge, 6 of 12 slots), and run-20260908-0739-4fc0249e (m8i.8xlarge,
+# all 21 slots -- every deploy this run was clean, see RETRY_PROBABILITY).
+# Same range across three box sizes.
+#
+# The point value below no longer is that range's midpoint. It is
+# run-20260908-0739-4fc0249e's own median: each slot's first result-row mtime
+# minus the run's recorded launch (2026-09-08T07:39:23 UTC), less that same
+# attempt's own TTM (the agent-clock component, read from the row, so what is
+# left is deploy-plus-fault-injection time). n=10 of the run's 12 slots; the
+# other 2 are excluded because their result-row mtimes were not monotonic in
+# attempt order (run_2 finishing before run_1), consistent with a mid-run
+# harness resume rewriting a subset of rows rather than a real timing
+# sample. Cross-checked against a fault-injection creationTimestamp found
+# in one slot's archived agent log, which the same computation lands within
+# two minutes of. Median 673.8s = 11.2 min; still inside the 9-21 range
+# above, just no longer read off that range's midpoint.
+SETUP_CLEAN_MINUTES = 11.2
 SETUP_CLEAN_RANGE_MINUTES = (9.0, 21.0)
 
 # Midpoint of the observed deploy-retry setup range: 56-68 min, 5 of 9 slots
-# on run-20260902-0606 and 6 of 12 on run-20260903-1259.
+# on run-20260902-0606 and 6 of 12 on run-20260903-1259. Not updated by
+# run-20260908-0739-4fc0249e: that run had zero retried deploys (see
+# RETRY_PROBABILITY), so it contributes no new retry-duration sample. This
+# pair is pre-#56-fix and unconfirmed since; update it once a post-fix run
+# actually hits the retry branch.
 SETUP_RETRY_MINUTES = 62.0
 SETUP_RETRY_RANGE_MINUTES = (56.0, 68.0)
 
-# ~50% per slot, consistent across both runs above and both box sizes. Read
-# as external registry throttling (Docker Hub / ghcr.io), not local
-# disk/CPU contention: a contention theory predicts the rate should improve
-# on the 3x-smaller box's neighbors, and it does not. Named and documented
-# because #47 (Phase 2) targets this rate directly; update it here when that
-# lands rather than leaving a stale number quietly wrong.
-RETRY_PROBABILITY = 0.5
+# Was ~50% per slot across run-20260902-0606 and run-20260903-1259 (both
+# pre-#56-fix; see the retry-storm fix on the deploy-retry path). Superseded:
+# run-20260908-0739-4fc0249e (sha cd28fbd1, post-fix) recorded deploy_attempts
+# == 1 on every one of its 21 slot-deploys, i.e. zero observed retries. Zero
+# events in 21 trials does not license asserting the true rate is now exactly
+# zero, so this uses the rule-of-three upper bound for zero observed events at
+# 95% confidence instead: 3/n = 3/21 = 0.14. Update again once a post-fix run
+# actually observes a retry, which will pin the rate rather than bound it.
+RETRY_PROBABILITY = 0.14
 
-# Median attempt cycle, run-20260902-0606, 51 deltas.
-ATTEMPT_CYCLE_MINUTES = 24.8
+# Was the median wall-clock gap between successive attempt completions,
+# run-20260902-0606, 51 deltas. Superseded by the same measurement on
+# run-20260908-0739-4fc0249e: 38 consecutive same-problem attempt-completion
+# deltas (result-row mtimes), across the 19 of 21 problems whose rows landed
+# in monotonic attempt order (see SETUP_CLEAN_MINUTES for the 2 excluded and
+# why). Median 501s = 8.4 min, well under half the old figure -- consistent
+# with the same speedups that moved SETUP_CLEAN_MINUTES and
+# RETRY_PROBABILITY down on this run.
+ATTEMPT_CYCLE_MINUTES = 8.4
 
 # Proven concurrency width at m8i.8xlarge (run-20260903-1259, run.tvars);
 # 7 lost a whole run to disk contention (run-20260903-0822). Matches
@@ -121,15 +149,24 @@ RATES_FILE = REPO_ROOT / "terraform" / "rates.yml"
 # fixed effect size.
 # ---------------------------------------------------------------------------
 
-# 48% verdict flip between two runs of the same 21 problems
-# (experiment-bench-plan.md's "constraint to design against"). This is the
-# discordant-pair rate psi = p12 + p21 in Connor's notation: the fraction of
-# paired problem-runs where the two conditions disagree at all, which is
-# what a McNemar-style comparison actually has power against. An earlier,
-# smaller pair of runs (sregym-findings.md) measured 43% (9/21) the same
-# way; 48% is the more recent figure the plan cites and this follows it.
-# Update this constant, not the formula, if a newer measurement supersedes it.
-MCNEMAR_DISCORDANCE_RATE = 0.48
+# 31.7% verdict flip within run-20260908-0739-4fc0249e's own 63 attempt pairs
+# (20 of 63 disagreed on Diagnosis.success). This is the discordant-pair rate
+# psi = p12 + p21 in Connor's notation: the fraction of paired problem-runs
+# where the two conditions disagree at all, which is what a McNemar-style
+# comparison actually has power against.
+#
+# Better measurement than the 48% it replaces, not just a newer one: 48% came
+# from comparing two separate runs (experiment-bench-plan.md's "constraint to
+# design against"), which mixes in whatever drifted between those runs'
+# environments on top of the model's own flakiness. 31.7% is within one run,
+# one fleet, one code version (sha cd28fbd1), so environmental drift cannot be
+# part of it.
+#
+# Collected with a known evidence-collection bug present (brain-go#2486: 29%
+# of this run's attempts collected zero evidence), so this may move again
+# once that lands. Update this constant, not the formula, if a newer
+# measurement supersedes it.
+MCNEMAR_DISCORDANCE_RATE = 0.317
 
 # Standard normal quantiles: two-sided alpha=0.05, and 80% power (one-sided
 # beta=0.20). Fixed by convention, not measured; named so they read as what
@@ -270,10 +307,12 @@ def resolvable_effect_pp(
         (n + z_beta^2)*delta^2 - 2*sqrt(n)*z_alpha*sqrt(psi)*delta
             + psi*(z_alpha^2 - z_beta^2) = 0
 
-    Reference point this reproduces: at psi=0.48 (MCNEMAR_DISCORDANCE_RATE)
-    and n=63, this returns ~24pp, matching "63 paired problem-runs resolves
-    about 23pp at 80% power" (experiment-bench-plan.md, sregym-findings.md)
-    to within the rounding the source text itself uses ("about").
+    Reference point this reproduces: at psi=0.317 (MCNEMAR_DISCORDANCE_RATE,
+    measured on run-20260908-0739-4fc0249e) and n=63, this returns ~19.5pp.
+    The formula itself is unchanged; only the constant it defaults to moved,
+    from the 0.48 measured across two separate runs to this run's own 0.317
+    (see MCNEMAR_DISCORDANCE_RATE's comment for why that is the better
+    measurement, not just the newer one).
 
     Returns None when no bounded effect (0 < delta <= 1) is resolvable at
     this N -- true for very small N, where the expected number of discordant

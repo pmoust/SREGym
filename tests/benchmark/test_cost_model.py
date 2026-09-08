@@ -167,13 +167,13 @@ def test_bedrock_cost_is_unknown_without_a_configured_rate():
 
 
 def test_resolvable_effect_matches_the_63_attempt_reference_point():
-    """experiment-bench-plan.md and sregym-findings.md: 63 paired
-    problem-runs resolves "about 23pp" at 80% power. This is the reference
-    calculation Spec D asks to generalize, not re-derive; reproducing it
-    within the source text's own rounding is the check that the constant and
-    the formula are the ones actually cited."""
+    """At MCNEMAR_DISCORDANCE_RATE's current value (0.317, measured on
+    run-20260908-0739-4fc0249e) and n=63, resolvable_effect_pp's own
+    docstring cites ~19.5pp as its reference point. Reproducing it here
+    catches the constant and the formula drifting apart, the same way the
+    old 0.48-based ~24pp reference did before this constant moved."""
     pp = cost_model.resolvable_effect_pp(63)
-    assert pp == pytest.approx(24.0, abs=0.5)
+    assert pp == pytest.approx(19.5, abs=0.5)
 
 
 def test_resolvable_effect_decreases_as_attempts_grow():
