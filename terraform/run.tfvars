@@ -66,6 +66,16 @@ instance_count    = 4
 runs_per_instance = 3
 n_attempts        = 3
 
+# Pinned to what production actually runs, rather than left to
+# variables.tf's default (sonnet-4-5): production moved to Sonnet 4.6, and
+# a benchmark measuring a model nobody is serving answers the wrong
+# question. This is a deliberate break from run-20260829-1047 and
+# run-20260902-0606, both scored on 4.5 -- read this run as a new baseline
+# on the model dimension, not as paired with either of them on that axis.
+# judge_model is left at variables.tf's default (bedrock/us.anthropic.
+# claude-sonnet-5): already the intended judge, nothing to override.
+agent_model = "us.anthropic.claude-sonnet-4-6"
+
 # Explicit, rather than inheriting the variables.tf default of 12. The deepest
 # slot is two problems at three attempts, so six cycles at the 2400s cap plus
 # setup needs about 3.3 hours; six leaves room for a slow run without leaving a
