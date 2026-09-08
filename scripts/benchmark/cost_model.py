@@ -190,6 +190,15 @@ RATES_FILE = REPO_ROOT / "terraform" / "rates.yml"
 # of this run's attempts collected zero evidence), so this may move again
 # once that lands. Update this constant, not the formula, if a newer
 # measurement supersedes it.
+#
+# One caveat the number itself does not carry: those 63 pairs are all C(3,2)
+# combinations within each of 21 problems, so every attempt appears in two of
+# them and the pairs are correlated rather than independent draws. The 0.48
+# figure this replaces came from two genuinely separate runs and did not have
+# that property. The point estimate is unaffected, but resolvable_effect_pp
+# below treats its pair count as independent, so the resolution it reports
+# from a within-run discordance measurement is slightly optimistic. Sizing a
+# comparison off it is fine; quoting the pp figure as a hard bound is not.
 MCNEMAR_DISCORDANCE_RATE = 0.317
 
 # Standard normal quantiles: two-sided alpha=0.05, and 80% power (one-sided

@@ -9,9 +9,18 @@
 #
 # brain-go's LLM client always requests bedrocktypes.CachePointTypeDefault
 # (internal/orchestration/llm/bedrock.go), which is Bedrock's 5-minute cache
-# checkpoint, so cache_write below is the 5-minute write rate. The 1-hour
-# write rate is not tracked here: nothing in this repo ever requests it, so a
-# field for it would be untested and unused.
+# checkpoint, so cache_write below is the 5-minute write rate and is the one
+# every figure this file produces uses today.
+#
+# cache_write_1h is recorded beside it even though nothing requests it yet.
+# The 5-minute assumption lives in a different repo, so nothing here can
+# assert it the way _assert_instance_type() pins the EC2 instance type against
+# terraform/variables.tf. If brain-go ever switches to the 1-hour checkpoint,
+# every cache-write figure silently underprices by 1.6x (3.75 vs 6.00 for
+# Sonnet 4.6) and no test fails. Having the real number already sitting here
+# means that change is a one-line correction rather than a research task, and
+# the gap between the two columns is a standing reminder that the assumption
+# is an assumption.
 #
 # Keys are the exact model id cost_model.py/score_run.py will look this run's
 # agent_model or judge_model up by, matched after stripping a leading
@@ -34,29 +43,35 @@ models:
     input: 3.00
     output: 15.00
     cache_write: 3.75
+    cache_write_1h: 6.00
     cache_read: 0.30
   us.anthropic.claude-sonnet-5: # the judge model this run used
     input: 2.00
     output: 10.00
     cache_write: 2.50
+    cache_write_1h: 4.00
     cache_read: 0.20
   us.anthropic.claude-opus-5: # id unverified, see note above
     input: 5.00
     output: 25.00
     cache_write: 6.25
+    cache_write_1h: 10.00
     cache_read: 0.50
   us.anthropic.claude-opus-4-8: # id unverified, see note above
     input: 5.00
     output: 25.00
     cache_write: 6.25
+    cache_write_1h: 10.00
     cache_read: 0.50
   us.anthropic.claude-opus-4-7: # id unverified, same rate as opus-4-8
     input: 5.00
     output: 25.00
     cache_write: 6.25
+    cache_write_1h: 10.00
     cache_read: 0.50
   us.anthropic.claude-fable-5: # id unverified, see note above
     input: 10.00
     output: 50.00
     cache_write: 12.50
+    cache_write_1h: 20.00
     cache_read: 1.00
