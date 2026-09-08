@@ -19,6 +19,69 @@ python3 scripts/benchmark/run_stats.py /path/to/brain-go/sregym-results/<run-id>
 The rest of this doc walks through each step, what the output means, and
 where the gaps are today.
 
+## 0. Iterate locally first, before spending anything on EC2
+
+The EC2 path below is for a real paired comparison — a statistically
+meaningful shape costs tens of dollars and an hour or more, and that is the
+right price for a claim. It is the wrong price for "does my node produce
+sane output at all," which is most of an iteration loop. For that, run one
+problem on your own machine against a local `kind` cluster: no terraform,
+no EC2, no bill.
+
+This composes the same scripts the EC2 bootstrap calls, run by hand instead
+of from `terraform/templates/bootstrap.sh.tftpl`:
+
+```bash
+# 1. A local emulated Kubernetes cluster (from this repo's root)
+bash kind/setup_kind_cluster.sh x86      # or: arm
+
+# 2. Bring up brain-go locally (runs `make up` in BRAIN_GO_DIR) and seed
+#    dev credentials. Needs a brain-go checkout beside this one, and Bedrock
+#    or Anthropic credentials already usable by that checkout's deploy/.env
+#    -- the same thing any local brain-go dev work needs, nothing extra for
+#    this. On a laptop there is no EC2 instance role to read credentials
+#    from, so the script logs that and falls back to what deploy/.env
+#    already has; it does not fail closed.
+BRAIN_GO_DIR=/path/to/brain-go scripts/benchmark/setup_brain_go.sh
+
+# 3. Seed one tenant (account, API key, session, MCP connections) against
+#    the running stack
+eval "$(scripts/benchmark/seed_slot.sh local-slot-0 9955)"
+
+# 4. Run exactly one problem
+uv run main.py --problem <problem_id> --agent brain_go \
+  --model us.anthropic.claude-sonnet-4-6 \
+  --judge-model bedrock/us.anthropic.claude-sonnet-5
+```
+
+`sregym/conductor/problem_sets.py`'s `sregym-lite` set (or
+`sregym/conductor/problems/registry.py` for the full list) names valid ids
+for `--problem`.
+
+**Caveats, not polish-later gaps:**
+
+- **Not every problem is supported on `kind`.** This repo's own top-level
+  README says so; a hardware- or multi-node-class fault in particular may
+  need the real cluster path (`kind/README.md` / `scripts/ansible/`), not
+  this one.
+- **One local attempt has no statistical power.** RCI's own measured
+  flip rate between two runs of the *same* 21 problems is 48% (see Day 3's
+  cost model reasoning in `experiment-bench-plan.md`). A local run answers
+  "is this obviously broken," never "is this better" -- that question needs
+  the paired EC2 shape below, full stop.
+- **This section documents composing existing building blocks, not a new
+  script.** Every command above is verified against its own source and is
+  exactly what the EC2 bootstrap already runs, just invoked by hand instead
+  of from terraform; the specific sequencing here has not been run
+  end-to-end as its own checked workflow. If you hit a step that does not
+  behave as described, that is more likely a gap in this doc than in the
+  scripts -- fix the doc in the same change you find it wrong in.
+
+The next two rungs up, in order of cost: `./scripts/benchmark/launch.sh
+smoke` (2 problems, one EC2 box, proves the harness against a real cluster
+for the price of a coffee), then the full preview-and-launch flow below
+(the paired comparison that actually resolves a claim).
+
 ## 1. Preview the cost, before anything deploys
 
 ```bash
