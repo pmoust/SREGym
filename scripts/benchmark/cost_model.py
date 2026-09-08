@@ -61,6 +61,8 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VARIABLES_TF = REPO_ROOT / "terraform" / "variables.tf"
 
@@ -129,18 +131,40 @@ RUNS_PER_INSTANCE_DEFAULT = 3
 EC2_INSTANCE_TYPE = "m8i.8xlarge"
 EC2_HOURLY_RATE_USD = 1.6934
 
-# Range across two measurements: 96.4M tokens / 60 attempts
-# (run-20260902-0606) and 4.33M / 2 attempts (run-20260903-0558, post-fix).
-# Midpoint used for the point estimate below; the range is printed alongside
-# it rather than hidden behind one number.
-TOKENS_PER_ATTEMPT_RANGE = (1.6e6, 2.2e6)
-TOKENS_PER_ATTEMPT_MID = sum(TOKENS_PER_ATTEMPT_RANGE) / 2
+# Point estimate, not a range, and this comment says why: the previous two
+# measurements (96.4M/60 attempts on run-20260902-0606, 4.33M/2 attempts on
+# run-20260903-0558) were both used as a range because neither alone covered
+# enough attempts to trust. run-20260908-0739-4fc0249e is 63 attempts, the
+# whole paired shape this file's own resolvable_effect_pp treats as a real
+# sample, and its total is verified two independent ways: the sum of these
+# four per-type figures and score_run.py's own tokens() on the archived
+# scrape agree to the token. Per-type, not blended, for the same reason
+# rates.yml is per-type: cache_read alone is 88% of this run's tokens and
+# prices at 1/50th of output, so a single blended figure would misprice any
+# run whose mix differs from this one's.
+#
+# Do not compute this figure from the result CSVs' own tokens_* columns: they
+# are inflated roughly 2.41x by concurrent-slot contamination (see
+# token_delta.py's module docstring). These four are run-20260908-0739-4fc0249e's
+# whole-run totals -- input 1,451,168, output 2,220,044, cache_write
+# 20,143,259, cache_read 176,035,499 -- divided by its 63 attempts, and the
+# whole-run figure is the one this bug does not touch.
+#
+# One clean run is one data point. Update this, not just widen it into a
+# range, once a second run gives a second point to compare against.
+TOKENS_PER_ATTEMPT_BY_TYPE = {
+    "input": 1_451_168 / 63,
+    "output": 2_220_044 / 63,
+    "cache_write": 20_143_259 / 63,
+    "cache_read": 176_035_499 / 63,
+}
+TOKENS_PER_ATTEMPT_TOTAL = sum(TOKENS_PER_ATTEMPT_BY_TYPE.values())
 
-# Bedrock's per-token rate for sonnet-4-5 is partner pricing and goes in a
-# committed rates.yml once someone puts a real number there (open decision
-# #3, experiment-bench-plan.md). It does not exist yet. Never guess it:
-# score_run.py's own convention is to print what is known and say plainly
-# what is not, rather than fabricate a number that would then get quoted.
+# The committed rates, once someone puts real numbers in rates.yml (open
+# decision #3, experiment-bench-plan.md, closed by run-20260908-0739-4fc0249e's
+# measurement). Four token types, not a blended one, because they differ by
+# up to 50x: see rates.yml's own header for why and for brain-go's
+# CachePointTypeDefault tying cache_write to the 5-minute rate specifically.
 RATES_FILE = REPO_ROOT / "terraform" / "rates.yml"
 
 # ---------------------------------------------------------------------------
@@ -190,6 +214,21 @@ def _assert_instance_type() -> None:
             f"but cost_model.py's EC2_HOURLY_RATE_USD is priced for {EC2_INSTANCE_TYPE!r}. "
             "Update EC2_INSTANCE_TYPE/EC2_HOURLY_RATE_USD together with the terraform default."
         )
+
+
+def _agent_model_default() -> str:
+    """terraform/variables.tf's agent_model default, for a preview that has no
+    run manifest to read an actual model out of (score_run.py's job -- see
+    that file's cost_summary()). Not asserted against rates.yml the way
+    _assert_instance_type asserts EC2_HOURLY_RATE_USD: an unpriced default is
+    normal (the default itself is stale, see rates.yml's own note on it) and
+    must read as "unknown", not raise.
+    """
+    text = VARIABLES_TF.read_text()
+    match = re.search(r'variable\s+"agent_model"\s*\{.*?default\s*=\s*"([^"]+)"', text, re.DOTALL)
+    if match is None:
+        raise RuntimeError(f"could not find agent_model's default in {VARIABLES_TF}")
+    return match.group(1)
 
 
 # ---------------------------------------------------------------------------
@@ -259,26 +298,76 @@ def ec2_cost_usd(instance_count: int, wall_clock_min: float) -> float:
     return instance_count * EC2_HOURLY_RATE_USD * (wall_clock_min / 60.0)
 
 
-def _bedrock_rate_per_million_tokens() -> float | None:
-    """The committed rate, if one has ever been put in terraform/rates.yml.
-    Never guessed: matches score_run.py's refusal to pick a denominator for
-    you. No YAML dependency is added for this: the file does not exist yet
-    (open decision #3), and the day it does, whoever adds a real number can
-    also wire up whatever format they choose to read it back."""
-    return None
+# The four types rates.yml prices per model. Same four token_delta.py and
+# score_run.py account for; named again here rather than imported from
+# either, since neither is a natural home for a pricing-shaped constant.
+PRICED_TOKEN_TYPES = ("input", "output", "cache_write", "cache_read")
 
 
-def bedrock_estimate(paired_attempts: int) -> tuple[float, float, float | None]:
-    """(low, high, cost_usd) token estimate for `paired_attempts` attempts.
-    cost_usd is None when no rate is configured -- the caller must print that
-    as "unknown", not omit it or guess."""
-    low = paired_attempts * TOKENS_PER_ATTEMPT_RANGE[0]
-    high = paired_attempts * TOKENS_PER_ATTEMPT_RANGE[1]
-    rate = _bedrock_rate_per_million_tokens()
-    if rate is None:
-        return (low, high, None)
-    mid = paired_attempts * TOKENS_PER_ATTEMPT_MID
-    return (low, high, mid / 1e6 * rate)
+def bedrock_rates_for_model(model_id: str) -> dict[str, float] | None:
+    """This model's {input, output, cache_write, cache_read} rate, USD per
+    million tokens, from terraform/rates.yml. None when the file does not
+    exist, does not parse, or has no entry for `model_id` -- never guessed,
+    same convention score_run.py already uses for a missing denominator.
+
+    `model_id` is matched after stripping a leading "bedrock/": main.py's
+    --judge-model needs that LiteLLM prefix and brain-go's own
+    bedrockruntime.Converse call (what agent_model feeds) does not, so the
+    same id can arrive either way depending which role is being priced.
+    """
+    if not RATES_FILE.is_file():
+        return None
+    try:
+        data = yaml.safe_load(RATES_FILE.read_text())
+    except yaml.YAMLError:
+        return None
+
+    models = (data or {}).get("models")
+    if not isinstance(models, dict):
+        return None
+    rates = models.get(model_id.removeprefix("bedrock/"))
+    if not isinstance(rates, dict):
+        return None
+
+    try:
+        return {kind: float(rates[kind]) for kind in PRICED_TOKEN_TYPES}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def token_cost(totals: dict[str, float], model_id: str | None) -> float | None:
+    """Dollar cost of a {input, output, cache_write, cache_read, ...} token
+    totals dict, at `model_id`'s rate in terraform/rates.yml. Extra keys in
+    `totals` (score_run.py's tokens() also carries "series"/"by_node"/"total")
+    are ignored: only the four priced kinds are summed. None when `model_id`
+    is not given or has no configured rate -- unknown, never guessed, the
+    same convention every caller of this module already follows.
+    """
+    if not model_id:
+        return None
+    rates = bedrock_rates_for_model(model_id)
+    if rates is None:
+        return None
+    return sum(totals.get(kind, 0) / 1e6 * rate for kind, rate in rates.items())
+
+
+def bedrock_estimate(paired_attempts: int, model_id: str | None = None) -> dict[str, float | None]:
+    """Token and dollar estimate for `paired_attempts` attempts, priced at
+    TOKENS_PER_ATTEMPT_BY_TYPE's measured per-type rate.
+
+    Returns each type's token count, "total" tokens, and "cost_usd" --
+    None when `model_id` is not given or has no configured rate, which the
+    caller must print as "unknown", not omit or guess.
+    """
+    if paired_attempts < 1:
+        raise ValueError(f"paired_attempts must be >= 1, got {paired_attempts}")
+
+    tokens: dict[str, float | None] = {
+        kind: paired_attempts * per_attempt for kind, per_attempt in TOKENS_PER_ATTEMPT_BY_TYPE.items()
+    }
+    tokens["total"] = paired_attempts * TOKENS_PER_ATTEMPT_TOTAL
+    tokens["cost_usd"] = token_cost(tokens, model_id)
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +442,9 @@ def render_preview(problem_count: int, attempts: int, runs_per_instance: int = R
     cost = ec2_cost_usd(instances, wall_min)
     paired = problem_count * attempts
     pp = resolvable_effect_pp(paired)
-    tok_low, tok_high, tok_cost = bedrock_estimate(paired)
+    agent_model = _agent_model_default()
+    estimate = bedrock_estimate(paired, agent_model)
+    tok_total, tok_cost = estimate["total"], estimate["cost_usd"]
 
     lines = []
     lines.append(
@@ -375,12 +466,13 @@ def render_preview(problem_count: int, attempts: int, runs_per_instance: int = R
     )
     if tok_cost is None:
         lines.append(
-            f"experiment: bedrock      tokens ~{tok_low / 1e6:.1f}-{tok_high / 1e6:.1f}M "
-            f"({paired} attempts x ~{TOKENS_PER_ATTEMPT_RANGE[0] / 1e6:.1f}-{TOKENS_PER_ATTEMPT_RANGE[1] / 1e6:.1f}M), "
-            f"dollar cost unknown (no rate configured; see {RATES_FILE.relative_to(REPO_ROOT)})"
+            f"experiment: bedrock      tokens ~{tok_total / 1e6:.1f}M "
+            f"({paired} attempts x ~{TOKENS_PER_ATTEMPT_TOTAL / 1e6:.2f}M), "
+            f"dollar cost unknown (no rate configured for {agent_model!r}; "
+            f"see {RATES_FILE.relative_to(REPO_ROOT)})"
         )
     else:
-        lines.append(f"experiment: bedrock      tokens ~{tok_low / 1e6:.1f}-{tok_high / 1e6:.1f}M, ~${tok_cost:.2f}")
+        lines.append(f"experiment: bedrock      tokens ~{tok_total / 1e6:.1f}M, ~${tok_cost:.2f} ({agent_model})")
     return "\n".join(lines)
 
 

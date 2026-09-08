@@ -104,8 +104,13 @@ experiment: shape        instance_count = ceil(21/3) = 7, depth 1, 3 attempt(s) 
 experiment: resolution   63 paired attempts, resolves ~20pp at 80% power
 experiment: wall clock   ~0.9 h  (setup ~30 min expected [9-68 min range, 14% per-slot retry chance], then 3 x 8.4 min)
 experiment: ec2          ~$10.84  (7 instance(s) @ $1.6934/h x 0.9h, m8i.8xlarge, us-east-2)
-experiment: bedrock      tokens ~100.8-138.6M (63 attempts x ~1.6-2.2M), dollar cost unknown (no rate configured; see terraform/rates.yml)
+experiment: bedrock      tokens ~199.8M (63 attempts x ~3.17M), dollar cost unknown (no rate configured for 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'; see terraform/rates.yml)
 ```
+
+(`terraform/variables.tf`'s `agent_model` default above is stale -- the model
+this exact preview shape actually ran with, `us.anthropic.claude-sonnet-4-6`,
+does have a rate in `terraform/rates.yml` and would print a real dollar
+figure; this is what the unpatched default still prints.)
 
 **Reading it:**
 
@@ -137,9 +142,12 @@ experiment: bedrock      tokens ~100.8-138.6M (63 attempts x ~1.6-2.2M), dollar 
   down from ~50% pre-fix, see `scripts/benchmark/cost_model.py`'s module
   docstring for the full reasoning), so the number already accounts for the
   chance that at least one slot on a box retries.
-- `bedrock` — a token range, and a dollar cost that stays "unknown" until
-  someone puts a real committed rate in `terraform/rates.yml`. This is
-  deliberate: never guess a rate that would then get quoted as a real cost.
+- `bedrock` — a token point estimate (one clean run's own measurement, not a
+  range), and a dollar cost. The cost stays "unknown" for a model with no
+  entry in `terraform/rates.yml` — this is deliberate, never guess a rate
+  that would then get quoted as a real cost — but a model that *is* priced
+  there prints a real figure, keyed off `terraform/variables.tf`'s
+  `agent_model` default.
 
 Rejecting a bad `--problems` spec happens before any of this prints:
 
@@ -324,9 +332,12 @@ the identical three checks from the command line.
   slot — the fastest shape for a given concurrency). Trading wall clock for
   fewer, deeper boxes, the way `run.tfvars` does deliberately, is a manual
   override today, not something the preview computes for you.
-- **The Bedrock rate is unknown** until `terraform/rates.yml` exists with a
-  real, sourced number in it. Until then, every cost preview shows tokens
-  and EC2 dollars only, and says so.
+- **The Bedrock rate is unknown for a model with no entry in
+  `terraform/rates.yml`.** The file exists now, with real, sourced rates for
+  the models this repo has actually run plus a few added by inference (see
+  the file's own header on which is which). A preview or scored run using an
+  unpriced model still shows tokens only, and says the cost is unknown rather
+  than guessing.
 
 For the deeper why behind any of these numbers — the retry-rate
 measurement, the order-statistic reasoning, the phased plan this all comes
