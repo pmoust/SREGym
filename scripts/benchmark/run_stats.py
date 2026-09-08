@@ -408,6 +408,14 @@ def _render_group(name: str, g: dict) -> list[str]:
             lines.append(
                 f"    {label:<11} typically {st['mean']:>8.1f}s  (middle value {st['median']:>8.1f}s)  {ci}  (from {st['n']} attempts)"
             )
+    # Every column here except tool_calls comes from the per-attempt token
+    # delta, which overcounts: see the INFLATED note below. Marked inline
+    # rather than only in a footer, because a mean with a confidence interval
+    # beside it reads as more authoritative than a bare number, and someone
+    # skimming one row should not have to find the footer to learn it is wrong.
+    inflated = {"llm_calls", "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write"}
+    any_inflated = False
+
     for label, col_key in (
         ("LLM calls", "llm_calls"),
         ("Tool calls", "tool_calls"),
@@ -421,9 +429,24 @@ def _render_group(name: str, g: dict) -> list[str]:
             lines.append(f"    {label:<11} not enough data")
         else:
             ci = _ci(st["ci95"])
+            mark = ""
+            if col_key in inflated:
+                mark = "  [INFLATED]"
+                any_inflated = True
             lines.append(
-                f"    {label:<11} typically {st['mean']:>10.1f}  (middle value {st['median']:>10.1f})  {ci}  (from {st['n']} attempts)"
+                f"    {label:<11} typically {st['mean']:>10.1f}  (middle value {st['median']:>10.1f})  {ci}  (from {st['n']} attempts){mark}"
             )
+
+    if any_inflated:
+        lines.append("")
+        lines.append("    [INFLATED] brain-go serves all slots on a box from one process and its")
+        lines.append("    Prometheus counters are process-wide, so each attempt's before/after token")
+        lines.append("    delta also picks up whatever the other slots on that box spent at the same")
+        lines.append("    time. Measured at about 2.41x on run-20260908-0739. Tool calls are exempt:")
+        lines.append("    the driver counts those off its own SSE stream. For a token figure you can")
+        lines.append("    trust, use the whole-run total from score_run.py, which is taken per counter")
+        lines.append("    series and is not affected.")
+
     lines.append("")
     return lines
 
