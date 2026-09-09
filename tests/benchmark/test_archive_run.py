@@ -73,7 +73,11 @@ def _fake_aws(bindir, per_run=(), shared="", prefixes=()):
         # Record the sync invocations so a test can assert on the argv the
         # script really builds, rather than on strings in its source.
         'if [ "$1 $2" = "s3 sync" ] && [ -n "${AWS_STUB_LOG:-}" ]; then\n'
-        '  printf \'%s\\n\' "$*" >>"$AWS_STUB_LOG"\n'
+        # %q per argument, not "$*": joining on a space and splitting with
+        # shlex would silently re-split any argument that contains whitespace,
+        # which an archive root with a space in it produces.
+        '  printf \'%q \' "$@" >>"$AWS_STUB_LOG"\n'
+        "  printf '\\n' >>\"$AWS_STUB_LOG\"\n"
         "fi\n"
         # s3 sync and anything else: succeed silently.
         "exit 0\n"
@@ -244,9 +248,13 @@ def test_the_shared_bucket_layout_refuses_an_ambiguous_prefix():
 
 
 def test_an_unambiguous_prefix_is_archived_rather_than_refused():
-    """The refusals must fire on more than one match and not on one, which is
-    the ordinary case. Without this, a comparison tightened into refusing
-    everything would pass both tests above."""
+    """The refusal must fire on more than one match and not on one, which is
+    the ordinary case. Without this, a per-run comparison tightened into
+    refusing everything would pass the per-run ambiguity test above.
+
+    This covers the per-run bucket branch only. The shared bucket resolves the
+    run id a different way and has its own comparison, tested below.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         root, bindir = _sandbox(tmp)
         stub = _fake_aws(bindir, per_run=["sregym-bench-run-20260829-1325-a4d231c1-results"])
@@ -257,6 +265,34 @@ def test_an_unambiguous_prefix_is_archived_rather_than_refused():
         assert "[archive] results ->" in done.stdout, "a single match should proceed to the sync"
         # The bucket-name strips either side of the run id are load-bearing.
         assert (root / "sregym-results" / "run-20260829-1325-a4d231c1").is_dir()
+
+
+def test_a_single_shared_bucket_match_is_archived_rather_than_refused():
+    """The shared bucket's own single-match case, which the per-run test above
+    does not reach: the two branches resolve the run id differently and each
+    has its own count comparison.
+
+    This is the layout every current run uses, so an over-tightened comparison
+    here refuses every ordinary archive. Tightening the shared-bucket
+    comparison to reject one match left the rest of this file green, which is
+    why this test exists separately rather than being folded into the per-run
+    one.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root, bindir = _sandbox(tmp)
+        stub = _fake_aws(
+            bindir,
+            shared="sregym-bench-results-819709950457",
+            prefixes=["run-20260908-0739-4fc0249e"],
+        )
+        done = _run_stubbed(["run-20260908"], stub, root)
+
+        assert done.returncode == 0, done.stderr
+        assert "matches more than one" not in done.stderr
+        assert "[archive] results ->" in done.stdout, "a single match should proceed to the sync"
+        # The run id comes from the prefix inside the bucket here, not from the
+        # bucket name, so this also pins that resolution path.
+        assert (root / "sregym-results" / "run-20260908-0739-4fc0249e").is_dir()
 
 
 def test_the_logs_sync_fetches_the_per_attempt_trace_not_only_shard_logs():
