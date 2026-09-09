@@ -180,8 +180,19 @@ aws s3 sync "$SRC" "$RESULTS/" --region "$REGION" \
   --exclude "*/.kube/*" --exclude "*/logs/*" --only-show-errors
 
 echo "[archive] logs -> $LOGS"
+# Two patterns, because the per-attempt trace and the shard log sit at
+# different depths. The shard and slot logs live under a literal logs/
+# directory, which is all --include "*logs/*" can match. The per-attempt
+# trace, sregym_<time>.log, is written directly into run_N/ and anon_*/
+# beside that attempt's token-usage-by-node.json, with no logs/ segment
+# anywhere in its key, so the folder pattern never saw it: on
+# run-20260908-0739, 126 of 179 .log objects, every per-attempt trace in
+# the run, stayed in S3. That is the same loss the results sync above was
+# fixed for, one file type over. These land here rather than in results/,
+# which never includes .log at all: structured scores and evidence go to
+# results/, raw traces to logs/.
 aws s3 sync "$SRC" "$LOGS/" --region "$REGION" \
-  --exclude "*" --include "*logs/*" --only-show-errors
+  --exclude "*" --include "*logs/*" --include "*.log" --only-show-errors
 
 # Per-attempt files under a run_N directory, which is what a "scored
 # problem-run" is. Counting *_ALL_results.csv instead reported 0 for most of a

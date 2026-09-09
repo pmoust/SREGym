@@ -70,6 +70,11 @@ def _fake_aws(bindir, per_run=(), shared="", prefixes=()):
         "  printf '%s\\n' " + shlex.quote("\n".join(f"{x}/" for x in prefixes)) + "\n"
         "  exit 0\n"
         "fi\n"
+        # Record the sync invocations so a test can assert on the argv the
+        # script really builds, rather than on strings in its source.
+        'if [ "$1 $2" = "s3 sync" ] && [ -n "${AWS_STUB_LOG:-}" ]; then\n'
+        '  printf \'%s\\n\' "$*" >>"$AWS_STUB_LOG"\n'
+        "fi\n"
         # s3 sync and anything else: succeed silently.
         "exit 0\n"
     )
@@ -78,10 +83,19 @@ def _fake_aws(bindir, per_run=(), shared="", prefixes=()):
     return str(bindir)
 
 
-def _run_stubbed(args, bindir, root):
+def _run_stubbed(args, bindir, root, stub_log=None):
     env = {"PATH": f"{bindir}:{_PATH}", "HOME": os.environ.get("HOME", "/tmp"), "SREGYM_ARCHIVE_ROOT": str(root)}
+    if stub_log:
+        env["AWS_STUB_LOG"] = str(stub_log)
 
     return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, cwd=str(ROOT))
+
+
+def _includes(sync_argv):
+    """The --include patterns of one recorded sync, in order."""
+    argv = shlex.split(sync_argv)
+
+    return [argv[i + 1] for i, tok in enumerate(argv[:-1]) if tok == "--include"]
 
 
 def _sandbox(tmp):
@@ -243,6 +257,38 @@ def test_an_unambiguous_prefix_is_archived_rather_than_refused():
         assert "[archive] results ->" in done.stdout, "a single match should proceed to the sync"
         # The bucket-name strips either side of the run id are load-bearing.
         assert (root / "sregym-results" / "run-20260829-1325-a4d231c1").is_dir()
+
+
+def test_the_logs_sync_fetches_the_per_attempt_trace_not_only_shard_logs():
+    """The gap: the per-attempt trace, sregym_<time>.log, is written straight
+    into run_N/ and anon_*/ with no logs/ directory anywhere in its key, so
+    --include "*logs/*" never matched it. Only the shard and slot logs, which
+    do sit under a literal logs/ directory, were archived. On
+    run-20260908-0739 that left 126 of 179 .log objects in S3, every
+    per-attempt trace in the run.
+
+    Asserted against the argv the script actually builds, because the sync
+    that matters here is the one it runs, not the one written in its source.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root, bindir = _sandbox(tmp)
+        log = Path(tmp) / "sync-argv"
+        stub = _fake_aws(bindir, per_run=["sregym-bench-run-20260829-1325-a4d231c1-results"])
+        done = _run_stubbed(["run-20260829"], stub, root, stub_log=log)
+
+        assert done.returncode == 0, done.stderr
+        syncs = log.read_text().splitlines()
+        assert len(syncs) == 2, f"expected a results sync and a logs sync, got {syncs}"
+        assert "sregym-results" in syncs[0] and "sregym-run-logs" in syncs[1], f"unexpected order: {syncs}"
+
+        results_sync, logs_sync = (_includes(x) for x in syncs)
+        assert "*logs/*" in logs_sync, "must still take the shard and slot logs"
+        assert "*.log" in logs_sync, "must also take the per-attempt traces"
+
+        # Raw traces belong in the logs tree only. The results tree takes
+        # structured scores and evidence, and has never included .log.
+        assert "*.log" not in results_sync
+        assert {"*.csv", "*.json", "*.prom"} <= set(results_sync)
 
 
 def test_lookups_tolerate_failure_but_the_syncs_do_not():
