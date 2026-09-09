@@ -12,7 +12,7 @@ The short version: **preview, then launch, then watch, then score.**
 # ... read the preview, decide if the shape is worth it ...
 ./scripts/benchmark/launch.sh run
 # ... wait ...
-/path/to/brain-go/sregym-results/archive_run.sh <run-id>
+./scripts/benchmark/archive_run.sh <run-id>
 python3 scripts/benchmark/run_stats.py /path/to/brain-go/sregym-results/<run-id>
 ```
 
@@ -238,11 +238,17 @@ Results live in S3 only as long as the bucket does. Pull them down before
 looking at anything:
 
 ```bash
-/path/to/brain-go/sregym-results/archive_run.sh <run-id>
+./scripts/benchmark/archive_run.sh <run-id>
 ```
 
 Safe to run repeatedly, including while a run is still going — it only
 fetches what changed.
+
+It writes to `sregym-results/<run-id>` and `sregym-run-logs/<run-id>` under a
+sibling `brain-go` checkout when one exists, which is where every run so far
+has been archived and what the `score_run.py`/`run_stats.py` paths below
+assume. Set `SREGYM_ARCHIVE_ROOT` to put them somewhere else. It prints the
+resolved path, so check that line rather than assuming.
 
 **Headline numbers** (Table 3-style: diagnosis/mitigation/E2E, TTD/TTM,
 tokens):
