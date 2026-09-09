@@ -4,16 +4,17 @@ It spent its first weeks untracked in a sibling brain-go checkout, so these
 tests keep it in version control with something asserting the behaviours that
 would silently regress.
 
-Split deliberately into two kinds. Everything reachable without AWS is tested
-by running the script: root resolution, root validation, and the refusal when
-credentials are unusable all happen before the first API call, so they are real
-behavioural tests that work in CI. The bucket-resolution logic needs live S3 and
-CI has no credentials, so those are source-level assertions, and each says so
-rather than implying it exercised anything.
+Almost everything here runs the script. Root resolution, root validation and
+the refusal when credentials are unusable all happen before the first API call.
+Bucket resolution needs an AWS reply rather than real S3, so those tests stub
+the `aws` binary on PATH and assert on exit status and output; they work in CI
+with no credentials. Only the sync filters stay source-level, because the
+filtering happens inside the CLI rather than in this script.
 """
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -36,6 +37,58 @@ def _run(args, env_extra=None, cwd=None):
     env = {"PATH": _PATH, "HOME": os.environ.get("HOME", "/tmp")}
     env.update(env_extra or {})
     return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, cwd=cwd or str(ROOT))
+
+
+def _fake_aws(bindir, per_run=(), shared="", prefixes=()):
+    """Stand in for the aws CLI so bucket resolution is testable without S3.
+
+    Bucket resolution used to be checked by counting strings in the source,
+    which cannot see whether a refusal actually stops. Dropping the `exit 1`
+    while keeping the warning above it left those assertions green, and that is
+    exactly the silent wrong-run archival the refusal exists to prevent. This
+    answers the three calls the script makes during resolution, so the test can
+    assert on exit status instead.
+    """
+    bindir = Path(bindir)
+    bindir.mkdir(parents=True, exist_ok=True)
+    stub = bindir / "aws"
+    stub.write_text(
+        "#!/bin/bash\n"
+        # Credentials are checked before resolution, so this has to pass for
+        # resolution to be reached at all.
+        'if [ "$1 $2" = "sts get-caller-identity" ]; then exit 0; fi\n'
+        'if [ "$1 $2" = "s3api list-buckets" ]; then\n'
+        # The two list-buckets calls differ only by their --query, so the
+        # shared-bucket wrapper in the query string is what tells them apart.
+        '  for a in "$@"; do\n'
+        "    case \"$a\" in *sregym-bench-results-*) printf '%s\\n' " + shlex.quote(shared) + "; exit 0;; esac\n"
+        "  done\n"
+        "  printf '%s\\n' " + shlex.quote("\n".join(per_run)) + "\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1 $2" = "s3api list-objects-v2" ]; then\n'
+        "  printf '%s\\n' " + shlex.quote("\n".join(f"{x}/" for x in prefixes)) + "\n"
+        "  exit 0\n"
+        "fi\n"
+        # s3 sync and anything else: succeed silently.
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+
+    return str(bindir)
+
+
+def _run_stubbed(args, bindir, root):
+    env = {"PATH": f"{bindir}:{_PATH}", "HOME": os.environ.get("HOME", "/tmp"), "SREGYM_ARCHIVE_ROOT": str(root)}
+
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, cwd=str(ROOT))
+
+
+def _sandbox(tmp):
+    root = Path(tmp) / "root"
+    root.mkdir()
+
+    return root, Path(tmp) / "bin"
 
 
 def _source() -> str:
@@ -67,12 +120,19 @@ def test_a_bad_archive_root_is_refused_before_anything_is_fetched():
 
 
 def test_a_writable_archive_root_is_accepted():
-    """The other half: a good override must get past validation rather than
-    being refused for an unrelated reason."""
+    """The other half of validation, and it has to assert something positive.
+
+    Checking only that the rejection message is absent passes just as well when
+    validation never ran at all, or when the script died earlier for some
+    unrelated reason. Reaching bucket resolution is the evidence that a good
+    root was accepted and execution carried on past the check.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        done = _run(["run-anything"], {"SREGYM_ARCHIVE_ROOT": tmp})
+        root, bindir = _sandbox(tmp)
+        done = _run_stubbed(["run-anything"], _fake_aws(bindir), root)
 
         assert "not a writable directory" not in done.stderr
+        assert "no run matching" in done.stderr, "a good root should reach bucket resolution"
 
 
 def test_the_root_resolves_to_the_primary_worktree_not_the_script_path():
@@ -119,23 +179,70 @@ def test_the_results_sync_fetches_the_per_node_artifacts_not_only_csv():
     assert '--exclude "*/logs/*"' in body, "would fetch the shard scrapes into both trees"
 
 
-def test_both_bucket_layouts_refuse_an_ambiguous_prefix():
-    """The shared-bucket branch always refused an ambiguous prefix; the
-    per-run-bucket branch took head -1 of however many matched, so a prefix
-    matching two per-run buckets silently archived whichever sorted first and
-    printed an ordinary success line. "run-2026" matches two real buckets.
+def test_the_per_run_bucket_layout_refuses_an_ambiguous_prefix():
+    """The per-run branch took head -1 of however many buckets matched, so a
+    prefix matching two runs archived whichever sorted first and printed an
+    ordinary success line. The two bucket names below are the real ones that
+    made "run-2026" ambiguous.
 
-    Source-level: reproducing it needs live S3 with several runs present.
+    Invoked rather than grepped, because a source-level count cannot tell a
+    refusal from a warning followed by carrying on anyway, and the second is
+    the same wrong-run archival with extra output.
     """
-    src = _source()
-    assert src.count("matches more than one") == 2, (
-        "both the per-run-bucket and shared-bucket branches must refuse an ambiguous prefix"
-    )
-    assert "pass a longer prefix" in src
+    with tempfile.TemporaryDirectory() as tmp:
+        root, bindir = _sandbox(tmp)
+        stub = _fake_aws(
+            bindir,
+            per_run=[
+                "sregym-bench-run-20260829-1325-a4d231c1-results",
+                "sregym-bench-run-20260831-1752-2ac5a6ce-results",
+            ],
+        )
+        done = _run_stubbed(["run-2026"], stub, root)
 
-    # The per-run branch must not silently collapse its matches before counting.
-    resolve = src.split("BUCKET_MATCHES=", 1)
-    assert len(resolve) == 2, "per-run bucket lookup should collect every match, not head -1"
+        assert done.returncode == 1, "an ambiguous prefix must stop the script, not just warn"
+        assert "matches more than one per-run bucket" in done.stderr
+        assert "run-20260829-1325-a4d231c1" in done.stderr, "must name every candidate"
+        assert "run-20260831-1752-2ac5a6ce" in done.stderr, "must name every candidate"
+        assert "pass a longer prefix" in done.stderr
+        assert "[archive]" not in done.stdout, "must not begin archiving a run it could not identify"
+
+
+def test_the_shared_bucket_layout_refuses_an_ambiguous_prefix():
+    """Same refusal, other layout: the run id comes from prefixes inside one
+    shared bucket instead of from the bucket name. The two prefixes below are
+    real runs that made "run-20260903" ambiguous."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, bindir = _sandbox(tmp)
+        stub = _fake_aws(
+            bindir,
+            shared="sregym-bench-results-819709950457",
+            prefixes=["run-20260903-0822-4fc0249e", "run-20260903-1144-4fc0249e"],
+        )
+        done = _run_stubbed(["run-20260903"], stub, root)
+
+        assert done.returncode == 1, "an ambiguous prefix must stop the script, not just warn"
+        assert "matches more than one run in" in done.stderr
+        assert "run-20260903-0822-4fc0249e" in done.stderr, "must name every candidate"
+        assert "run-20260903-1144-4fc0249e" in done.stderr, "must name every candidate"
+        assert "pass a longer prefix" in done.stderr
+        assert "[archive]" not in done.stdout, "must not begin archiving a run it could not identify"
+
+
+def test_an_unambiguous_prefix_is_archived_rather_than_refused():
+    """The refusals must fire on more than one match and not on one, which is
+    the ordinary case. Without this, a comparison tightened into refusing
+    everything would pass both tests above."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, bindir = _sandbox(tmp)
+        stub = _fake_aws(bindir, per_run=["sregym-bench-run-20260829-1325-a4d231c1-results"])
+        done = _run_stubbed(["run-20260829"], stub, root)
+
+        assert done.returncode == 0, done.stderr
+        assert "matches more than one" not in done.stderr
+        assert "[archive] results ->" in done.stdout, "a single match should proceed to the sync"
+        # The bucket-name strips either side of the run id are load-bearing.
+        assert (root / "sregym-results" / "run-20260829-1325-a4d231c1").is_dir()
 
 
 def test_lookups_tolerate_failure_but_the_syncs_do_not():
