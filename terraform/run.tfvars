@@ -17,6 +17,14 @@
 # tenant, so it does not move a score. agent_timeout_seconds does move scores,
 # on purpose, and its own note says why. Read the next run as paired with
 # 20260902 on everything except the cap.
+#
+# This run is also not paired with run-20260908-0739-4fc0249e, the most recent
+# scored run at this same problem shape and cap. Three things changed on
+# purpose: the step budget (see brain_env below), the incident window (see
+# clients/brain_go/driver.py), and brain_go_ref. Accepted deliberately rather
+# than deferred, because 18 of that run's 63 attempts never produced a
+# reasoned answer at all (#90), so comparability to it was comparability to
+# a broken measurement, not something worth preserving.
 
 # Four boxes at three slots: 12 slots for 21 problems, two problems deep.
 #
@@ -100,8 +108,58 @@ max_runtime_hours = 6
 # its 90 minute HTTP write timeout whatever the turn timeout says
 # (cmd/brain/internal/chatsvc/wiring.go). 2400s puts the derived turn timeout
 # at 80 minutes, under that ceiling. Above 2700s the ceiling binds first.
+#
+# Left unchanged for #90 despite the step-budget increase below: measured
+# across run-20260908-0739-4fc0249e's 63 attempts, TTL (time to diagnosis) was
+# min 114s / median 268s / max 420s, and TTM (time to mitigation) was min
+# 240s / median 436s / max 871s. No attempt came within 1,500s of this cap, so
+# it was never the binding constraint and raising it further buys nothing.
 agent_timeout_seconds = 2400
 
+# What actually ends an investigation is brain-go's own
+# CHAT_SERVICE_RCI_RECURSION_LIMIT, default 100, which no run has overridden
+# before this one. 200 is the issue's suggested figure (#90): the attempts
+# that spend the whole default budget in the planner's tool loop are the
+# ones that end with no diagnosis at all (NOFireAI/brain-go#2848), and this
+# alone only delays that collapse rather than fixing it, so it is worth
+# measuring in the same run as #2848 lands, not before.
+#
+# This is a brain-go knob, not a harness one, so it goes through brain_env
+# rather than a tfvars value of its own; agent_timeout_seconds above is the
+# harness's separate wall-clock cap and stays put.
+brain_env = {
+  CHAT_SERVICE_RCI_RECURSION_LIMIT = "200"
+}
+
+# The incident window's own width no longer derives from agent_timeout_seconds
+# (clients/brain_go/driver.py, BRAIN_INCIDENT_WINDOW_SECONDS, default 480s).
+# It used to: a 2400s agent_timeout_seconds produced a 40-minute window, and
+# brain-go derives baselineStart = start - (end-start)*3, landing the baseline
+# 2 hours before the fault, before the kind cluster existed, so every baseline
+# comparison came back empty. The two settings were never independently
+# adjustable through tfvars alone -- driver.py read the same
+# AGENT_TIMEOUT_SECONDS env var for both the harness cap and the window --
+# so shortening the window without also shrinking the cap (and reintroducing
+# the censoring agent_timeout_seconds was raised to avoid, see above) needed
+# a driver.py change, not a tfvars value. No line here as a result.
+#
+# 480s narrows the baseline to 24 minutes before the fault, which is a large
+# improvement and not a fix. On the first problem a slot runs there are only
+# about 229 seconds of cluster-up time before the fault (measured on
+# run-20260908-0739-4fc0249e shard-0 slot-0: process start 07:44:47, fault
+# 07:48:35), so a baseline three widths back lands inside the cluster's
+# lifetime only for a window under 76 seconds, too narrow to hold a usable
+# incident period. For the first problem in each slot, roughly 12 of this
+# run's 21, the baseline still predates the cluster. Second and later
+# problems in a slot are fine: the cluster is already built by then.
+# Closing the remainder needs a settle period before the first fault, or
+# brain-go clamping baselineStart to when it first saw the cluster, and
+# neither is this value's job.
+#
+# BRAIN_INCIDENT_WINDOW_SECONDS reads from the process environment, so a
+# future run that needs a different width can set it in the shell that runs
+# the driver; it is not yet threaded through terraform, since nothing has
+# needed a per-run value yet.
 noise = false
 
 # gp3's 125 MB/s baseline is shared by every slot on the box, and image pulls
@@ -132,3 +190,32 @@ instance_profile_name = "sregym-benchmark-instance-profile"
 # provisioned IOPS, so small-block layer writes throttle near 48 MB/s across
 # 12 containerd stores. 16000 is the gp3 max and costs ~$1.25 for this run.
 disk_iops = 16000
+
+# Pinned, where run-20260908-0739-4fc0249e left brain_go_ref unset and floated
+# on "main" resolved at each instance's boot. At that run's sha, a signal
+# agent whose every tool call failed still asked the model for an evidence
+# report, and the aggregator folded the result into the run-wide citable
+# evidence list; about 3.5% of that run's MCP calls failed, so some of its 45
+# scored attempts may cite fabricated evidence. brain-go commit 063119c2
+# gates that (NOFireAI/brain-go#2549).
+#
+# Pinned to a sha rather than left on "main" so the run records what it
+# measured, but deliberately not to 063119c2 itself. That commit predates two
+# changes this run exists to measure: b81d2918 stops the secret-redaction
+# marker reading as broken config, which accounted for 4 attempts across 3
+# problems in the last run, and 5ff00330 adds the counter that makes a gated
+# evidence report countable at all. Pinning behind them would measure neither.
+#
+# The recursion-budget confound that argues for the earlier pin does not exist
+# on this path. main's "agentflow: increase recursion limit (#2815) (#2820)"
+# raises AgentRecursionLimit, which chatflow/limits.go documents as capping an
+# agent child workflow's super-steps. The RCI graph has its own separate
+# budget, Limits.RCI from CHAT_SERVICE_RCI_RECURSION_LIMIT, which is the one
+# raised above. FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI turn
+# straight to RCI, so the agent branch #2815 touches is never taken here.
+#
+# This value must be bumped again before the run to include brain-go#2848, the
+# planner-evidence fix, which is the reason the run is worth doing: without it
+# 18 of 63 attempts submit boilerplate after gathering real evidence. Pinning
+# now records the intent; the sha below is current main and is not final.
+brain_go_ref = "5ff00330"
