@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import contextlib
 import csv
+import functools
 import importlib
 import json
 import logging
@@ -14,6 +15,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+import requests
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -187,11 +189,62 @@ def _token_snapshot(out: Path) -> None:
         console.log(f"⚠️  token snapshot failed (non-fatal): {type(exc).__name__}: {exc}")
 
 
-def _token_delta(before: Path, after: Path) -> dict[str, int]:
+@functools.cache
+def _brain_account_id() -> str:
+    """The brain-go account this slot spends against, or "" if unreadable.
+
+    Every slot on a box shares one brain-go process whose LLM counters are
+    process-wide, so a per-attempt delta has to be narrowed to the slot's own
+    tenant or it also reports the other slots' spend (token_delta.py).
+    seed_slot.sh creates that tenant per slot and exports the owner session
+    that authenticates as it; GET /api/users/me answers with the account id
+    behind the session, so the id needs no new bookkeeping of its own.
+
+    The session's account is the API key's account too: both come from one
+    `brainctl seed dev-stack` call, and clients/brain_go/driver.py's
+    confirm_persisted logs NOT PERSISTED on every problem if they ever
+    diverge.
+
+    Cached because the tenant is seeded before the run starts and cannot
+    change under it, while this sits on the per-attempt path.
+
+    "" means "sum every account", which is right for a box running one slot
+    and inflated for a box running several, so an unreadable id logs. The
+    unset case is not an error: every agent other than brain_go runs with no
+    brain-go tenant at all.
+    """
+    base = os.environ.get("BRAIN_ADMIN_API_URL", "").rstrip("/")
+    session = os.environ.get("BRAIN_SESSION", "")
+
+    if not base or not session:
+        return ""
+
+    try:
+        resp = requests.get(f"{base}/api/users/me", cookies={"session": session}, timeout=30)
+        if not resp.ok:
+            console.log(f"⚠️  could not read the brain-go account id: GET /api/users/me returned {resp.status_code}")
+
+            return ""
+
+        account_id = (resp.json().get("user") or {}).get("account_id")
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        console.log(f"⚠️  could not read the brain-go account id: {type(exc).__name__}: {exc}")
+
+        return ""
+
+    if not account_id:
+        console.log("⚠️  GET /api/users/me carried no account_id; per-attempt tokens will cover every slot on this box")
+
+        return ""
+
+    return str(account_id)
+
+
+def _token_delta(before: Path, after: Path, account_id: str = "") -> dict[str, int]:
     """What the attempt spent, or an empty dict if it cannot be known."""
     try:
         done = subprocess.run(
-            [sys.executable, str(_TOKEN_DELTA), "delta", str(before), str(after)],
+            [sys.executable, str(_TOKEN_DELTA), "delta", str(before), str(after), *_account_args(account_id)],
             check=False,
             capture_output=True,
             text=True,
@@ -205,7 +258,17 @@ def _token_delta(before: Path, after: Path) -> dict[str, int]:
     return {}
 
 
-def _token_delta_by_node(before: Path, after: Path) -> dict[str, dict[str, int]]:
+def _account_args(account_id: str) -> list[str]:
+    """The --account flag for token_delta.py, or nothing when the id is unknown.
+
+    Omitted rather than passed empty: token_delta.py reads an empty account id
+    as "every account", and an explicit `--account ""` would rely on that
+    rather than state it.
+    """
+    return ["--account", account_id] if account_id else []
+
+
+def _token_delta_by_node(before: Path, after: Path, account_id: str = "") -> dict[str, dict[str, int]]:
     """The same attempt's spend, broken out by brain-go's own RCI node
     attribution (brain-go#2687), or an empty dict if it cannot be known.
 
@@ -216,7 +279,7 @@ def _token_delta_by_node(before: Path, after: Path) -> dict[str, dict[str, int]]
     """
     try:
         done = subprocess.run(
-            [sys.executable, str(_TOKEN_DELTA), "delta-by-node", str(before), str(after)],
+            [sys.executable, str(_TOKEN_DELTA), "delta-by-node", str(before), str(after), *_account_args(account_id)],
             check=False,
             capture_output=True,
             text=True,
@@ -242,6 +305,38 @@ def _write_token_usage_by_node(active_dir: Path, by_node: dict[str, dict[str, in
         (active_dir / "token-usage-by-node.json").write_text(json.dumps(by_node, indent=2, sort_keys=True))
     except OSError as exc:
         console.log(f"⚠️  could not write token usage by node (non-fatal): {type(exc).__name__}: {exc}")
+
+
+def _record_token_columns(snapshot: dict[str, object], before: Path, after: Path, active_dir: Path) -> None:
+    """Put one attempt's token columns on its row and its node breakdown on
+    disk, both narrowed to this slot's own brain-go tenant.
+
+    The counters behind the delta belong to one brain-go process, shared by
+    every slot on the box, so the account id is what keeps the neighbours'
+    spend out of this attempt's row.
+
+    tokens_account_id records which account did the narrowing, and is empty
+    when none could be read. That case is not an error and must not cost a run
+    its result, so it degrades to summing every account, which is right on a
+    one-slot box and inflated on a shared one. Without the column the
+    degradation is invisible in the archive: the warning goes to the slot log,
+    the lookup is cached for the life of the process, so one failed lookup at
+    startup silently reverts that slot's whole run while its neighbours stay
+    narrowed. The column lets a reader of the archived CSV tell an attributed
+    row from an inflated one.
+
+    Extracted from the row construction so it can be tested. The code around
+    it drives a live Conductor, which this suite has no cluster for.
+    """
+    account_id = _brain_account_id()
+    snapshot["tokens_account_id"] = account_id
+
+    for name, count in _token_delta(before, after, account_id).items():
+        # llm_calls rather than calls, so a column name says which calls it
+        # counts. Tool calls are a different number.
+        snapshot["llm_calls" if name == "calls" else f"tokens_{name}"] = count
+
+    _write_token_usage_by_node(active_dir, _token_delta_by_node(before, after, account_id))
 
 
 def _tool_calls(active_dir: Path) -> dict[str, int]:
@@ -613,11 +708,7 @@ def driver_loop(
                     snapshot[name] = count
                 tokens_after = run.active_dir / "tokens-after.prom"
                 _token_snapshot(tokens_after)
-                for name, count in _token_delta(tokens_before, tokens_after).items():
-                    # llm_calls rather than calls, so a column name says which
-                    # calls it counts. Tool calls are a different number.
-                    snapshot["llm_calls" if name == "calls" else f"tokens_{name}"] = count
-                _write_token_usage_by_node(run.active_dir, _token_delta_by_node(tokens_before, tokens_after))
+                _record_token_columns(snapshot, tokens_before, tokens_after, run.active_dir)
                 for stage, outcome in conductor.results.items():
                     if isinstance(outcome, dict):
                         for k, v in outcome.items():

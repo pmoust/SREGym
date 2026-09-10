@@ -5,9 +5,15 @@ attribution was by thread name (scrape_tokens.sh: "driver.py sets it to
 cli:sregym-<problem_id>-<hex8>, so one scrape attributes tokens to problems"),
 and that stopped holding when the driver started using the investigation's own
 thread, cli:inv-<uuid>. Bracketing an attempt does not depend on a name.
+
+Bracketing alone is not enough either: one brain-go process serves every slot
+on a box and its counters are process-wide, so the window holds the other
+slots' spend too. account_id is the label that separates them, one account per
+slot, and thread_id still is not: it varies inside a single attempt.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -25,11 +31,56 @@ def _prom(tmp_path, name, lines):
     return path
 
 
-def _sample(thread, token_type, value, node="unknown"):
+def _sample(thread, token_type, value, node="unknown", account="2"):
     return (
-        f'llm_tokens_total{{account_id="2",model="m",node="{node}",provider="bedrock",'
+        f'llm_tokens_total{{account_id="{account}",model="m",node="{node}",provider="bedrock",'
         f'thread_id="{thread}",token_type="{token_type}",user_id="unknown"}} {value}'
     )
+
+
+def _calls(thread, value, node="unknown", account="2"):
+    return (
+        f'llm_calls_total{{account_id="{account}",model="m",node="{node}",provider="bedrock",'
+        f'thread_id="{thread}",user_id="unknown"}} {value}'
+    )
+
+
+def _three_slots(tmp_path):
+    """One box's scrape pair with three slots on it, one account each.
+
+    Matches the label shape of run-20260908-0739-4fc0249e's
+    shard-3/logs/sregym-tokens.prom, which carries account_id 2, 3 and 4 and
+    15 distinct thread_id values. Account 2 spends 250 input over two threads
+    and makes 3 calls; the file holds 1,150 input and 33 calls in total.
+    """
+    before = _prom(
+        tmp_path,
+        "b.prom",
+        [
+            _sample("cli:inv-aaa", "input", "100"),
+            _sample("cli:inv-bbb", "input", "0"),
+            _calls("cli:inv-aaa", "2"),
+            _sample("cli:inv-ccc", "input", "500", account="3"),
+            _calls("cli:inv-ccc", "10", account="3"),
+            _sample("cli:inv-ddd", "input", "700", account="4"),
+            _calls("cli:inv-ddd", "20", account="4"),
+        ],
+    )
+    after = _prom(
+        tmp_path,
+        "a.prom",
+        [
+            _sample("cli:inv-aaa", "input", "300"),
+            _sample("cli:inv-bbb", "input", "50"),
+            _calls("cli:inv-aaa", "5"),
+            _sample("cli:inv-ccc", "input", "900", account="3"),
+            _calls("cli:inv-ccc", "20", account="3"),
+            _sample("cli:inv-ddd", "input", "1200", account="4"),
+            _calls("cli:inv-ddd", "40", account="4"),
+        ],
+    )
+
+    return before, after
 
 
 def test_the_delta_is_what_the_attempt_spent(tmp_path):
@@ -183,3 +234,100 @@ def test_delta_by_node_is_reachable_from_the_cli(tmp_path):
     after = _prom(tmp_path, "a.prom", [_sample("t1", "input", "15", node="diagnosis")])
 
     assert token_delta.main(["token_delta.py", "delta-by-node", str(before), str(after)]) == 0
+
+
+def test_only_the_requested_account_is_counted(tmp_path):
+    """Three slots share one brain-go process and its process-wide counters,
+    one account each, so an attempt's own figure is one account's.
+
+    The account's spend is spread over two threads and both are counted, which
+    is why the filter cannot be thread_id: one attempt carried 15 of them on
+    the run this fixture copies.
+    """
+    before, after = _three_slots(tmp_path)
+
+    assert token_delta.delta(before, after, "2") == {
+        "calls": 3,
+        "input": 250,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+    }
+
+
+def test_without_an_account_every_slot_on_the_box_is_summed(tmp_path):
+    """The single-slot case, and what the per-attempt columns used to report
+    for every box: 1,150 input against the one attempt's own 250."""
+    before, after = _three_slots(tmp_path)
+
+    assert token_delta.delta(before, after)["input"] == 1_150
+    assert token_delta.delta(before, after)["calls"] == 33
+
+
+def test_the_per_account_deltas_add_up_to_the_unfiltered_one(tmp_path):
+    """The filter partitions the samples, so nothing is double counted and
+    nothing is dropped. Holds on run-20260908-0739-4fc0249e's shard-3 scrape
+    too: 273 + 106 + 263 calls per account against 642 unfiltered."""
+    before, after = _three_slots(tmp_path)
+    per_account = [token_delta.delta(before, after, account) for account in ("2", "3", "4")]
+    unfiltered = token_delta.delta(before, after)
+
+    assert {key: sum(d[key] for d in per_account) for key in unfiltered} == unfiltered
+
+
+def test_a_sample_with_no_account_label_is_left_out_of_a_filtered_delta(tmp_path):
+    """Nothing says an unlabelled sample is this account's, and attributing
+    another slot's spend is worse than missing a scrape's own."""
+    before = _prom(tmp_path, "b.prom", [_sample("t1", "input", "100"), 'llm_tokens_total{token_type="input"} 5'])
+    after = _prom(tmp_path, "a.prom", [_sample("t1", "input", "150"), 'llm_tokens_total{token_type="input"} 55'])
+
+    assert token_delta.delta(before, after, "2")["input"] == 50
+    assert token_delta.delta(before, after)["input"] == 100
+
+
+def test_delta_by_node_counts_one_account_on_a_shared_node(tmp_path):
+    """Node does not separate slots: every slot's calls land on the same node
+    labels, so token-usage-by-node.json needs the account filter as much as
+    the flat total does."""
+    before = _prom(
+        tmp_path,
+        "b.prom",
+        [_sample("t1", "input", "0", node="diagnosis"), _sample("t9", "input", "0", node="diagnosis", account="3")],
+    )
+    after = _prom(
+        tmp_path,
+        "a.prom",
+        [_sample("t1", "input", "30", node="diagnosis"), _sample("t9", "input", "900", node="diagnosis", account="3")],
+    )
+
+    assert token_delta.delta_by_node(before, after, "2")["diagnosis"]["input"] == 30
+    assert token_delta.delta_by_node(before, after)["diagnosis"]["input"] == 930
+
+
+def test_a_node_only_another_account_touched_is_absent_from_a_filtered_delta(tmp_path):
+    """A node this attempt never used must not appear in its breakdown at
+    all, rather than appearing as a row of zeros."""
+    before = _prom(tmp_path, "b.prom", [_sample("t9", "input", "0", node="changes", account="3")])
+    after = _prom(tmp_path, "a.prom", [_sample("t9", "input", "900", node="changes", account="3")])
+
+    assert token_delta.delta_by_node(before, after, "2") == {}
+
+
+def test_the_account_reaches_delta_through_the_cli(tmp_path, capsys):
+    """main.py shells out rather than importing, so the flag has to survive
+    the CLI as well as the function call."""
+    before, after = _three_slots(tmp_path)
+
+    assert token_delta.main(["token_delta.py", "delta", str(before), str(after), "--account", "2"]) == 0
+    assert json.loads(capsys.readouterr().out)["input"] == 250
+
+    assert token_delta.main(["token_delta.py", "delta-by-node", str(before), str(after), "--account", "2"]) == 0
+    assert json.loads(capsys.readouterr().out)["unknown"]["input"] == 250
+
+
+def test_snapshot_refuses_an_account(tmp_path):
+    """One scrape carries every account the process serves, so an --account
+    there would filter nothing. Refused with the usage message rather than
+    accepted and ignored."""
+    assert token_delta.main(["token_delta.py", "snapshot", str(tmp_path / "out.prom"), "--account", "2"]) == 2
+    assert not (tmp_path / "out.prom").exists()

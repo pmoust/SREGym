@@ -143,12 +143,12 @@ EC2_HOURLY_RATE_USD = 1.6934
 # prices at 1/50th of output, so a single blended figure would misprice any
 # run whose mix differs from this one's.
 #
-# Do not compute this figure from the result CSVs' own tokens_* columns: they
-# are inflated roughly 2.41x by concurrent-slot contamination (see
-# token_delta.py's module docstring). These four are run-20260908-0739-4fc0249e's
+# Do not compute this figure from run-20260908-0739-4fc0249e's own tokens_*
+# columns: that run predates the per-account filter in token_delta.py, so they
+# are inflated roughly 2.41x by the other slots on each box. These four are its
 # whole-run totals -- input 1,451,168, output 2,220,044, cache_write
 # 20,143,259, cache_read 176,035,499 -- divided by its 63 attempts, and the
-# whole-run figure is the one this bug does not touch.
+# whole-run figure is the one that inflation never touched.
 #
 # One clean run is one data point. Update this, not just widen it into a
 # range, once a second run gives a second point to compare against.
