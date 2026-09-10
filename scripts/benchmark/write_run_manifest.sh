@@ -52,6 +52,27 @@ if want:
 print(' '.join(ids))
 " 2>/dev/null) || PROBLEMS_RESOLVED=""
 
+# What each seeded connection was tagged with, read straight from
+# seed_connections.py's ENDPOINTS rather than copied here, so this cannot drift
+# from what actually got seeded. This is the harness's own side of the toolset
+# a run had: which MCP endpoint became which CUSTOM_MCP connection, and which
+# investigation bucket(s) it was registered under.
+#
+# It is not the resolved per-node toolset. Which tools a given RCI node (state,
+# metrics, logs, traces) actually binds on a turn depends on brain-go's own
+# logic -- nodeBucket and BuildCustomTools's bucket filter in
+# internal/chat/tools/registry.go, and DefaultBucketForKind in
+# internal/core/domain/connection.go -- which this script has no view into and
+# must not guess at: a copy here would silently drift the first time that logic
+# changes. Recovering the per-node toolset for a specific run still means
+# reading those three functions at the run's brain_go_sha and checking
+# tool-calls.json, the way this field's own reasoning was worked out.
+SEEDED_CONNECTION_BUCKETS=$(uv run python -c "
+from scripts.benchmark.seed_connections import ENDPOINTS
+
+print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
+" 2>/dev/null) || SEEDED_CONNECTION_BUCKETS=""
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -82,6 +103,10 @@ print(' '.join(ids))
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"
   echo "brain_go_sha=${BRAIN_GO_SHA:-}"
+  # kind:bucket[+bucket](,kind:bucket...) for each CUSTOM_MCP connection this
+  # run seeded. See the comment above SEEDED_CONNECTION_BUCKETS for what this
+  # does and does not tell a reader about a node's actual bound toolset.
+  echo "seeded_connection_buckets=$SEEDED_CONNECTION_BUCKETS"
 
   # Which stages ran, derived rather than asserted. sregym/conductor/tasklist.yml
   # selects stages per problem (diagnosis, mitigation, in that order); with no
