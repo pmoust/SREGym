@@ -130,8 +130,7 @@ log "registering four CUSTOM_MCP connections"
 # plain `uv run` resolves its project from the wrong directory and silently
 # falls back to a Python with none of this repo's dependencies installed --
 # confirmed directly (ModuleNotFoundError: requests, a real, declared
-# dependency that uv sync had already installed). setup_brain_go.sh has the
-# identical bug for the identical reason.
+# dependency that uv sync had already installed).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SREGYM_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \

@@ -97,6 +97,7 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "sregym_ref",
         "brain_go_ref",
         "stages",
+        "seeded_connection_buckets",
     ):
         assert fields.get(key), f"{key} is empty; an assignment is not reaching the script"
 
@@ -264,6 +265,21 @@ def test_the_manifest_leaves_problems_empty_when_the_selection_does_not_resolve(
     # A field with no dependency on problem selection: proves the rest of
     # the manifest still wrote rather than the whole script bailing out.
     assert fields.get("stages") == "diagnosis,mitigation"
+
+
+def test_the_manifest_records_the_buckets_seed_connections_actually_seeds(tmp_path):
+    """seeded_connection_buckets must track ENDPOINTS, not a copy of it.
+
+    Reads ENDPOINTS from seed_connections.py itself, the same source
+    write_run_manifest.sh reads from, so a bucket reassigned there is caught
+    here rather than by a hand-maintained expectation quietly going stale.
+    """
+    from scripts.benchmark.seed_connections import ENDPOINTS
+
+    fields = _write_manifest(tmp_path, "sregym-lite")
+
+    expected = ",".join(f"{path}:{'+'.join(buckets)}" for _, path, buckets, _ in ENDPOINTS)
+    assert fields["seeded_connection_buckets"] == expected
 
 
 def test_the_shard_handoff_is_declared_once():

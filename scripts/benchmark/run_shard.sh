@@ -96,9 +96,10 @@ export JUDGE_MODEL_ID="$JUDGE_MODEL"
 export AWS_DEFAULT_REGION="$REGION"
 
 # Every SREGYM_* intervention stays off. They exist to work around a 24 GB ARM
-# laptop and they are why engineering#799's numbers cannot be read. SETTLE_SECONDS
-# defaults to 180, so leaving it unset is not the same as turning it off.
-export SREGYM_SETTLE_SECONDS=0
+# laptop and they are why engineering#799's numbers cannot be read.
+# SREGYM_SETTLE_SECONDS is not among them here: this shard hardcodes
+# `--agent brain_go` below, and clients/brain_go/driver.py never reads that
+# variable (only clients/brain/driver.py, the Python driver, does).
 unset SREGYM_WAIT_FAULT_EVENT SREGYM_WAIT_EDGE_SYNC SREGYM_STELLARIZE \
       SREGYM_STABILIZE_PODS SREGYM_GATE_SKIP SREGYM_BASELINE_SYNC_SECONDS \
       SREGYM_SKIP_JUDGE_PREFLIGHT

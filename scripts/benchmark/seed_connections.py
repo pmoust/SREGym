@@ -36,6 +36,22 @@ from mcp.client.sse import sse_client
 # endpoints are `observation` so they reach the metrics/logs/traces agents. The
 # kubectl endpoint tracks per-session rollback history via the `sregym_ssid`
 # header, so a stable session id is pinned on that connection.
+#
+# This split is narrower than brain-go's own default, and that is the point,
+# not a gap to close later. DefaultBucketForKind
+# (internal/core/domain/connection.go) gives a CUSTOM_MCP connection both
+# `observation` and `state` by default. BuildCustomTools
+# (internal/app/custom_tool_builder.go) filters a connection's tools into a
+# node by bucket membership alone, and nodeBucket
+# (internal/chat/tools/registry.go) maps the metrics/logs/traces nodes to
+# `observation` and the state node to `state`. Tagging kubectl with both
+# buckets to match that default would hand rollback_command, a mutating tool,
+# to the metrics, logs and traces agents during diagnosis, on a benchmark
+# graded from live cluster state. It would also make each of the four
+# endpoints (3 kubectl + 2 prometheus + 4 jaeger + 3 loki tools) match every
+# node's bucket filter, so metrics, logs, traces and state would all bind the
+# same 12 tools and the signal partition the benchmark depends on would be
+# gone.
 ENDPOINTS: list[tuple[str, str, list[str], bool]] = [
     ("sregym-kubectl", "kubectl", ["state"], True),
     ("sregym-prometheus", "prometheus", ["observation"], False),
