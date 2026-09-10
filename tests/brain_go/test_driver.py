@@ -304,7 +304,7 @@ def test_brain_go_can_parse_the_window_out_of_the_prompt(monkeypatch, template):
     from/to match fails because something follows the window, or an anchor
     does not parse. Each leaves no error anywhere.
     """
-    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
+    monkeypatch.setenv("BRAIN_INCIDENT_WINDOW_SECONDS", "2400")
     prompt = _rendered(getattr(driver, template), driver.incident_window(_INJECTED_AT.timestamp()))
 
     assert _EXPLICIT_TIME.search(prompt), "hasExplicitTimeReference would not fire"
@@ -320,17 +320,30 @@ def test_brain_go_can_parse_the_window_out_of_the_prompt(monkeypatch, template):
     ]
 
 
-def test_the_window_ends_one_agent_budget_after_the_fault(monkeypatch):
+def test_the_window_ends_one_window_budget_after_the_fault(monkeypatch):
     """brain-go freezes a thread's window on turn 1, so the end has to cover
     the whole investigation rather than the moment the prompt was built.
 
     Measured from the rounded start, not from the fault, so the window is a
     full budget long rather than a budget minus the rounding.
     """
-    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("BRAIN_INCIDENT_WINDOW_SECONDS", "600")
     window = driver.incident_window(_INJECTED_AT.timestamp())
 
     assert "between 2026-09-02T06:28 and 2026-09-02T06:38" in window
+
+
+def test_the_window_is_independent_of_the_agent_timeout(monkeypatch):
+    """AGENT_TIMEOUT_SECONDS bounds the harness wall clock; it must not also
+    size the window, or a cap raised to avoid censoring an attempt (see
+    run.tfvars) silently pushes the baseline before the cluster existed.
+    """
+    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
+    monkeypatch.delenv("BRAIN_INCIDENT_WINDOW_SECONDS", raising=False)
+    window = driver.incident_window(_INJECTED_AT.timestamp())
+
+    # The default width (8 minutes), not 2400s worth of window.
+    assert "between 2026-09-02T06:28 and 2026-09-02T06:36" in window
 
 
 def test_the_window_bounds_carry_no_seconds_and_no_zulu_suffix(monkeypatch):
@@ -344,7 +357,7 @@ def test_the_window_bounds_carry_no_seconds_and_no_zulu_suffix(monkeypatch):
     model rather than for the parser, and sits before the word "between" where
     it cannot reach the match.
     """
-    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "2400")
+    monkeypatch.setenv("BRAIN_INCIDENT_WINDOW_SECONDS", "2400")
     window = driver.incident_window(_INJECTED_AT.timestamp())
     match = re.search(r"between (\S+) and (\S+)", window)
 
@@ -385,7 +398,7 @@ def test_the_window_never_starts_before_the_fault(monkeypatch, injected, expecte
     brain-go's token pattern has no seconds field, so minute precision is the
     only option and the only choice is which way to round.
     """
-    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "1800")
+    monkeypatch.setenv("BRAIN_INCIDENT_WINDOW_SECONDS", "1800")
     moment = datetime.datetime(*injected, tzinfo=datetime.UTC)
     window = driver.incident_window(moment.timestamp())
 
@@ -402,7 +415,7 @@ def test_the_prose_carries_the_exact_instant_the_window_cannot(monkeypatch):
     """The window is minute-rounded for brain-go's parser; the model reading
     the prose has no such limit, and the true instant is better for the tool
     calls it makes itself."""
-    monkeypatch.setenv("AGENT_TIMEOUT_SECONDS", "1800")
+    monkeypatch.setenv("BRAIN_INCIDENT_WINDOW_SECONDS", "1800")
     window = driver.incident_window(datetime.datetime(2026, 9, 2, 20, 35, 38, tzinfo=datetime.UTC).timestamp())
 
     assert "introduced at 2026-09-02T20:35:38 UTC" in window

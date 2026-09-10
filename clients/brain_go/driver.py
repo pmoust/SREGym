@@ -512,6 +512,32 @@ def confirm_persisted(investigation_uuid: str) -> None:
 INCIDENT_WINDOW_FMT = "%Y-%m-%dT%H:%M"
 
 
+def _window_seconds() -> int:
+    """BRAIN_INCIDENT_WINDOW_SECONDS, or 480 when unset or unusable.
+
+    Falling back rather than raising: an unusable value is a deployment
+    mistake, and failing the whole attempt over the width of a prompt sentence
+    would cost more than using the default and saying so.
+    """
+    raw = os.environ.get("BRAIN_INCIDENT_WINDOW_SECONDS", "").strip()
+    if not raw:
+        return 480
+
+    try:
+        seconds = int(raw)
+    except ValueError:
+        logger.warning("BRAIN_INCIDENT_WINDOW_SECONDS=%r is not an integer; using 480", raw)
+
+        return 480
+
+    if seconds <= 0:
+        logger.warning("BRAIN_INCIDENT_WINDOW_SECONDS=%d is not positive; using 480", seconds)
+
+        return 480
+
+    return seconds
+
+
 def incident_window(incident_start: float | None) -> str:
     """The window sentence to append to a prompt, or "" when unknown.
 
@@ -519,23 +545,45 @@ def incident_window(incident_start: float | None) -> str:
     one-hour default, which is the behaviour before this existed. A wrong
     window would be worse than no window, because it would look deliberate.
 
-    The window ends one agent budget after the fault, not "now". brain-go
-    freezes a thread's window on the first turn, so an end at turn time would
-    be seconds wide and everything the agent queried afterwards would fall
-    outside it. The budget is what bounds the investigation, so it is the
-    honest end.
+    The window ends one BRAIN_INCIDENT_WINDOW_SECONDS budget after the fault,
+    not "now". brain-go freezes a thread's window on the first turn, so an
+    end at turn time would be seconds wide and everything the agent queried
+    afterwards would fall outside it.
 
-    One consequence worth knowing: brain-go derives baseline_start as
-    start - (end - start) * 3, so a 40 minute window puts the baseline two
-    hours before the fault, which is before the cluster existed. The baseline
-    is then empty rather than wrong. Tightening the window would buy a
-    populated baseline at the cost of the incident window not covering the
-    investigation, which is the worse trade.
+    That width is deliberately its own setting, not AGENT_TIMEOUT_SECONDS.
+    brain-go derives baseline_start as start - (end - start) * 3, so tying the
+    window to a harness budget large enough to not censor an attempt (2400s,
+    see AGENT_TIMEOUT_SECONDS in run.tfvars) put the baseline 2 hours before
+    the fault. The investigation needs nowhere near that much room: median
+    time-to-mitigation in run-20260908-0739-4fc0249e was 436s.
+
+    480s (8 minutes) narrows the baseline to 24 minutes before the fault. That
+    is a large improvement and it is not a fix, which is worth saying plainly
+    rather than implying otherwise. On the first problem a slot runs there are
+    only about 229 seconds of cluster-up time before the fault is injected
+    (measured on run-20260908-0739-4fc0249e shard-0 slot-0: process start
+    07:44:47, fault 07:48:35), so a baseline three window-widths back lands
+    inside the cluster's lifetime only if the window is under 76 seconds,
+    which is too narrow to hold a usable incident period. For the first
+    problem in each slot, roughly 12 of this run's 21, the baseline still
+    predates the cluster and comes back empty.
+
+    Second and later problems in the same slot are fine, because the cluster
+    is already built: a fault at 08:18:26 gives a baseline at 07:54:26,
+    comfortably after the 07:44 cluster-ready time.
+
+    Closing the remainder is not this setting's job. It needs either a settle
+    period before the first fault injection, or brain-go clamping
+    baseline_start to when it first saw the cluster.
     """
     if not incident_start:
         return ""
 
-    budget = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "1800") or 1800)
+    # Guarded rather than a bare int(): this is a measurement knob, and a
+    # non-integer would crash a run at its first prompt while a zero or
+    # negative would silently produce a zero-width or inverted window, which
+    # reads as a deliberate choice downstream.
+    budget = _window_seconds()
     injected = datetime.datetime.fromtimestamp(incident_start, datetime.UTC)
 
     # Round the window start UP, never down.
