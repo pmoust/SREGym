@@ -170,15 +170,18 @@ def _per_problem_tokens(rows: list[dict]) -> list[dict]:
     counters are labelled by thread and the driver's thread is the
     investigation's cli:inv-<uuid>, which carries no problem id.
 
-    WARNING: every tokens_*/llm_calls figure this returns is inflated, by
-    about 2.41x measured on run-20260908-0739-4fc0249e. brain-go runs one
-    shared stack per box across every slot, and its Prometheus counters are
-    process-wide, so token_delta.py's bracketing of one attempt also captures
-    whatever every other slot on the same box spent concurrently. tool_calls
-    is not affected -- the driver counts those off its own SSE stream, not a
-    shared counter. See token_delta.py's module docstring for how the 2.41x
-    was measured, and use tokens()'s whole-run total below for a trustworthy
-    figure instead of summing this table.
+    That delta is the attempt's own when it was filtered to the slot's brain-go
+    tenant, which a row records in tokens_account_id. A row without one is
+    inflated: brain-go serves every slot on a box from one process with
+    process-wide counters, so bracketing one attempt also captured what the
+    other slots spent concurrently: a median 2.4x across
+    run-20260908-0739-4fc0249e's 63 attempts, and up to 49x on tokens_input
+    for one whose own spend was small. That extreme is that column's; llm
+    topped out at 4.6x and the other token columns between 9.6x and 14.5x. No
+    single divisor corrects a row. For such a row use tokens()'s whole-run
+    total below instead of summing this
+    table. tool_calls was never affected either way, because the driver counts
+    those off its own SSE stream rather than a shared counter.
 
     Rows with no token columns are skipped rather than reported as zero, so an
     older archive reads as unmeasured instead of free.
@@ -708,11 +711,13 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
         out.append("  A row of zeros means the counters did not move, not that they were")
         out.append("  unmeasured: an attempt recording none of these is omitted here.")
         out.append("")
-        out.append("  WARNING: llm and every token column above (not tool) are inflated by")
-        out.append("  about 2.41x: brain-go's counters are shared by every slot on the same")
-        out.append("  box, and this table brackets by wall-clock time, not by slot, so a")
-        out.append("  concurrent slot's spend leaks into these rows. The Tokens total above,")
-        out.append("  from the whole-run scrape, is not affected and is the number to trust.")
+        out.append("  llm and every token column above (not tool) come from each attempt's")
+        out.append("  before/after counter delta, narrowed to the slot's own brain-go tenant")
+        out.append("  when the row records a tokens_account_id. Without one a concurrent")
+        out.append("  slot's spend leaks in, a median 2.4x and up to 49x on tokens_input for")
+        out.append("  one attempt, less on the other columns; there,")
+        out.append("  use the Tokens total above, from the whole-run scrape, which is")
+        out.append("  unaffected.")
 
     out.append("")
     out.append(
