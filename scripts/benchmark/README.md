@@ -284,6 +284,18 @@ on its own — treat it as a rough estimate, not a precise score. That is a
 fact about how much data exists, not a sign the run went wrong. Add
 `--json` to either script for machine-readable output.
 
+**What the token scrape archives.** `scrape_tokens.sh` writes
+`sregym-tokens.prom` into a shard's log tree from brain-go's two metrics
+endpoints (chat on `:9091`, tworker on `:9092`). It runs from `sync_logs`, so
+it fires on the 60s watcher and on every exit path, and the last write wins. It
+keeps a prefix allowlist, today `llm_`, `custom_mcp_` and `rci_`, and drops
+the rest of the payload, including the `go_*` and `process_*` runtime series
+that would otherwise be repeated in every per-attempt archive. A brain-go
+counter whose name falls outside those prefixes never reaches the archive, so
+widen `KEEP` in that script in the same change that adds the counter. Every
+run archived so far took all of its samples from tworker; the chat endpoint
+answered each time and contributed none.
+
 ## Picking which problems to test
 
 `--problems` (in `experiment.sh`) takes a comma-separated mix of named sets

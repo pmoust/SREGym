@@ -48,13 +48,30 @@ OUT="${1:-/var/log/sregym-tokens.prom}"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
+# Which samples are kept from each /metrics payload. This is an allowlist, not
+# a passthrough: brain-go's registry also serves the Go runtime and process
+# collectors, so the payload carries go_*, process_* and promhttp_* series that
+# say nothing about a run, and this file is written per shard per attempt.
+#
+# The cost of an allowlist is that a new counter stays invisible here until its
+# prefix is added, and that has already happened once:
+# custom_mcp_breaker_trips_total shipped in brain-go so CUSTOM_MCP breaker
+# trips could be counted without repeating a 63-attempt run, and every archived
+# .prom file written before this pattern widened holds llm_ samples only. Add
+# the prefix in the same change that adds the counter.
+#
+#   llm_         token and call counts, what a run is priced from
+#   custom_mcp_  CUSTOM_MCP circuit-breaker trips
+#   rci_         RCI investigation counters
+KEEP='^(llm_|custom_mcp_|rci_)'
+
 emit() { printf '# scrape: %s\n' "$*" >>"$TMP"; }
 
 scrape() {
   local name="$1" url="$2"
   local body
   if body=$(curl -sf --max-time 5 "$url" 2>/dev/null); then
-    printf '%s\n' "$body" | grep -E '^llm_(tokens|calls)_total' >>"$TMP" || true
+    printf '%s\n' "$body" | grep -E "$KEEP" >>"$TMP" || true
     emit "$name ok ($url)"
 
     return 0
@@ -79,8 +96,17 @@ else
   emit "tworker container not found; no token counts from the worker fleet"
 fi
 
-# Only replace the previous scrape once this one produced something, so a
+# Only replace the previous scrape once this one produced token samples, so a
 # transient failure does not destroy the last good capture.
+#
+# This tests ^llm_ rather than $KEEP because the allowlist admits a series that
+# is exported whether or not anything happened: custom_mcp_breaker_trips_total
+# is a counter with no labels and its child is created at wiring time, so both
+# brain-go services serve it at 0 from their first scrape. Testing $KEEP here
+# would accept "curl answered" as success, and a scrape that reached only the
+# chat service would overwrite a full capture with that one line. The chat
+# service has produced 0 token samples in every archived run so far; all of
+# them come from tworker.
 if grep -q '^llm_' "$TMP" 2>/dev/null; then
   mv "$TMP" "$OUT"
   trap - EXIT
