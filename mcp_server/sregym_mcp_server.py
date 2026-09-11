@@ -6,7 +6,9 @@ from fastmcp.server.http import create_sse_app
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from starlette.routing import Mount
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Mount, Route
 
 from mcp_server.configs.load_all_cfg import mcp_server_cfg
 from mcp_server.jaeger_server import mcp as observability_mcp
@@ -19,7 +21,35 @@ from sregym.service.k8s_proxy import KubernetesAPIProxy
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
+async def healthz(_request: Request) -> PlainTextResponse:
+    """Liveness probe for whatever is port-forwarding to this pod.
+
+    Deliberately not a Mount under any of the MCP apps below. The expensive
+    part of probing one of those with a bare GET is not tool-session
+    allocation: KubectlToolSet is only built by get_tools() in
+    kubectl_mcp_tools.py, which only runs inside an @kubectl_mcp.tool()
+    function, i.e. only on an actual JSON-RPC call POSTed to /messages, never
+    on a plain GET. A bare GET against one of the SSE mounts reaches only
+    SseServerTransport.connect_sse (the vendored mcp/server/sse.py), which
+    does leak: it adds an entry to _read_stream_writers that is never
+    removed on disconnect. Real, but small next to what actually costs time.
+
+    The real cost is on the probing side. `curl -w '%{http_code}' --max-time
+    N` against a healthy, immediately-responding SSE endpoint still takes the
+    full N seconds to return: the endpoint answers with 200 right away, but
+    the body is an endless stream, so curl keeps reading until --max-time
+    kills it, not the server. Verified against a minimal local SSE endpoint:
+    a 200 that still took 5.13s wall clock at --max-time 5. A prober on a 15s
+    cycle was paying that on every healthy check. /healthz answers
+    immediately and never streams, so a
+    prober gets an instant reply and can poll as often as it likes.
+    """
+    return PlainTextResponse("ok")
+
+
 routes = [
+    Route("/healthz", healthz),
     Mount("/kubectl", app=create_sse_app(kubectl_mcp, "/messages/", "/sse")),
     Mount("/jaeger", app=create_sse_app(observability_mcp, "/messages/", "/sse")),
     Mount("/loki", app=create_sse_app(loki_mcp, "/messages/", "/sse")),

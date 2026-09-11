@@ -105,11 +105,19 @@ class MCPServer:
             return s.connect_ex(("127.0.0.1", port)) == 0
 
     def _is_port_forward_healthy(self) -> bool:
-        """Check if the port-forward is actually serving traffic, not just bound."""
+        """Check if the port-forward is actually serving traffic, not just bound.
+
+        Probes /healthz, a plain route the app serves directly, rather than
+        one of the /kubectl, /jaeger, /loki, /prometheus, /submit SSE mounts.
+        Those hold a probing GET open for the whole --max-time rather than
+        answering right away; see the healthz() docstring in
+        mcp_server/sregym_mcp_server.py for what a bare GET against one of
+        those mounts actually costs, and why that is not a session leak.
+        /healthz answers immediately and never streams, so this can be
+        polled as often as a caller needs.
+        """
         try:
-            resp = requests.get(f"http://127.0.0.1:{self.port}/kubectl/sse", stream=True, timeout=5)
-            resp.close()
-            # SSE endpoint returns 200 with text/event-stream
+            resp = requests.get(f"http://127.0.0.1:{self.port}/healthz", timeout=5)
             return resp.status_code == 200
         except Exception:
             return False

@@ -186,6 +186,51 @@ def test_start_port_forward_stops_waiting_when_the_process_dies(monkeypatch):
     assert s._is_port_forward_healthy.call_count == 1
 
 
+def test_is_port_forward_healthy_probes_healthz_not_a_real_session():
+    """/healthz, not one of the SSE mounts.
+
+    A GET against /kubectl/sse (the endpoint this probed before) is not
+    expensive for the tool-session reason it looks like -- see the healthz()
+    docstring in mcp_server/sregym_mcp_server.py for what a bare GET there
+    actually costs. It is expensive because the endpoint answers 200
+    immediately but never ends the body, so a caller using --max-time pays
+    the whole timeout on every check, healthy or not. Probing that every 15s
+    for a whole slot's lifetime adds that cost every cycle. This pins the
+    probe at the cheap, non-streaming route instead.
+    """
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    s = _server(healthy=True)
+    s.port = 9954
+    with mock.patch.object(mcp_server.requests, "get", fake_get):
+        result = MCPServer._is_port_forward_healthy(s)
+
+    assert result is True
+    assert calls == [("http://127.0.0.1:9954/healthz", {"timeout": 5})]
+
+
+def test_is_port_forward_healthy_false_on_non_200():
+    class FakeResponse:
+        status_code = 503
+
+    s = _server(healthy=True)
+    with mock.patch.object(mcp_server.requests, "get", mock.Mock(return_value=FakeResponse())):
+        assert MCPServer._is_port_forward_healthy(s) is False
+
+
+def test_is_port_forward_healthy_false_on_request_error():
+    s = _server(healthy=True)
+    with mock.patch.object(mcp_server.requests, "get", mock.Mock(side_effect=OSError("refused"))):
+        assert MCPServer._is_port_forward_healthy(s) is False
+
+
 @pytest.mark.parametrize(
     "value,external",
     [
