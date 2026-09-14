@@ -186,7 +186,7 @@ def test_script_is_executable_and_present():
 def test_allowlisted_counters_reach_the_file(tmp_path):
     """The counters a run is measured by, including the two the old filter dropped."""
     payload = _RUNTIME + _TOKENS + _breaker(4) + _RCI
-    _, out = _run(tmp_path, chat="", tworker=payload)
+    _, out = _run(tmp_path, chat=_RUNTIME, tworker=payload)
 
     names = _names(out)
     assert "llm_tokens_total" in names
@@ -203,7 +203,7 @@ def test_allowlisted_counters_reach_the_file(tmp_path):
 def test_runtime_and_process_metrics_are_dropped(tmp_path):
     """The archive stays application metrics, because it is written per attempt."""
     payload = _RUNTIME + _TOKENS + _breaker(0)
-    _, out = _run(tmp_path, chat="", tworker=payload)
+    _, out = _run(tmp_path, chat=_RUNTIME, tworker=payload)
 
     text = out.read_text()
     for unwanted in ("go_gc_duration_seconds", "go_goroutines", "process_cpu_seconds_total", "promhttp_"):
@@ -273,6 +273,93 @@ def test_breaker_only_scrape_keeps_the_previous_capture(tmp_path):
     _run(tmp_path, chat=_RUNTIME + _breaker(0), tworker=None, out=out)
 
     assert out.read_text() == previous
+
+
+def _section(out, name):
+    """The sample lines belonging to one target, by its marker.
+
+    A marker opens its target's samples, so a target's section runs from its
+    own marker to the next marker or to end of file. `# scrape: at` is the
+    file header and opens nothing.
+    """
+    current = None
+    found = []
+    for ln in out.read_text().splitlines():
+        if ln.startswith("# scrape: at "):
+            current = None
+            continue
+        if ln.startswith("# scrape: "):
+            current = ln.split("# scrape: ", 1)[1].split(" ", 1)[0]
+            continue
+        if ln and not ln.startswith("#") and current == name:
+            found.append(ln)
+
+    return found
+
+
+def test_samples_follow_the_marker_that_names_their_target(tmp_path):
+    """The reading error this ordering exists to stop.
+
+    The marker used to be written after its target's samples, so a reader
+    taking it for a header credited every sample to the wrong endpoint. On the
+    real archives that inverted the answer to the only question the file is
+    for: the chat marker appeared to introduce tworker's tens of thousands of
+    llm_ series and the tworker marker appeared to introduce nothing, which
+    reads as the chat service doing all the LLM work and the worker fleet
+    doing none. It is the other way round.
+
+    Two targets serving disjoint series, so a mis-assignment cannot hide.
+    """
+    _, out = _run(
+        tmp_path,
+        chat=_RUNTIME + _breaker(0),
+        tworker=_RUNTIME + _TOKENS + _RCI,
+    )
+
+    assert _section(out, "chat") == ["custom_mcp_breaker_trips_total 0"]
+
+    tworker = _section(out, "tworker")
+    assert any(ln.startswith("llm_tokens_total{") for ln in tworker)
+    assert any(ln.startswith("rci_signal_agent_all_errored_total{") for ln in tworker)
+    assert not any(ln.startswith("custom_mcp_") for ln in tworker)
+
+
+def test_marker_reports_how_many_samples_were_kept(tmp_path):
+    """ "Reachable" and "had something to report" are different facts.
+
+    Both used to record the bare word "ok". A target that answers with an
+    exposition carrying none of the allowlisted series then looks exactly like
+    a healthy one, and that is the case worth seeing: it is what a role that
+    never registered the instruments, or a process restarted mid-run, produces.
+    """
+    _, out = _run(
+        tmp_path,
+        chat=_RUNTIME,
+        tworker=_RUNTIME + _TOKENS,
+    )
+
+    text = out.read_text()
+    assert "chat ok (http://127.0.0.1:9091/metrics) 0 samples" in text
+    # _TOKENS carries six allowlisted sample lines; its HELP and TYPE comments
+    # are not counted because the allowlist anchors on the metric name.
+    assert "tworker ok (http://172.18.0.9:9092/metrics) 6 samples" in text
+
+
+def test_an_answer_with_no_body_is_not_recorded_as_ok(tmp_path):
+    """Zero bytes from a port means it is not the endpoint we think it is.
+
+    A Prometheus handler always serves at least the Go runtime and process
+    collectors, so an empty 200 is never a quiet application. Recording it as
+    "ok" is how a scrape pointed at the wrong container reads as a service
+    that simply spent nothing.
+    """
+    _, out = _run(tmp_path, chat="", tworker=_RUNTIME + _TOKENS)
+
+    text = out.read_text()
+    assert "chat EMPTY BODY (http://127.0.0.1:9091/metrics)" in text
+    assert "chat ok" not in text
+    # The other endpoint is unaffected, so one dead target is not a lost scrape.
+    assert "llm_tokens_total" in _names(out)
 
 
 def test_first_scrape_without_samples_records_the_attempt(tmp_path):
