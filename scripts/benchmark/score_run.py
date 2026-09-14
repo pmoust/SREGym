@@ -33,6 +33,20 @@ repo's own `visualizer/queries.py` maps an empty string to False, which is the
 strict reading applied silently; that is the thing this output exists to
 prevent.
 
+## A judge that did not answer is not a zero either
+
+The checklist judge asks for a JSON array and sometimes gets something else
+back. It used to answer "No" to all nine questions after its retries ran out,
+which scored D1, D2 and D3 at 0.0 and made an attempt the judge never scored
+indistinguishable from a diagnosis it scored and rejected. Four of the 63
+attempts in run-20260914-1312 went that way, and four of the 63 in
+run-20260908-0739.
+
+The judge now leaves those attempts unscored, and this script counts them
+separately either way: on a current run from the Diagnosis.unscored_reason
+column, on an archived one from the "parse failure" evidence string those
+all-No checklists carry.
+
 ## TTD and TTM
 
 `TTL` in the CSVs is the paper's TTD. The name is inherited from AIOpsLab's
@@ -155,6 +169,39 @@ def _int(raw: str) -> int:
         return 0
 
 
+# What the judge writes into Diagnosis.unscored_reason when it produced no
+# verdict. Kept as literals rather than imported from the judge module: this
+# script reads archived CSVs and must run against a checkout that predates the
+# column.
+_JUDGE_PARSE_FAILURE = "judge_parse_failure"
+
+# How an unscored attempt looked before the judge had a column for it: nine
+# all-No checklist answers, every one carrying this evidence string, and
+# Diagnosis.success recorded as False. Every archived run to date is this
+# shape, so the marker is what lets a past run be re-read correctly rather
+# than only future ones.
+#
+# The whole string, em-dash included, copied from the code that wrote it.
+# A looser "parse failure" would also match a judge quoting an agent that
+# diagnosed a parse failure of its own, and there is no reason to be loose:
+# the string was a fixed literal, and it is present verbatim in all 8
+# affected attempts across run-20260908-0739 and run-20260914-1312.
+_LEGACY_PARSE_FAILURE_MARKER = "parse failure — defaulting to No"
+
+
+def _judge_parse_failed(row: dict) -> bool:
+    """Whether the judge failed to parse its own reply for this attempt.
+
+    An attempt like that is not a wrong diagnosis. The judge never answered,
+    so there is nothing to grade, the same distinction this file already draws
+    for an absent mitigation verdict.
+    """
+    if _val(row, "Diagnosis.unscored_reason") == _JUDGE_PARSE_FAILURE:
+        return True
+
+    return _LEGACY_PARSE_FAILURE_MARKER in _val(row, "Diagnosis.checklist")
+
+
 # The four token types brain-go reports, all input-side except output. Both
 # providers report cache reads and writes OUTSIDE the input count, so these sum
 # to real consumption without double counting. There is no cached output:
@@ -216,6 +263,15 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
 
     diag_graded = [r for r in rows if _val(r, "Diagnosis.success")]
     diag_ok = [r for r in diag_graded if _val(r, "Diagnosis.success") == "True"]
+
+    # Attempts the judge never scored. Split by whether the run's own rows
+    # already keep them out of the rates: the current judge leaves
+    # Diagnosis.success empty, so they land in "ungraded" on their own, while
+    # an archived run recorded False and they are inside both diagnosis rates
+    # and the E2E rate, pulling each one down by an attempt.
+    judge_failed = [r for r in rows if _judge_parse_failed(r)]
+    judge_failed_as_zero = [r for r in judge_failed if _val(r, "Diagnosis.success") == "False"]
+    judge_failed_attempts = sorted((_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in judge_failed)
     mitig_graded = [r for r in rows if _val(r, "Mitigation.success")]
     mitig_ok = [r for r in mitig_graded if _val(r, "Mitigation.success") == "True"]
     # Anything neither True nor False was counted as a graded failure, silently
@@ -335,6 +391,18 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
             "strict_pct": _rate(len(diag_ok), attempts),
             "graded_pct": _rate(len(diag_ok), len(diag_graded)),
             "ungraded": attempts - len(diag_graded),
+            # graded_pct with the judge's own failures taken out of the
+            # denominator too. Equal to graded_pct on a run whose rows already
+            # leave them ungraded; higher on an archived run that recorded
+            # them as False.
+            "judge_scored_pct": _rate(len(diag_ok), len(diag_graded) - len(judge_failed_as_zero)),
+        },
+        # Attempts with no judge verdict at all, named so they are never read
+        # as diagnosis failures.
+        "judge_parse_failures": {
+            "count": len(judge_failed),
+            "counted_as_failures": len(judge_failed_as_zero),
+            "attempts": judge_failed_attempts,
         },
         "mitigation": {
             "correct": len(mitig_ok),
@@ -595,6 +663,26 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
         f"  End to end     {_pct(e['strict_pct'])}  {e['correct']}/{s['attempts']}"
         f"    {_pct(e['graded_pct'])}  {e['correct']}/{e['graded']}"
     )
+    jpf = s.get("judge_parse_failures") or {"count": 0, "counted_as_failures": 0, "attempts": []}
+    if jpf["count"]:
+        out.append("")
+        out.append(
+            f"  judge parse failures: {jpf['count']} attempt(s) got no verdict because the "
+            "judge's own reply could not be parsed:"
+        )
+        for pid, attempt in jpf["attempts"]:
+            out.append(f"    {pid} attempt {attempt}")
+        if jpf["counted_as_failures"]:
+            out.append(
+                f"  {jpf['counted_as_failures']} of those are recorded as Diagnosis.success=False, so both diagnosis"
+            )
+            out.append(
+                f"  rates above count them as wrong answers. Excluding them the graded rate is "
+                f"{_pct(d['judge_scored_pct'])} ({d['correct']}/{d['graded'] - jpf['counted_as_failures']})."
+            )
+        else:
+            out.append("  They are already out of the graded rate; strict still counts them as failures.")
+
     out.append("")
     out.append("  strict counts an absent verdict as a failure; graded excludes it.")
     if m["absent"] and m["absent_all_censored"]:

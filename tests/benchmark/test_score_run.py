@@ -998,3 +998,89 @@ def test_main_warns_when_a_manifest_exists_but_has_no_usable_coverage_fields(tmp
     assert rc == 0
     assert err, "a manifest with no usable problems/n_attempts must still warn, not stay silent"
     assert "missing a usable problems/n_attempts" in err
+
+
+def _judge_row(pid, attempt=1, diag="", checklist="", unscored_reason=""):
+    """A row with the judge-side columns the parse-failure check reads.
+
+    Kept apart from _row because _COLUMNS is the narrow set every other test
+    here writes; widening it would rewrite every fixture for one check.
+    """
+    row = _row(pid, attempt=attempt, diag=diag, mitig="False", ttl="100", ttm="200")
+    row["Diagnosis.checklist"] = checklist
+    row["Diagnosis.unscored_reason"] = unscored_reason
+    return row
+
+
+def _judge_run(tmp_path, rows):
+    columns = [*_COLUMNS, "Diagnosis.checklist", "Diagnosis.unscored_reason"]
+    for i, row in enumerate(rows):
+        d = tmp_path / "slots" / "0" / "results" / "t0" / f"run_{i}"
+        d.mkdir(parents=True)
+        with (d / "brain_go_results.csv").open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=columns)
+            w.writeheader()
+            w.writerow({c: row.get(c, "") for c in columns})
+
+    return tmp_path
+
+
+_LEGACY_ALL_NO = (
+    "[{'id': 'D1-Q1', 'answer': 'No', 'evidence': 'parse failure — defaulting to No', 'confidence': 'Low'}]"
+)
+
+
+def test_an_archived_parse_failure_is_named_and_taken_out_of_the_graded_rate(tmp_path):
+    """Four of run-20260914-1312's 63 attempts scored 0.0 because the judge
+    could not parse its own reply, not because the diagnosis was wrong. They
+    are recorded as Diagnosis.success=False and are inside the headline rate."""
+    rows = [
+        _judge_row("a", diag="True"),
+        _judge_row("b", diag="False"),
+        _judge_row("c", diag="False", checklist=_LEGACY_ALL_NO),
+    ]
+    s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
+
+    assert s["judge_parse_failures"]["count"] == 1
+    assert s["judge_parse_failures"]["counted_as_failures"] == 1
+    assert s["judge_parse_failures"]["attempts"] == [("c", 1)]
+    assert s["diagnosis"]["graded_pct"] == 33.3
+    assert s["diagnosis"]["judge_scored_pct"] == 50.0
+
+
+def test_a_current_parse_failure_is_named_from_its_own_column(tmp_path):
+    """The judge now leaves Diagnosis.success empty, so the attempt is already
+    out of the graded rate. It still has to be named: 'never graded' alone does
+    not say a timeout from a judge that would not answer."""
+    rows = [
+        _judge_row("a", diag="True"),
+        _judge_row("b", diag="False"),
+        _judge_row("c", diag="", unscored_reason="judge_parse_failure"),
+    ]
+    s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
+
+    assert s["judge_parse_failures"]["count"] == 1
+    assert s["judge_parse_failures"]["counted_as_failures"] == 0
+    assert s["diagnosis"]["graded_pct"] == 50.0
+    assert s["diagnosis"]["judge_scored_pct"] == 50.0
+
+
+def test_a_run_with_no_parse_failures_reports_none(tmp_path):
+    rows = [_judge_row("a", diag="True"), _judge_row("b", diag="False")]
+    s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
+
+    assert s["judge_parse_failures"]["count"] == 0
+    assert s["diagnosis"]["judge_scored_pct"] == s["diagnosis"]["graded_pct"]
+
+
+def test_render_names_the_parse_failed_attempts(tmp_path):
+    rows = [
+        _judge_row("a", diag="True"),
+        _judge_row("kafka_poison_pill_hol_block", attempt=3, diag="False", checklist=_LEGACY_ALL_NO),
+    ]
+    s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
+    out = score_run.render(s, None)
+
+    assert "judge parse failures: 1 attempt(s)" in out
+    assert "kafka_poison_pill_hol_block attempt 3" in out
+    assert "Excluding them the graded rate is 100.0% (1/1)" in out
