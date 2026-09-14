@@ -107,20 +107,49 @@ class MCPServer:
     def _is_port_forward_healthy(self) -> bool:
         """Check if the port-forward is actually serving traffic, not just bound.
 
-        Probes /healthz, a plain route the app serves directly, rather than
-        one of the /kubectl, /jaeger, /loki, /prometheus, /submit SSE mounts.
-        Those hold a probing GET open for the whole --max-time rather than
-        answering right away; see the healthz() docstring in
+        Any HTTP response counts, not specifically a 200. A reply of any status
+        proves the request crossed the forward and reached the app, and every
+        caller acts on a False by tearing down and restarting `kubectl
+        port-forward`, which cannot change a status the app chose to send.
+
+        It has to be any status rather than 200 to work at all. The pod does
+        not run the image deployment.yaml names: deploy() below runs `kubectl
+        apply -k`, and that kustomization's `images:` transform rewrites
+        `sregym` to ghcr.io/sregym/sregym-mcp, which imagePullPolicy: Always
+        pulls fresh from GHCR on every pod start. The published image was built
+        2026-09-06 and has no /healthz route, so Starlette answers 404 there.
+        Requiring 200 made this return False forever.
+
+        Which path that actually saves: not the benchmark's fresh-cluster
+        deploy, where SREGYM_EXTERNAL_PORT_FORWARD makes deploy() return before
+        reaching here, nor the already-running branch, where the result is only
+        logged. It is start_port_forward()'s early return. Under the strict-200
+        form that return could never fire, so a healthy forward was killed and
+        rebuilt three times and the method ended with none at all -- the exact
+        regression its own docstring warns about.
+
+        Probes /healthz rather than one of the /kubectl, /jaeger, /loki,
+        /prometheus, /submit SSE mounts. Those hold a probing GET open rather
+        than answering right away; see the healthz() docstring in
         mcp_server/sregym_mcp_server.py for what a bare GET against one of
         those mounts actually costs, and why that is not a session leak.
-        /healthz answers immediately and never streams, so this can be
-        polled as often as a caller needs.
+        /healthz answers immediately and never streams, whether it exists (200)
+        or not (404), so this can be polled as often as a caller needs.
+
+        That last point is load-bearing for this timeout in a way run_shard.sh's
+        is not. `--max-time` there caps total wall clock; `timeout` here is
+        per-read, so a response that trickles forever never trips it. Against
+        /healthz the two agree. Retarget either at an SSE mount and the shell
+        probe still ends while this one hangs for good.
         """
         try:
-            resp = requests.get(f"http://127.0.0.1:{self.port}/healthz", timeout=5)
-            return resp.status_code == 200
+            requests.get(f"http://127.0.0.1:{self.port}/healthz", timeout=5)
         except Exception:
+            # No HTTP response at all: connection refused, nothing listening,
+            # or a socket that accepts and never answers within the timeout.
+            # That last one is the failure #94 exists to catch.
             return False
+        return True
 
     def _kill_stale_port_forward(self):
         """Kill any existing kubectl port-forward process on our port."""

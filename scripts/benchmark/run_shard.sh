@@ -121,6 +121,50 @@ if [ "$NOISE" = "true" ]; then
   NOISE_FLAG="--noise"
 fi
 
+# --- MCP port-forward probe -------------------------------------------------
+# Prints curl's status code for one request through the slot's port-forward.
+# 000 is curl's code for "no HTTP response at all".
+#
+# Probed on /healthz, a plain route outside the /kubectl, /jaeger, /loki,
+# /prometheus, /submit SSE mounts: curl against one of those holds the
+# connection open for the whole --max-time even on a healthy, instantly
+# answering endpoint, because the body is an endless stream and only
+# --max-time ends it. See the healthz() docstring in
+# mcp_server/sregym_mcp_server.py.
+mcp_probe_code() {
+  curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null
+}
+
+# Whether the app answered at all. Any status counts, not specifically 200.
+# A reply of any status proves the request crossed the forward and reached the
+# app, which is the only thing either caller is entitled to conclude from it.
+#
+# It has to be any status rather than 200 to work at all. The pod does not run
+# the image deployment.yaml names: `kubectl apply -k` (see MCPServer.deploy)
+# runs the kustomization next to it, whose `images:` transform rewrites
+# `sregym` to ghcr.io/sregym/sregym-mcp, and imagePullPolicy: Always pulls
+# that tag fresh from GHCR on every pod start. The published image was built
+# 2026-09-06; /healthz entered this repo on 2026-09-11 in the same commit that
+# pointed both probes at it (#94). Its sregym_mcp_server.py has the five SSE
+# mounts and no /healthz route, and no Mount("/") to absorb the path, so
+# Starlette answers 404. Every one of the 12 slots in run-20260914-0912
+# aborted on that 404 before running a single problem.
+#
+# 000 still fails, which is the failure #94 exists to catch: connection
+# refused, nothing listening, or a socket that accepts and never answers
+# within --max-time.
+#
+# The two callers do different things with a failure, so neither reads a
+# status as application health. The supervisor restarts `kubectl
+# port-forward`, which cannot change a status the app chose to send. The
+# startup gate aborts the slot, and deliberately leaves judging the app to
+# seed_slot.sh, which waits on /kubectl/sse -- the route the agent actually
+# uses -- and still requires a strict 200 there.
+mcp_probe_answered() {
+  [ -n "$1" ] && [ "$1" != "000" ]
+}
+
 # --- slot workers -----------------------------------------------------------
 # Each slot is one concurrent SREGym run on this instance, and needs four
 # things kept to itself. run_slot_env.sh supplies the first three (its own kind
@@ -206,18 +250,15 @@ run_slot() {
     # runs on to seed_slot.sh, which waits 300s on an endpoint that will never
     # answer and then aborts, which is precisely how the previous run failed.
     #
-    # Probed on /healthz, a plain route the app answers directly, not one of
-    # the /kubectl, /jaeger, /loki, /prometheus, /submit SSE mounts: curl
-    # against one of those holds the connection open for the whole --max-time
-    # even on a healthy, instantly-answering endpoint, because the body is an
-    # endless stream and only --max-time ends it. See the healthz() docstring
-    # in mcp_server/sregym_mcp_server.py for what that costs and why it is not
-    # a tool-session leak.
+    # Serving means the app answered, not that it answered 200: see
+    # mcp_probe_answered above for why the deployed image replies 404 here and
+    # why that still proves the forward carries traffic. A slot that gets past
+    # this and then meets a genuinely broken server still dies, at
+    # seed_slot.sh's strict-200 wait on /kubectl/sse.
     pf_ok=0
     pf_deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$pf_deadline" ]; do
-      if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
-              "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null)" = "200" ]; then
+      if mcp_probe_answered "$(mcp_probe_code)"; then
         pf_ok=1
         break
       fi
@@ -361,11 +402,10 @@ run_slot() {
       while true; do
         sleep "$PF_PROBE_INTERVAL_SECONDS"
         pf_cycle=$(( pf_cycle + 1 ))
-        pf_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
-          "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null)
+        pf_code=$(mcp_probe_code)
         pf_checkpoint_epoch=$(date +%s)
         pf_lag=$(( pf_checkpoint_epoch - pf_prev_checkpoint_epoch ))
-        if [ "$pf_code" != "200" ]; then
+        if ! mcp_probe_answered "$pf_code"; then
           # pf_prev_checkpoint_epoch is deliberately NOT advanced here. It
           # still names the last confirmed-good probe, so a second
           # consecutive failure's pf_lag accumulates on top of the first

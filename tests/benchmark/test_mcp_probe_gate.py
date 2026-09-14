@@ -1,0 +1,214 @@
+"""The MCP port-forward probe accepts any HTTP answer and still rejects silence.
+
+run-20260914-0912 produced zero results: all 12 slots logged "MCP port-forward
+never served" and self-terminated without running a single problem. The probe
+added in #94 required HTTP 200 from /healthz, a route that entered the source
+in that same commit. The pod does not run the image deployment.yaml names --
+`kubectl apply -k` applies a kustomization whose `images:` transform rewrites
+`sregym` to ghcr.io/sregym/sregym-mcp, pulled fresh from GHCR on every pod
+start by imagePullPolicy: Always. That published image was built 2026-09-06,
+has the five SSE mounts and no /healthz, and no Mount("/") to absorb the path,
+so Starlette answers 404. The slot logs agree that the app answered rather than
+hanging: 29 clean "Handling connection" lines per forward with no forwarding
+errors, 29 probe cycles inside a 60s deadline whose sleep alone is 2s, i.e.
+curl returned in milliseconds.
+
+These run the real shell functions against real sockets, because the bug was
+in what curl's exit behaviour means, not in anything a mock of curl would
+reproduce. The functions are extracted out of run_shard.sh and run as shell,
+the same technique test_pf_restart_recording.py uses for record_pf_event():
+run_shard.sh is sourced rather than executed, and `bash -n` cannot exercise
+behaviour.
+"""
+
+import socket
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import NamedTuple
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+RUN_SHARD = ROOT / "scripts" / "benchmark" / "run_shard.sh"
+
+PROBE_FNS = ("mcp_probe_code", "mcp_probe_answered")
+
+
+def _probe_fns() -> str:
+    """The probe function bodies, verbatim from run_shard.sh."""
+    text = RUN_SHARD.read_text()
+    out = []
+    for name in PROBE_FNS:
+        opener = f"{name}() {{"
+        assert text.count(opener) == 1, f"{name} is not defined exactly once in run_shard.sh"
+        body = text.split(opener, 1)[1].split("\n}\n", 1)[0]
+        out.append(f"{opener}{body}\n}}\n")
+    return "\n".join(out)
+
+
+class Probe(NamedTuple):
+    code: str
+    answered: bool
+    seconds: float
+
+
+def _probe(port: int) -> Probe:
+    """Run both functions against `port`; report curl's code, the verdict and
+    how long it took.
+
+    The subprocess is bounded well above mcp_probe_code's own --max-time. That
+    bound is what turns "somebody deleted --max-time" into a failing test
+    rather than a suite that hangs forever on the one case that exercises it.
+    """
+    script = _probe_fns() + (
+        'code="$(mcp_probe_code)"\n'
+        'printf "code=%s\\n" "$code"\n'
+        'if mcp_probe_answered "$code"; then printf "answered=yes\\n"; else printf "answered=no\\n"; fi\n'
+    )
+    started = time.monotonic()
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "MCP_SERVER_PORT": str(port)},
+        timeout=15,
+    )
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, proc.stderr
+    lines = dict(line.split("=", 1) for line in proc.stdout.strip().splitlines())
+    return Probe(lines["code"], lines["answered"] == "yes", elapsed)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def status_server():
+    """An HTTP server on 127.0.0.1 answering /healthz with a fixed status."""
+    servers = []
+
+    def start(status: int) -> int:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own name
+                self.send_response(status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        servers.append(server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server.server_address[1]
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def test_404_counts_as_serving(status_server):
+    """The regression that cost run-20260914-0912 its entire run.
+
+    This is not a hypothetical status. It is what the deployed container
+    returns for /healthz today, and the old `= "200"` gate turned it into
+    "MCP port-forward never served" on all 12 slots.
+    """
+    probe = _probe(status_server(404))
+
+    assert probe.code == "404"
+    assert probe.answered is True
+
+
+def test_200_still_counts_as_serving(status_server):
+    """Whenever the image is rebuilt from source, the route appears and the
+    probe must keep passing rather than start failing the other way."""
+    probe = _probe(status_server(200))
+
+    assert probe.code == "200"
+    assert probe.answered is True
+
+
+def test_nothing_listening_is_not_serving():
+    """Connection refused: the forward never bound the port at all."""
+    probe = _probe(_free_port())
+
+    assert probe.code == "000"
+    assert probe.answered is False
+
+
+def test_a_socket_that_never_answers_is_not_serving():
+    """The failure #94 exists to catch, and the one a weaker fix would lose.
+
+    `kubectl port-forward` stays up while forwarding to a pod that never
+    becomes ready, so the port accepts and then nothing comes back. A TCP-level
+    probe would call this healthy; every later tool call would pay a full
+    timeout against it. Only mcp_probe_code's --max-time ends this one.
+
+    The accepted socket has to stay referenced for the whole probe. An earlier
+    version of this test dropped it as soon as the accepting thread returned,
+    so CPython closed it and curl got an empty reply in 0.01s (exit 56) -- the
+    same 000 by a different route, and not this failure at all. It passed with
+    --max-time deleted from mcp_probe_code entirely, which in production means
+    curl blocking with no timeout: the gate below only re-reads its deadline
+    between iterations, so the slot would hang forever instead of aborting at
+    60s, and the supervisor would stop probing. A genuine hang takes the full
+    --max-time and reports exit 28, which is what the duration assertion pins.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    held = []
+    threading.Thread(target=lambda: held.append(listener.accept()[0]), daemon=True).start()
+    try:
+        probe = _probe(port)
+    finally:
+        for sock in held:
+            sock.close()
+        listener.close()
+
+    assert probe.code == "000"
+    assert probe.answered is False
+    # Distinguishes a --max-time expiry from an instant empty reply, which is
+    # the whole point of this case. mcp_probe_code allows 3s.
+    assert probe.seconds >= 2, f"expected a --max-time expiry, got {probe.seconds:.2f}s (socket closed early?)"
+
+
+def test_both_probe_sites_use_the_shared_helper():
+    """One predicate, not two that happen to agree.
+
+    The startup gate and the supervisor both decide whether the forward is
+    serving. When they were separate copies of the same curl invocation, #94's
+    change had to edit both, and a later correction to either would silently
+    leave the other on the old rule.
+    """
+    text = RUN_SHARD.read_text()
+    code_lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+    # The literal comparison this replaced must not come back at either site.
+    assert '/healthz" 2>/dev/null)" = "200"' not in text
+    assert '"$pf_code" != "200"' not in text
+
+    # One definition plus the two call sites, and no third copy of the curl.
+    uses = [line for line in code_lines if "mcp_probe_answered" in line]
+    assert len(uses) == 3, (
+        "expected the definition plus exactly two call sites, got:\n"
+        + "\n".join(uses)
+        + "\n\nA new caller is fine, but it has to be a deliberate choice: update this "
+        "count and say in the commit why the new site wants the same predicate rather "
+        "than its own. Two predicates that merely agree today are what this pins against."
+    )
+    healthz_lines = [line for line in code_lines if "/healthz" in line]
+    assert len(healthz_lines) == 1, f"the probe URL should exist once, in mcp_probe_code: {healthz_lines}"
+
+    # The deep check is deliberately still strict: /kubectl/sse does exist in
+    # the running image, so a non-200 there is a real application fault.
+    assert '"$deep_code" != "200"' in text
