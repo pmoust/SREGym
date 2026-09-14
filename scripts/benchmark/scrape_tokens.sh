@@ -38,6 +38,25 @@
 # compose file, this reaches the container over the docker bridge, which works
 # because the host is Linux. It would not work on Docker Desktop.
 #
+# "Most of the tokens" is in fact all of them, checked four ways against
+# run-20260908-0739-4fc0249e and the 2026-09-10 20:12 run (386 .prom files):
+#
+#   - Only cmd/brain/internal/tworkersvc registers the chat-turn and RCI
+#     workflows and the llm activities on the llm-calls task queue. The chat
+#     service only starts workflows.
+#   - chatsvc wires both WorkflowChat and LocalToolResolver, and
+#     internal/chat/server/chat.go routes a cli_mode turn onto the workflow
+#     when both are set, which they always are here.
+#   - In run-20260908-0739-4fc0249e shard-0 the chat container logs four
+#     startup lines for the whole run and nothing per turn, while tworker
+#     logs 36 "chat-turn workflow started" and 36 "rci investigation
+#     workflow started".
+#   - rci_ series can only come from tworker, because rci.ConfigureMetrics is
+#     called in tworkersvc and nowhere else. They are in the archives.
+#
+# Across both runs the chat endpoint contributed 0 llm_ samples and tworker
+# contributed 99,349. Do not re-derive this from marker placement alone.
+#
 # Counters are cumulative for the life of the process, so the last scrape wins
 # and calling this repeatedly is free. It is invoked from sync_logs, which runs
 # on the 60s watcher and on every exit path.
@@ -67,18 +86,51 @@ KEEP='^(llm_|custom_mcp_|rci_)'
 
 emit() { printf '# scrape: %s\n' "$*" >>"$TMP"; }
 
+# Each target's marker is written BEFORE that target's samples, so the samples
+# between one marker and the next belong to the target the marker names.
+#
+# It used to be written after, and nothing in the file said so. Every reader
+# took it for a header, which assigns every sample to the wrong target and
+# inverts the whole picture: the chat marker appeared to introduce tworker's
+# tens of thousands of llm_ series, and the tworker marker appeared to introduce
+# nothing at all. That reading says the chat service does the LLM work and the
+# worker fleet does none, which is the opposite of what happens. Files archived
+# before this change carry the old order; read a marker there as closing the
+# samples above it, not opening the samples below it.
+#
+# No parser was affected. token_delta.py matches llm_ sample lines and
+# score_run.py matches llm_tokens_total{ ; neither looks at a comment. The cost
+# was paid entirely by people reading the archive.
+#
+# The marker also carries the number of samples kept, because "reachable" and
+# "had something to report" are different facts and only the first was recorded.
+# A target that answers with an exposition carrying none of the allowlisted
+# series is a real possibility (a role that never registered the instruments, a
+# process restarted mid-run) and it used to look identical to a healthy scrape.
+# An answer with no body at all is louder still: a Prometheus handler always
+# serves at least the runtime collectors, so zero bytes means the thing on that
+# port is not the endpoint we think it is.
 scrape() {
   local name="$1" url="$2"
-  local body
-  if body=$(curl -sf --max-time 5 "$url" 2>/dev/null); then
-    printf '%s\n' "$body" | grep -E "$KEEP" >>"$TMP" || true
-    emit "$name ok ($url)"
+  local body kept
 
-    return 0
+  if ! body=$(curl -sf --max-time 5 "$url" 2>/dev/null); then
+    emit "$name unreachable ($url)"
+
+    return 1
   fi
-  emit "$name unreachable ($url)"
 
-  return 1
+  if [ -z "$body" ]; then
+    emit "$name EMPTY BODY ($url); not a Prometheus endpoint"
+
+    return 1
+  fi
+
+  kept=$(printf '%s\n' "$body" | grep -Ec "$KEEP") || true
+  emit "$name ok ($url) ${kept:-0} samples"
+  printf '%s\n' "$body" | grep -E "$KEEP" >>"$TMP" || true
+
+  return 0
 }
 
 emit "at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
