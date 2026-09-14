@@ -205,11 +205,19 @@ run_slot() {
     # Confirm it is actually serving before handing off. Without this the slot
     # runs on to seed_slot.sh, which waits 300s on an endpoint that will never
     # answer and then aborts, which is precisely how the previous run failed.
+    #
+    # Probed on /healthz, a plain route the app answers directly, not one of
+    # the /kubectl, /jaeger, /loki, /prometheus, /submit SSE mounts: curl
+    # against one of those holds the connection open for the whole --max-time
+    # even on a healthy, instantly-answering endpoint, because the body is an
+    # endless stream and only --max-time ends it. See the healthz() docstring
+    # in mcp_server/sregym_mcp_server.py for what that costs and why it is not
+    # a tool-session leak.
     pf_ok=0
     pf_deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$pf_deadline" ]; do
-      if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-              "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)" = "200" ]; then
+      if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+              "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null)" = "200" ]; then
         pf_ok=1
         break
       fi
@@ -230,6 +238,74 @@ run_slot() {
     PF_PID_FILE="$slot_dir/mcp-pf.pid"
     echo "$PF_PID" >"$PF_PID_FILE"
 
+    # Every restart the supervisor below performs, and every periodic deep
+    # check (see PF_DEEP_CHECK_EVERY_N_CYCLES below), is appended here as one
+    # JSON line. The file lives under slot_dir, inside SLOTS_DIR, so the
+    # periodic and final `aws s3 sync` calls already ship it beside that
+    # slot's *_results.csv files with no separate wiring: a post-hoc pass can
+    # join on problem_id to flag which attempts ran through an outage instead
+    # of scoring them as plain reasoning failures.
+    #
+    # What a line can and cannot promise: problem_id and previous_problem_id
+    # come from two marker files the problem loop below maintains --
+    # current_problem (the problem actively running right now, if any) and
+    # previous_problem (whichever ran immediately before that, updated when
+    # each problem ends, and otherwise left alone). detection_lag_seconds is
+    # the measured wall-clock time since the supervisor's last confirmed
+    # /healthz success, not the static PF_PROBE_INTERVAL_SECONDS: usually
+    # close to that value, but a restart detected on the cycle right after a
+    # deep check (see PF_DEEP_CHECK_EVERY_N_CYCLES below) reports roughly
+    # PF_PROBE_INTERVAL_SECONDS + PF_DEEP_CHECK_TIMEOUT_SECONDS instead,
+    # because that earlier cycle's deep check blocked for close to
+    # PF_DEEP_CHECK_TIMEOUT_SECONDS against a live SSE stream (the same
+    # endless-body mechanism healthz() documents) before this cycle's sleep
+    # even began. Recording the real elapsed time rather than the nominal
+    # interval means this field is always a true bound on how far before ts
+    # the outage could have started, never an approximation a reader could be
+    # misled by. That bound is comfortably long enough for the outage to have
+    # begun while previous_problem_id, not problem_id, was the one actively
+    # running. This file can narrow a contaminated attempt to one of those
+    # two candidates; it cannot say which one, and a reader who needs that
+    # precision has to cross-reference each attempt's own timing.
+    #
+    # Never truncated here. The resume block above pulls down whatever this
+    # slot already wrote to S3 before a prior instance died, same as its
+    # *_results.csv files, and clearing it on every slot start would discard a
+    # replaced instance's restart history right before the next periodic sync
+    # overwrote S3 with the empty file. Append-only otherwise: an event
+    # recorded twice is a false positive a reader can discount, where one
+    # recorded zero times cannot be recovered.
+    #
+    # Built with jq, not string-interpolated into a literal. problem ids come
+    # from a fixed, code-reviewed registry today, but a `printf` literal would
+    # still corrupt every later line's parseability the day one carries a
+    # quote, and jq costs nothing extra here: it is already an apt-get
+    # dependency of this box (see bootstrap.sh.tftpl's host-prerequisites
+    # section) for exactly this kind of small, safe JSON assembly.
+    PF_RESTARTS_FILE="$slot_dir/mcp_pf_restarts.jsonl"
+    CURRENT_PROBLEM_FILE="$slot_dir/current_problem"
+    PREVIOUS_PROBLEM_FILE="$slot_dir/previous_problem"
+    record_pf_event() {
+      local restarts_file="$1" current_file="$2" previous_file="$3"
+      local event="$4" old_pid="$5" new_pid="$6" detail="$7" lag_seconds="$8"
+      local problem previous
+      problem="$(cat "$current_file" 2>/dev/null || true)"
+      previous="$(cat "$previous_file" 2>/dev/null || true)"
+      jq -nc \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg event "$event" \
+        --arg old_pid "$old_pid" \
+        --arg new_pid "$new_pid" \
+        --arg problem_id "$problem" \
+        --arg previous_problem_id "$previous" \
+        --arg detail "$detail" \
+        --argjson detection_lag_seconds "$lag_seconds" \
+        '{ts: $ts, event: $event, old_pid: $old_pid, new_pid: $new_pid,
+          problem_id: $problem_id, previous_problem_id: $previous_problem_id,
+          detection_lag_seconds: $detection_lag_seconds, detail: $detail}' \
+        >>"$restarts_file"
+    }
+
     # Supervise it. A forward dies on its own: three attempts in
     # run-20260831-1752 stalled with nothing logging a restart. The conductor
     # no longer watches it either (SREGYM_EXTERNAL_PORT_FORWARD below), so
@@ -237,29 +313,98 @@ run_slot() {
     #
     # Probed, not pinged: the process stays alive while forwarding to a pod
     # that never becomes ready, and requests then cost a full timeout each.
-    # ~20s a cycle, not 15: curl blocks the full --max-time against an endless
-    # text/event-stream, so a healthy probe spends 5s on top of the sleep.
-    # Worst case is roughly two cycles of blindness, so a death still costs
-    # one or two dead calls rather than none -- against streaks of 28 to 85
-    # measured in run-20260831-1752.
+    # /healthz answers immediately rather than blocking for --max-time against
+    # an endless text/event-stream, so a healthy probe no longer adds its own
+    # 5s to every cycle: this loop costs one cycle of blindness on a death, not
+    # two, against streaks of 28 to 85 measured in run-20260831-1752.
+    #
+    # This narrows the exposure window; it does not close it. The deeper cause
+    # (sregym#95) is that exec_kubectl_cmd_safely is a sync def FastMCP calls
+    # inline on a single-worker uvicorn, so a blocking kubectl call can stall
+    # the whole event loop and starve /healthz exactly as it used to starve
+    # /kubectl/sse. What is left of that is visible in this file as restarts
+    # whose gap from the previous one is well under
+    # PF_PROBE_INTERVAL_SECONDS: this loop cannot distinguish "the pod is
+    # actually down" from "the pod is too busy to answer for a moment", and
+    # fixing that distinction is out of scope here.
+    #
+    # /healthz does not cover the SSE mounts themselves, so a broken Mount or
+    # a fastmcp/starlette regression isolated to create_sse_app would report
+    # healthy here while every real tool call failed silently, with nothing
+    # to restart and no signal. PF_DEEP_CHECK_EVERY_N_CYCLES below trades
+    # that coverage back at a much lower frequency, cheaply, rather than
+    # leaving the gap open: at PF_PROBE_INTERVAL_SECONDS=15 and
+    # PF_DEEP_CHECK_EVERY_N_CYCLES=20 it costs at most
+    # PF_DEEP_CHECK_TIMEOUT_SECONDS once every 5 minutes per slot, against
+    # that same cost on every 15s cycle under the old probe. It only logs a
+    # failure (see record_pf_event's "deep_check_failed" event, below); it
+    # never restarts on one. Restarting the local kubectl process cannot fix
+    # a server-side application bug, and tying a known-futile restart to it
+    # would only relearn run-20260831-1752's lesson from the other direction
+    # -- action with no effect, this time against the wrong layer.
+    PF_PROBE_INTERVAL_SECONDS=15
+    PF_DEEP_CHECK_EVERY_N_CYCLES=20
+    PF_DEEP_CHECK_TIMEOUT_SECONDS=5
     (
+      pf_cycle=0
+      # The lag record_pf_event writes is measured against this, not against
+      # PF_PROBE_INTERVAL_SECONDS. Updated only when the healthz probe below
+      # succeeds, never on a failure and never after the deep check: the
+      # checkpoint means "the last time /healthz confirmed the forward up".
+      # Leaving it alone on a failure is what makes a crash loop's lag grow
+      # cycle over cycle instead of resetting to one interval every time (see
+      # the comment where pf_lag is used, below). Leaving it alone after the
+      # deep check is what makes that check's own several seconds show up as
+      # exposure on whichever event reports it, not get silently absorbed
+      # into the baseline a later cycle measures against.
+      pf_prev_checkpoint_epoch=$(date +%s)
       while true; do
-        sleep 15
-        pf_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-          "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)
-        if [ "$pf_code" = "200" ]; then
+        sleep "$PF_PROBE_INTERVAL_SECONDS"
+        pf_cycle=$(( pf_cycle + 1 ))
+        pf_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+          "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null)
+        pf_checkpoint_epoch=$(date +%s)
+        pf_lag=$(( pf_checkpoint_epoch - pf_prev_checkpoint_epoch ))
+        if [ "$pf_code" != "200" ]; then
+          # pf_prev_checkpoint_epoch is deliberately NOT advanced here. It
+          # still names the last confirmed-good probe, so a second
+          # consecutive failure's pf_lag accumulates on top of the first
+          # instead of resetting to one interval every cycle -- a crash loop
+          # of N restarts must report growing lag, not N copies of ~15.
+          old_pid="$(cat "$PF_PID_FILE" 2>/dev/null || true)"
+          echo "[slot $slot] MCP port-forward stopped serving, restarting"
+          kill "$old_pid" 2>/dev/null || true
+          # Let the old process release the port before rebinding, or the new
+          # kubectl loses the race, exits, and the port stays dead a full cycle.
+          sleep 1
+          nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
+            -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
+          new_pid="$!"
+          # Atomic, so a concurrent stop_pf reads either the old pid or the
+          # new one, never a half-written file.
+          echo "$new_pid" >"$PF_PID_FILE.tmp" && mv "$PF_PID_FILE.tmp" "$PF_PID_FILE"
+          record_pf_event "$PF_RESTARTS_FILE" "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" \
+            "restart" "$old_pid" "$new_pid" "healthz $pf_code" "$pf_lag"
           continue
         fi
-        echo "[slot $slot] MCP port-forward stopped serving, restarting"
-        kill "$(cat "$PF_PID_FILE" 2>/dev/null)" 2>/dev/null || true
-        # Let the old process release the port before rebinding, or the new
-        # kubectl loses the race, exits, and the port stays dead a full cycle.
-        sleep 1
-        nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
-          -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
-        # Atomic, so a concurrent stop_pf reads either the old pid or the
-        # new one, never a half-written file.
-        echo "$!" >"$PF_PID_FILE.tmp" && mv "$PF_PID_FILE.tmp" "$PF_PID_FILE"
+        pf_prev_checkpoint_epoch="$pf_checkpoint_epoch"
+
+        if [ $(( pf_cycle % PF_DEEP_CHECK_EVERY_N_CYCLES )) -eq 0 ]; then
+          deep_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$PF_DEEP_CHECK_TIMEOUT_SECONDS" \
+            "http://127.0.0.1:$MCP_SERVER_PORT/kubectl/sse" 2>/dev/null)
+          if [ "$deep_code" != "200" ]; then
+            # Measured from the same pf_prev_checkpoint_epoch as above, on
+            # purpose: it is not touched here (see the comment by its
+            # declaration), so this reports roughly the deep check's own
+            # PF_DEEP_CHECK_TIMEOUT_SECONDS, not a stale value that already
+            # absorbed it.
+            deep_lag=$(( $(date +%s) - pf_prev_checkpoint_epoch ))
+            cur_pid="$(cat "$PF_PID_FILE" 2>/dev/null || true)"
+            echo "[slot $slot] deep check: /kubectl/sse answered $deep_code, logging only"
+            record_pf_event "$PF_RESTARTS_FILE" "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" \
+              "deep_check_failed" "$cur_pid" "$cur_pid" "kubectl/sse $deep_code" "$deep_lag"
+          fi
+        fi
       done
     ) &
     PF_WATCH_PID=$!
@@ -333,6 +478,12 @@ run_slot() {
 
     for pid in $problems; do
       echo "[slot $slot] === $pid ==="
+      # Named so a restart the supervisor records while this call is running
+      # can be attributed to it (see record_pf_event above). Removed right
+      # after, not merely overwritten next iteration: a restart landing in the
+      # gap between problems must read as unattributed-to-this-problem, not
+      # be misattributed to whichever problem happened to run last.
+      echo "$pid" >"$CURRENT_PROBLEM_FILE"
       uv run --project "$WORKDIR" python "$WORKDIR/main.py" \
         --agent brain_go \
         --problem "$pid" \
@@ -341,6 +492,13 @@ run_slot() {
         --n-attempts $N_ATTEMPTS \
         --agent-timeout $AGENT_TIMEOUT_SECONDS \
         $NOISE_FLAG $resume_arg || echo "[slot $slot] $pid failed, continuing"
+      # Snapshotted into previous_problem before current is cleared, not
+      # after: this is the one write site where current still holds this
+      # problem's own id, which is exactly the value a restart detected up to
+      # PF_PROBE_INTERVAL_SECONDS after this problem ends should be able to
+      # name as a candidate (see record_pf_event's own comment above).
+      cp "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" 2>/dev/null || true
+      rm -f "$CURRENT_PROBLEM_FILE"
       sync_results || true
     done
 
