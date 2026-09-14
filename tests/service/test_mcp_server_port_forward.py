@@ -216,13 +216,30 @@ def test_is_port_forward_healthy_probes_healthz_not_a_real_session():
     assert calls == [("http://127.0.0.1:9954/healthz", {"timeout": 5})]
 
 
-def test_is_port_forward_healthy_false_on_non_200():
+@pytest.mark.parametrize("status", [200, 404, 503])
+def test_is_port_forward_healthy_true_on_any_answer(status):
+    """Any status proves the forward carried the request to the app.
+
+    404 is the case this exists for, and is what the deployed container
+    actually returns. deploy() applies the kustomization with `kubectl apply
+    -k`, and its `images:` transform rewrites deployment.yaml's `sregym` to
+    ghcr.io/sregym/sregym-mcp, which imagePullPolicy: Always pulls fresh from
+    GHCR on every pod start. That published image was built 2026-09-06 and has
+    no /healthz route, which entered this repo on 2026-09-11 alongside this
+    probe (#94). Requiring 200 made this permanently False and aborted all 12
+    slots of run-20260914-0912.
+
+    503 is in here for the same reason rather than as a separate case: a
+    caller acts on False by restarting `kubectl port-forward`, which cannot
+    change a status the app chose to send.
+    """
+
     class FakeResponse:
-        status_code = 503
+        status_code = status
 
     s = _server(healthy=True)
     with mock.patch.object(mcp_server.requests, "get", mock.Mock(return_value=FakeResponse())):
-        assert MCPServer._is_port_forward_healthy(s) is False
+        assert MCPServer._is_port_forward_healthy(s) is True
 
 
 def test_is_port_forward_healthy_false_on_request_error():

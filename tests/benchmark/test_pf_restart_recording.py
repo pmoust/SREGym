@@ -298,9 +298,21 @@ def _supervisor_loop_body() -> str:
     run_shard.sh runs, minus the `( ... ) &` wrapper itself. Extracted so a
     test can drive it with sleep/date/curl faked, rather than reimplementing
     its lag arithmetic separately and only proving the reimplementation
-    agrees with itself."""
+    agrees with itself.
+
+    Carries the two probe functions the loop calls, which live at file scope
+    in run_shard.sh rather than inside the loop. The real subshell inherits
+    them; a harness that pastes only the loop body does not, and the loop
+    would then read every cycle as a dead forward and restart on all of them.
+    They are extracted rather than stubbed so a caller's fake curl still
+    drives the real predicate."""
     text = RUN_SHARD.read_text()
-    return "pf_cycle=0" + text.split("pf_cycle=0", 1)[1].split("\n    ) &", 1)[0]
+    fns = []
+    for name in ("mcp_probe_code", "mcp_probe_answered"):
+        opener = f"{name}() {{"
+        fns.append(opener + text.split(opener, 1)[1].split("\n}\n", 1)[0] + "\n}\n")
+    loop = "pf_cycle=0" + text.split("pf_cycle=0", 1)[1].split("\n    ) &", 1)[0]
+    return "\n".join(fns) + "\n" + loop
 
 
 def test_a_deep_check_failure_reports_its_own_short_lag(tmp_path):
@@ -426,7 +438,7 @@ def test_a_restart_right_after_a_deep_check_cycle_reports_the_inflated_lag(tmp_p
         '        echo -n "200"; return ;;\n'
         "    esac\n"
         "  done\n"
-        '  if [ "$pf_cycle" = "21" ]; then echo -n "500"; else echo -n "200"; fi\n'
+        '  if [ "$pf_cycle" = "21" ]; then echo -n "000"; else echo -n "200"; fi\n'
         "}\n"
         f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n' + loop_body + "\n"
     )
@@ -487,7 +499,12 @@ def test_a_crash_loop_reports_growing_lag_not_a_flat_interval(tmp_path):
         # healthz fails on every cycle, so PF_DEEP_CHECK_EVERY_N_CYCLES's
         # gate is never reached (each failing cycle continues before it) and
         # this never needs to distinguish it from the deep check's own URL.
-        'curl() { echo -n "500"; }\n'
+        #
+        # 000, curl's code for no HTTP response at all, because that is what a
+        # dead forward actually produces: refused, nothing listening, or
+        # accepted and never answered. A status the app chose would mean the
+        # forward is carrying traffic and must not be restarted.
+        'curl() { echo -n "000"; }\n'
         f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n' + loop_body + "\n"
     )
     proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
