@@ -22,11 +22,13 @@ Reads two artifacts per run, both written by the harness:
 The harness writes tool-calls.json twice: once under the attempt's own results
 directory, keyed by problem and attempt, and once under .runtime/brain_go, keyed
 by an opaque per-investigation hash. Only the first is read here, matched by its
-path. A pattern that took any tool-calls.json under the run would count 115
-files for 63 attempts and inflate every share below it, and it would do so
-quietly: glob skips dot-directories by default, so such a pattern happens to
-give the right answer today and stops the moment the runtime directory is not
-hidden or include_hidden is passed.
+path: the pattern requires a results/.../run_N/ shape, which the .runtime copy
+never has, so it is excluded on path shape alone, regardless of glob's
+hidden-directory handling. A pattern that matched the file name anywhere, with
+no such path constraint, would count 115 files for 63 attempts and inflate
+every share below it, and it would be the one relying on an accident instead:
+right only while the runtime directory stays hidden and include_hidden is
+never passed.
 
 That provenance is why the by-node figures here are safe to compare across runs
 while token figures are not. Each box runs three slots against one brain-go
@@ -167,61 +169,34 @@ def spread(rows: list[dict], key: str) -> str:
     return f"min {values[0]} / med {int(statistics.median(values))} / max {values[-1]}"
 
 
-def report(name: str, run_dir: str) -> dict:
+def analyze(run_dir: str) -> dict | None:
+    """Every number report() prints, computed with no output of its own.
+
+    None when run_dir has no brain_go_ALL_results.csv at all, so the caller
+    can say so and exit; every other case returns a summary carrying both the
+    numbers already in classify()'s dict and the tool-call figures report()
+    renders, so render() only formats and report() only prints.
+    """
     rows = load_attempts(run_dir)
 
     if not rows:
-        print(f"{name}: no brain_go_ALL_results.csv under {run_dir}", file=sys.stderr)
-        sys.exit(1)
+        return None
 
     summary = classify(rows)
     by_node, by_phase_node, tool_total, per_attempt = load_tool_calls(run_dir)
     csv_total = sum(v for v in (_int(r, "tool_calls") for r in rows) if v is not None)
 
-    print(f"\n=== {name} ===")
-    print(f"  attempts                {summary['attempts']}")
-    print(f"  diagnosed correctly     {summary['correct']}  ({_pct(summary['diagnosis_rate'])})")
-    print(f"  reasoned but wrong      {summary['wrong']}")
-    print(f"  zero-evidence template  {summary['boilerplate']}")
-    print(f"  mitigated               {summary['mitigated']}")
-    print(f"  template AND mitigated  {summary['boilerplate_mitigated']}"
-          f"   (fixed the fault, then reported no evidence)")
-    print(f"  diagnosis rate, reasoned attempts only  {_pct(summary['diagnosis_rate_reasoned'])}")
-
-    if summary["boilerplate_rows"]:
-        print(f"  template attempts, diagnosis-phase tool calls: "
-              f"{spread(summary['boilerplate_rows'], 'tool_calls_diagnosis')}")
-    print(f"  all attempts, diagnosis-phase tool calls:       {spread(rows, 'tool_calls_diagnosis')}")
-
-    # A mismatch means some attempt's tool-calls.json is missing or double
-    # counted, which would silently skew every share below it.
-    status = "ok" if csv_total == tool_total else f"MISMATCH (json {tool_total} vs csv {csv_total})"
-    print(f"  tool-call reconciliation: {status}")
-
-    if by_node:
-        print("  tool calls by node:")
-        total = sum(by_node.values())
-        for node, count in by_node.most_common():
-            flag = "  <- planner" if node == PLANNER_NODE else ""
-            print(f"    {node:24s} {count:6d}  {100 * count / total:5.1f}%{flag}")
-
-    diagnosis = by_phase_node.get("diagnosis")
-    if diagnosis:
-        total = sum(diagnosis.values())
-        share = 100 * diagnosis.get(PLANNER_NODE, 0) / total
-        print(f"  planner share, diagnosis phase only: {share:.1f}%")
-
-    summary["planner_share"] = (
-        by_node.get(PLANNER_NODE, 0) / sum(by_node.values()) if by_node else None
-    )
+    summary["rows"] = rows
+    summary["by_node"] = by_node
+    summary["by_phase_node"] = by_phase_node
+    summary["tool_total"] = tool_total
+    summary["csv_total"] = csv_total
+    summary["planner_share"] = by_node.get(PLANNER_NODE, 0) / sum(by_node.values()) if by_node else None
 
     # Per attempt, not run-wide: whether the attempts that gave up on reporting
     # were also the ones that spent their calls in the planner is the question
     # the run-wide share cannot answer.
-    template_keys = {
-        (r.get("problem_id", ""), str(r.get("attempt", "")))
-        for r in summary["boilerplate_rows"]
-    }
+    template_keys = {(r.get("problem_id", ""), str(r.get("attempt", ""))) for r in summary["boilerplate_rows"]}
     template_shares, reasoned_shares = [], []
 
     for key, data in per_attempt.items():
@@ -232,12 +207,75 @@ def report(name: str, run_dir: str) -> dict:
         share = nodes.get(PLANNER_NODE, 0) / calls
         (template_shares if key in template_keys else reasoned_shares).append(share)
 
-    if template_shares and reasoned_shares:
-        print(f"  planner share per attempt: template {_pct(statistics.median(template_shares))}"
-              f"  vs reasoned {_pct(statistics.median(reasoned_shares))}   (medians)")
-
     summary["planner_share_template"] = statistics.median(template_shares) if template_shares else None
     summary["planner_share_reasoned"] = statistics.median(reasoned_shares) if reasoned_shares else None
+
+    return summary
+
+
+def render(name: str, summary: dict) -> str:
+    """The report analyze() computed, as the text report() prints."""
+    rows = summary["rows"]
+    by_node = summary["by_node"]
+    by_phase_node = summary["by_phase_node"]
+
+    lines = [f"\n=== {name} ==="]
+    lines.append(f"  attempts                {summary['attempts']}")
+    lines.append(f"  diagnosed correctly     {summary['correct']}  ({_pct(summary['diagnosis_rate'])})")
+    lines.append(f"  reasoned but wrong      {summary['wrong']}")
+    lines.append(f"  zero-evidence template  {summary['boilerplate']}")
+    lines.append(f"  mitigated               {summary['mitigated']}")
+    lines.append(
+        f"  template AND mitigated  {summary['boilerplate_mitigated']}   (fixed the fault, then reported no evidence)"
+    )
+    lines.append(f"  diagnosis rate, reasoned attempts only  {_pct(summary['diagnosis_rate_reasoned'])}")
+
+    if summary["boilerplate_rows"]:
+        lines.append(
+            f"  template attempts, diagnosis-phase tool calls: "
+            f"{spread(summary['boilerplate_rows'], 'tool_calls_diagnosis')}"
+        )
+    lines.append(f"  all attempts, diagnosis-phase tool calls:       {spread(rows, 'tool_calls_diagnosis')}")
+
+    # A mismatch means some attempt's tool-calls.json is missing or double
+    # counted, which would silently skew every share above it.
+    status = (
+        "ok"
+        if summary["csv_total"] == summary["tool_total"]
+        else f"MISMATCH (json {summary['tool_total']} vs csv {summary['csv_total']})"
+    )
+    lines.append(f"  tool-call reconciliation: {status}")
+
+    if by_node:
+        lines.append("  tool calls by node:")
+        total = sum(by_node.values())
+        for node, count in by_node.most_common():
+            flag = "  <- planner" if node == PLANNER_NODE else ""
+            lines.append(f"    {node:24s} {count:6d}  {100 * count / total:5.1f}%{flag}")
+
+    diagnosis = by_phase_node.get("diagnosis")
+    if diagnosis:
+        total = sum(diagnosis.values())
+        share = 100 * diagnosis.get(PLANNER_NODE, 0) / total
+        lines.append(f"  planner share, diagnosis phase only: {share:.1f}%")
+
+    if summary["planner_share_template"] is not None and summary["planner_share_reasoned"] is not None:
+        lines.append(
+            f"  planner share per attempt: template {_pct(summary['planner_share_template'])}"
+            f"  vs reasoned {_pct(summary['planner_share_reasoned'])}   (medians)"
+        )
+
+    return "\n".join(lines)
+
+
+def report(name: str, run_dir: str) -> dict:
+    summary = analyze(run_dir)
+
+    if summary is None:
+        print(f"{name}: no brain_go_ALL_results.csv under {run_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    print(render(name, summary))
 
     return summary
 
@@ -253,22 +291,35 @@ def _delta(before: float | None, after: float | None, unit: str = "pp") -> str:
     return f"{100 * (after - before):+.1f}{unit}"
 
 
-def compare(a_name: str, a: dict, b_name: str, b: dict) -> None:
-    print(f"\n=== {a_name}  ->  {b_name} ===")
-    print(f"  attempts                {a['attempts']:>6d}  {b['attempts']:>6d}")
-    print(f"  diagnosed correctly     {a['correct']:>6d}  {b['correct']:>6d}"
-          f"   {_delta(a['diagnosis_rate'], b['diagnosis_rate'])}")
-    print(f"  zero-evidence template  {a['boilerplate']:>6d}  {b['boilerplate']:>6d}"
-          f"   {b['boilerplate'] - a['boilerplate']:+d}")
-    print(f"  template AND mitigated  {a['boilerplate_mitigated']:>6d}  {b['boilerplate_mitigated']:>6d}"
-          f"   {b['boilerplate_mitigated'] - a['boilerplate_mitigated']:+d}")
-    print(f"  mitigated               {a['mitigated']:>6d}  {b['mitigated']:>6d}"
-          f"   {b['mitigated'] - a['mitigated']:+d}")
-    print(f"  planner tool-call share {_pct(a['planner_share']):>6s}  {_pct(b['planner_share']):>6s}"
-          f"   {_delta(a['planner_share'], b['planner_share'])}")
-    print("\n  The template count is the number to read first. It is a count, not an"
-          "\n  estimate, so it carries meaning at 63 attempts where a score difference"
-          "\n  of a few points does not.")
+def compare(a_name: str, a: dict, b_name: str, b: dict) -> str:
+    lines = [f"\n=== {a_name}  ->  {b_name} ==="]
+    lines.append(f"  attempts                {a['attempts']:>6d}  {b['attempts']:>6d}")
+    lines.append(
+        f"  diagnosed correctly     {a['correct']:>6d}  {b['correct']:>6d}"
+        f"   {_delta(a['diagnosis_rate'], b['diagnosis_rate'])}"
+    )
+    lines.append(
+        f"  zero-evidence template  {a['boilerplate']:>6d}  {b['boilerplate']:>6d}"
+        f"   {b['boilerplate'] - a['boilerplate']:+d}"
+    )
+    lines.append(
+        f"  template AND mitigated  {a['boilerplate_mitigated']:>6d}  {b['boilerplate_mitigated']:>6d}"
+        f"   {b['boilerplate_mitigated'] - a['boilerplate_mitigated']:+d}"
+    )
+    lines.append(
+        f"  mitigated               {a['mitigated']:>6d}  {b['mitigated']:>6d}   {b['mitigated'] - a['mitigated']:+d}"
+    )
+    lines.append(
+        f"  planner tool-call share {_pct(a['planner_share']):>6s}  {_pct(b['planner_share']):>6s}"
+        f"   {_delta(a['planner_share'], b['planner_share'])}"
+    )
+    lines.append(
+        "\n  The template count is the number to read first. It is a count, not an"
+        "\n  estimate, so it carries meaning at 63 attempts where a score difference"
+        "\n  of a few points does not."
+    )
+
+    return "\n".join(lines)
 
 
 def main(argv: list[str]) -> int:
@@ -281,9 +332,13 @@ def main(argv: list[str]) -> int:
 
     if args.baseline:
         base = report(os.path.basename(args.baseline.rstrip("/")), args.baseline)
-        compare(
-            os.path.basename(args.baseline.rstrip("/")), base,
-            os.path.basename(args.run_dir.rstrip("/")), current,
+        print(
+            compare(
+                os.path.basename(args.baseline.rstrip("/")),
+                base,
+                os.path.basename(args.run_dir.rstrip("/")),
+                current,
+            )
         )
 
     return 0
