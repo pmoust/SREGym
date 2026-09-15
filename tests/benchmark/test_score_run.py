@@ -1065,6 +1065,32 @@ def test_a_current_parse_failure_is_named_from_its_own_column(tmp_path):
     assert s["diagnosis"]["judge_scored_pct"] == 50.0
 
 
+def test_the_parse_failure_marker_matches_the_whole_string_not_a_substring(tmp_path):
+    """The evidence field quotes the diagnosis, and a diagnosis can talk about
+    parsing.
+
+    treat's readiness_probe_misconfiguration_social_network attempt 3 scored
+    success=True at composite 0.78 with "JSON parse failure" written in its
+    submission. That attempt's own checklist happens not to repeat the phrase,
+    but the judge's evidence strings quote the submission routinely, so a bare
+    "parse failure" substring is one quote away from erasing a scored attempt
+    from both the rate and the continuous score.
+    """
+    quoting = (
+        "[{'id': 'D1-Q1', 'answer': 'Yes', 'evidence': \"Diagnosis rules out a JSON "
+        "parse failure at startup\", 'confidence': 'High'}]"
+    )
+    rows = [
+        _judge_row("a", diag="True", checklist=quoting),
+        _judge_row("b", diag="False", checklist=_LEGACY_ALL_NO),
+    ]
+    s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
+
+    assert s["judge_parse_failures"]["count"] == 1
+    assert s["judge_parse_failures"]["attempts"] == [("b", 1)]
+    assert s["diagnosis"]["judge_scored_pct"] == 100.0
+
+
 def test_a_run_with_no_parse_failures_reports_none(tmp_path):
     rows = [_judge_row("a", diag="True"), _judge_row("b", diag="False")]
     s = score_run.score(score_run.load(_judge_run(tmp_path, rows)))
@@ -1084,3 +1110,333 @@ def test_render_names_the_parse_failed_attempts(tmp_path):
     assert "judge parse failures: 1 attempt(s)" in out
     assert "kafka_poison_pill_hol_block attempt 3" in out
     assert "Excluding them the graded rate is 100.0% (1/1)" in out
+
+
+# --- the continuous endpoint -------------------------------------------------
+#
+# The binary Diagnosis.success is composite >= 0.70, so it cannot tell a
+# near-miss from a total miss and cannot say which dimension moved. These cover
+# the parts of that where a wrong answer would still look plausible: the
+# populations the mean is taken over, and what the interval treats as one
+# observation.
+
+
+def _dims(d1, d2, d3):
+    """A Diagnosis.dimensions cell, written the way the harness writes one:
+    the repr of the dict llm_as_a_judge_oracle.py builds."""
+    return str(
+        {
+            "D1": {"name": "Fault Localization", "score": d1},
+            "D2": {"name": "Fault Characterization", "score": d2},
+            "D3": {"name": "Scope Precision", "score": d3},
+        }
+    )
+
+
+_SCORE_COLUMNS = [
+    *_COLUMNS,
+    "Diagnosis.composite_score",
+    "Diagnosis.dimensions",
+    "Diagnosis.checklist",
+    "Diagnosis.unscored_reason",
+]
+
+
+def _score_row(pid, attempt=1, composite="", dims="", checklist="", unscored_reason=""):
+    row = _row(pid, attempt=attempt, diag="", mitig="False", ttl="100", ttm="200")
+    row["Diagnosis.composite_score"] = composite
+    row["Diagnosis.dimensions"] = dims
+    row["Diagnosis.checklist"] = checklist
+    row["Diagnosis.unscored_reason"] = unscored_reason
+    return row
+
+
+def _score_run_dir(tmp_path, rows):
+    for i, row in enumerate(rows):
+        d = tmp_path / "slots" / "0" / "results" / "t0" / f"run_{i}"
+        d.mkdir(parents=True)
+        with (d / "brain_go_results.csv").open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=_SCORE_COLUMNS)
+            w.writeheader()
+            w.writerow({c: row.get(c, "") for c in _SCORE_COLUMNS})
+
+    return tmp_path
+
+
+def _scored(tmp_path, rows):
+    return score_run.score(score_run.load(_score_run_dir(tmp_path, rows)))["diagnosis_score"]
+
+
+def test_an_archived_parse_failure_is_out_of_the_judge_scored_mean(tmp_path):
+    """The reason there are two populations.
+
+    A parse failure was forced to composite 0.0, so leaving it in drags the
+    mean toward zero for an attempt the judge never scored. Two attempts at
+    1.0 and one parse failure is a mean of 0.67 counting it and 1.0 not.
+    """
+    rows = [
+        _score_row("a", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("b", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("c", composite="0.0", dims=_dims(0.0, 0.0, 0.0), checklist=_LEGACY_ALL_NO),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["n"] == 3
+    assert ds["all"]["mean"] == pytest.approx(0.6667, abs=1e-4)
+    assert ds["all"]["zero"] == 1
+    assert ds["judge_scored"]["n"] == 2
+    assert ds["judge_scored"]["mean"] == 1.0
+    assert ds["judge_scored"]["zero"] == 0
+    assert ds["parse_failures_scored_zero"] == 1
+
+
+def test_an_attempt_with_no_composite_is_unmeasured_not_zero(tmp_path):
+    """What the current judge writes for an attempt it could not score: it
+    returns before setting composite_score at all. Reading the empty cell as
+    0.0 would invent a graded failure, the same mistake the strict/graded split
+    above exists to stop."""
+    rows = [
+        _score_row("a", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("b", unscored_reason="judge_parse_failure"),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["no_score"] == 1
+    assert ds["parse_failures_scored_zero"] == 0
+    assert ds["all"]["n"] == 1
+    assert ds["all"]["mean"] == 1.0
+    assert ds["all"]["zero"] == 0
+
+
+def test_the_histogram_is_every_distinct_value_not_a_binning(tmp_path):
+    """The composite takes at most 64 values and no archived run has shown more
+    than 13, so the distribution is printed whole. It is U-shaped in every run
+    checked, which a mean and sd alone do not show."""
+    rows = [
+        _score_row("a", attempt=1, composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("a", attempt=2, composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("a", attempt=3, composite="0.33", dims=_dims(1.0, 0.0, 0.0)),
+        _score_row("b", attempt=1, composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["histogram"] == [(0.0, 2), (0.33, 1), (1.0, 1)]
+    assert ds["all"]["zero"] == 2
+    assert ds["all"]["perfect"] == 1
+
+
+def test_the_zero_count_is_exactly_zero_not_nearly_zero(tmp_path):
+    """The lowest non-zero composite is 0.11: one yes on D1 and nothing else,
+    0.33 * 0.33. Both archived arms contain attempts there. Rounding it into
+    the zero count would report an attempt that got something right as one that
+    got nothing right, and the zero count is the statistic that moved most in
+    the A/B this was written for."""
+    rows = [
+        _score_row("a", composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("b", composite="0.11", dims=_dims(0.33, 0.0, 0.0)),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["zero"] == 1
+    assert ds["all"]["histogram"] == [(0.0, 1), (0.11, 1)]
+
+
+def test_the_quartiles_stay_inside_the_range_the_score_can_take(tmp_path):
+    """statistics.quantiles' default "exclusive" method extrapolates past the
+    data: two attempts at 0.0 and 1.0 give q1 -0.25 and q3 1.25, and the
+    composite cannot be either. The IQR is a description of the attempts
+    observed, so it must not name a score none of them could have had."""
+    rows = [
+        _score_row("a", attempt=1, composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("a", attempt=2, composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert 0.0 <= ds["all"]["q1"] <= 1.0
+    assert 0.0 <= ds["all"]["q3"] <= 1.0
+    assert ds["all"]["q1"] == 0.25
+    assert ds["all"]["q3"] == 0.75
+
+
+def test_the_three_dimensions_are_reported_separately(tmp_path):
+    """They answer different questions. In the A/B this was written for, D1 and
+    D3 moved about 0.10 each while D2 moved -0.01; a composite mean alone says
+    only that something moved."""
+    rows = [
+        _score_row("a", composite="0.67", dims=_dims(1.0, 0.0, 1.0)),
+        _score_row("b", composite="0.67", dims=_dims(1.0, 0.0, 1.0)),
+    ]
+    ds = _scored(tmp_path, rows)
+    dims = ds["all"]["dimensions"]
+
+    assert dims["D1"]["mean"] == 1.0
+    assert dims["D2"]["mean"] == 0.0
+    assert dims["D3"]["mean"] == 1.0
+    assert dims["D1"]["name"] == "Fault Localization"
+    assert dims["D3"]["histogram"] == [(1.0, 2)]
+
+
+def test_a_malformed_dimensions_cell_costs_only_its_own_attempt(tmp_path):
+    """The CSVs already carry nine header shapes, so an unreadable cell is not
+    far-fetched. It must not take the run's report down, and it must not be
+    read as three zeros either."""
+    rows = [
+        _score_row("a", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("b", composite="0.0", dims="{'D1': {'name': 'Fault Loc"),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["n"] == 2
+    assert ds["all"]["mean"] == 0.5
+    assert ds["all"]["dimensions"]["D1"]["n"] == 1
+    assert ds["all"]["dimensions"]["D1"]["mean"] == 1.0
+
+
+def test_the_interval_counts_problems_not_attempts(tmp_path):
+    """Three attempts on one problem face the same fault and the same ground
+    truth, so they are not three independent observations. Four problems of
+    three identical attempts each: an attempt-level interval would have 11
+    degrees of freedom and a half-width of 0.074, the problem-level one has 3
+    and 0.205."""
+    rows = [
+        _score_row(pid, attempt=attempt, composite=str(value), dims=_dims(value, value, value))
+        for pid, value in (("a", 0.6), ("b", 0.7), ("c", 0.8), ("d", 0.9))
+        for attempt in (1, 2, 3)
+    ]
+    ds = _scored(tmp_path, rows)
+    ci = ds["all"]["clustered_ci95"]
+
+    assert ci["clusters"] == 4
+    assert ci["centre"] == pytest.approx(0.75, abs=1e-4)
+    assert ci["low"] == pytest.approx(0.5446, abs=1e-3)
+    assert ci["high"] == pytest.approx(0.9554, abs=1e-3)
+    # Strictly wider than the attempt-level interval it replaces, which is the
+    # whole point of clustering.
+    assert ci["low"] < 0.75 - 0.0742
+
+
+def test_one_problem_gets_no_interval_rather_than_a_zero_width_one(tmp_path):
+    """An interval from zero degrees of freedom is not a result. Same rule
+    run_stats.py applies to a category with too few attempts."""
+    rows = [
+        _score_row("a", attempt=1, composite="0.5", dims=_dims(0.5, 0.5, 0.5)),
+        _score_row("a", attempt=2, composite="0.7", dims=_dims(0.7, 0.7, 0.7)),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["clustered_ci95"] is None
+
+
+def test_the_interval_is_clipped_into_the_range_the_score_can_take(tmp_path):
+    """The composite is bounded. A t interval is not, and near a bound it runs
+    outside [0, 1]; printing -0.31 as a possible mean score is worse than
+    printing the bound."""
+    rows = [
+        _score_row(pid, composite=str(value), dims=_dims(value, value, value))
+        for pid, value in (("a", 0.0), ("b", 0.0), ("c", 1.0))
+    ]
+    ds = _scored(tmp_path, rows)
+    ci = ds["all"]["clustered_ci95"]
+
+    assert ci["low"] == 0.0
+    assert ci["high"] == 1.0
+
+
+def test_per_problem_means_are_exposed_for_a_paired_comparison(tmp_path):
+    """This script scores one run and never compares two. A paired two-arm test
+    needs the per-problem mean vector, so it is in the output rather than left
+    to be re-derived from the CSVs by whatever does the comparing."""
+    rows = [
+        _score_row("a", attempt=1, composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("a", attempt=2, composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("b", attempt=1, composite="0.5", dims=_dims(0.5, 0.5, 0.5)),
+    ]
+    ds = _scored(tmp_path, rows)
+
+    assert ds["all"]["per_problem"] == [
+        {"problem_id": "a", "n": 2, "mean": 0.5},
+        {"problem_id": "b", "n": 1, "mean": 0.5},
+    ]
+
+
+def test_render_prints_the_mean_the_zero_count_and_the_dimensions(tmp_path):
+    rows = [
+        _score_row("a", composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("b", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+    ]
+    s = score_run.score(score_run.load(_score_run_dir(tmp_path, rows)))
+    out = score_run.render(s, None)
+
+    assert "Continuous score, which the binary verdict discards" in out
+    assert "0.5000" in out
+    assert "D1 Fault Localization" in out
+    assert "D2 Fault Characterization" in out
+    assert "D3 Scope Precision" in out
+    assert "Composite histogram: 0.00 x1  1.00 x1" in out
+    assert "2 of 2 judge-scored attempts sit on exactly 0.0 or exactly 1.0" in out
+
+
+def test_render_refuses_the_comparison_the_interval_cannot_support(tmp_path):
+    """Two per-arm intervals side by side are not a test of the difference
+    between two arms. In the A/B this was written for they overlapped while the
+    paired difference was +0.0795 with zero inside its interval, so a reader
+    comparing the printed intervals would have reached the right conclusion by
+    the wrong route, and on other data would reach the wrong one."""
+    rows = [
+        _score_row(pid, attempt=attempt, composite=str(value), dims=_dims(value, value, value))
+        for pid, value in (("a", 0.6), ("b", 0.7), ("c", 0.8), ("d", 0.9))
+        for attempt in (1, 2, 3)
+    ]
+    s = score_run.score(score_run.load(_score_run_dir(tmp_path, rows)))
+    out = score_run.render(s, None)
+
+    assert "This interval describes this one run" in out
+    assert "overlapping intervals do not show there is no difference" in out
+    assert "diagnosis_score.*.per_problem" in out
+    # The worked example is the part that makes the warning concrete, so it is
+    # pinned rather than left to be quietly deleted as boilerplate.
+    assert "+0.0795" in out
+    assert "-0.0796 to" in out
+    assert "+0.2387" in out
+    assert "inside noise" in out
+
+
+def test_render_names_the_population_beneath_the_histogram(tmp_path):
+    """The share sitting on the two spikes is 66% of ctrl's all-attempts
+    population and 52% of treat's judge-scored one. The line is computed over
+    the judge-scored population, so it has to say so rather than leave the
+    reader to match it against a figure quoted from the other."""
+    rows = [
+        _score_row("a", composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+        _score_row("b", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+    ]
+    s = score_run.score(score_run.load(_score_run_dir(tmp_path, rows)))
+    out = score_run.render(s, None)
+
+    assert "2 of 2 judge-scored attempts sit on exactly 0.0 or exactly 1.0" in out
+
+
+def test_render_says_nothing_about_a_run_that_recorded_no_composite(tmp_path):
+    """An archive predating the column is unmeasured, not a run of zeros. The
+    same rule the token section already follows."""
+    s = score_run.score(score_run.load(_run(tmp_path, [_row("a", diag="True", mitig="True", ttl="1", ttm="2")])))
+    out = score_run.render(s, None)
+
+    assert s["diagnosis_score"]["all"] is None
+    assert "Continuous score" not in out
+
+
+def test_the_binary_rates_are_unchanged_by_the_continuous_ones(tmp_path):
+    """Every prior run is on record as a binary rate. Adding the continuous
+    endpoint must not move the number those comparisons rest on."""
+    rows = [
+        _score_row("a", composite="1.0", dims=_dims(1.0, 1.0, 1.0)),
+        _score_row("b", composite="0.0", dims=_dims(0.0, 0.0, 0.0)),
+    ]
+    rows[0]["Diagnosis.success"] = "True"
+    rows[1]["Diagnosis.success"] = "False"
+    s = score_run.score(score_run.load(_score_run_dir(tmp_path, rows)))
+
+    assert s["diagnosis"]["strict_pct"] == 50.0
+    assert s["diagnosis"]["graded_pct"] == 50.0
+    assert s["diagnosis"]["correct"] == 1
