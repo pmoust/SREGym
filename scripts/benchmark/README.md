@@ -267,6 +267,47 @@ actually observed, how often did the agent reason correctly"). The gap
 between them is usually small, but it can be large when timeouts are
 common — the tool prints both specifically so nobody has to pick blind.
 
+It also prints the judge's **continuous score** beside the binary rate.
+`Diagnosis.success` is `composite >= 0.70`, where the composite is
+`0.33*D1 + 0.33*D2 + 0.34*D3` from `rca_checklists.yaml`, so the binary
+verdict says nothing about how far off a failed attempt was or which of the
+three dimensions it failed on. A paired A/B of two brain-go refs, 63 attempts
+per arm on the same 21 problems, scored 22/63 on the binary in both arms while
+the continuous score moved: over the judge-scored attempts the mean composite
+went 0.4195 to 0.5141, the zero-composite count 27/61 to 14/58, D1 0.443 to
+0.575 and D3 0.432 to 0.575, with D2 about flat at 0.383 to 0.391. Use the
+continuous numbers to see where a change acted; keep quoting the binary rate
+for comparisons against earlier runs, which are all on record that way.
+
+**Say which population you are quoting.** Those are the judge-scored figures,
+the row the tool tells you to quote, and the tool prints them. The
+all-attempts population includes the judge's own parse failures forced to 0.0
+on every dimension, and the two arms had 2 and 5 of those, so the asymmetry
+alone is enough to flip a dimension: D2 reads 0.370 to 0.360 there, a fall
+instead of a rise. Only `--json` carries the all-attempts dimension means.
+
+**More resolution is not significance.** Paired on problem over the
+judge-scored attempts, that same A/B gives a mean per-problem difference of
++0.0795, sd 0.3497, t(20) = 1.042, 95% interval -0.0796 to +0.2387. Zero is
+inside it. The continuous score showed where the change acted; it did not show
+that the change worked.
+
+The 95% interval the tool prints is a **one-run** interval, and putting two of
+them side by side is not a comparison in either direction: overlapping
+intervals do not show there is no difference, and separated ones do not show
+there is. Comparing two runs is a separate job and `score_run.py` does not do
+it, since every entry point here takes one run directory. The per-problem mean
+vector a paired comparison needs is in `--json` under
+`diagnosis_score.*.per_problem`.
+
+That interval takes the **problem** as the unit, not the attempt, because three
+attempts on one problem face the same fault and the same ground truth; it
+assumes the per-problem means are independent and roughly normal, which the
+attempt scores themselves are not. Read the histogram it prints, not only the
+mean: each dimension is (yes answers)/3, so it takes four values and the
+composite at most 64, and in every archived run checked 52% to 66% of
+judge-scored attempts sit on exactly 0.0 or exactly 1.0.
+
 **Per-category statistics, with honest uncertainty**:
 
 ```bash

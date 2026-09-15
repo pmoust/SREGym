@@ -33,6 +33,66 @@ repo's own `visualizer/queries.py` maps an empty string to False, which is the
 strict reading applied silently; that is the thing this output exists to
 prevent.
 
+## A judge that did not answer is not a zero either
+
+The checklist judge asks for a JSON array and sometimes gets something else
+back. It used to answer "No" to all nine questions after its retries ran out,
+which scored D1, D2 and D3 at 0.0 and made an attempt the judge never scored
+indistinguishable from a diagnosis it scored and rejected. Four of the 63
+attempts in run-20260914-1312 went that way, and four of the 63 in
+run-20260908-0739.
+
+The judge now leaves those attempts unscored, and this script counts them
+separately either way: on a current run from the Diagnosis.unscored_reason
+column, on an archived one from the "parse failure" evidence string those
+all-No checklists carry.
+
+## The binary verdict throws most of the judge's answer away
+
+`Diagnosis.success` is `composite >= 0.70`, and the composite is
+`0.33*D1 + 0.33*D2 + 0.34*D3` from rca_checklists.yaml. Reporting only the
+verdict discards both how far off a failed attempt was and which dimension it
+failed on.
+
+That costs real resolution. A paired A/B of two brain-go refs, 63 attempts per
+arm on the same 21 problems, scored 22/63 on the binary in both arms while the
+continuous score moved. Over the judge-scored attempts the mean composite went
+0.4195 to 0.5141, the zero-composite count 27/61 to 14/58, D1 0.443 to 0.575
+and D3 0.432 to 0.575, with D2 about flat at 0.383 to 0.391. The binary reports
+that experiment as no change at all.
+
+Those are the judge-scored figures, and the population matters. On the
+all-attempts population D2 reads 0.370 to 0.360, which is a fall rather than a
+rise: the arms had 2 and 5 judge parse failures, each forced to 0.0 on every
+dimension, so the asymmetry alone flips that dimension's sign. Quote the
+judge-scored numbers and say so, which is what the rendered output does.
+
+So this prints the continuous score beside the binary one. It does not replace
+it: every prior run is on record as a binary rate, and the strict/graded output
+above is what those comparisons rest on.
+
+## More resolution is not significance
+
+The same A/B, paired on problem over the judge-scored attempts, gives a mean
+per-problem difference of +0.0795 with sd 0.3497, t(20) = 1.042, and a 95%
+interval of -0.0796 to +0.2387. Zero is inside it. The continuous score shows
+where a change acted; it did not show that this change worked.
+
+Nothing here tests two runs against each other, and the interval this prints is
+a one-run interval. Two of them side by side are not a comparison in either
+direction: overlapping intervals do not establish no difference, and separated
+ones do not establish a difference. Pair on problem instead, off the
+per-problem mean vector in --json.
+
+The composite is not continuous in the usual sense and this output does not
+pretend otherwise. Each dimension is (yes answers)/3, so it takes one of four
+values and the composite one of at most 64. In all three archived runs checked
+the distribution is U-shaped, with 52% to 66% of judge-scored attempts sitting
+on exactly 0.0 or exactly 1.0, so a mean plus sd describes it badly on its own:
+sd runs about 0.42 on a [0, 1] scale, and mean +/- sd leaves the range. The
+full histogram is printed for that reason, and the zero count is named on its
+own line.
+
 ## TTD and TTM
 
 `TTL` in the CSVs is the paper's TTD. The name is inherited from AIOpsLab's
@@ -49,8 +109,10 @@ sits on the agent timeout and averaging it in measures the cap, not the agent.
 """
 
 import argparse
+import ast
 import csv
 import json
+import math
 import os
 import statistics
 import sys
@@ -155,6 +217,269 @@ def _int(raw: str) -> int:
         return 0
 
 
+# What the judge writes into Diagnosis.unscored_reason when it produced no
+# verdict. Kept as literals rather than imported from the judge module: this
+# script reads archived CSVs and must run against a checkout that predates the
+# column.
+_JUDGE_PARSE_FAILURE = "judge_parse_failure"
+
+# How an unscored attempt looked before the judge had a column for it: nine
+# all-No checklist answers, every one carrying this evidence string, and
+# Diagnosis.success recorded as False. Every archived run to date is this
+# shape, so the marker is what lets a past run be re-read correctly rather
+# than only future ones.
+#
+# The whole string, em-dash included, copied from the code that wrote it.
+# A looser "parse failure" would also match a judge quoting an agent that
+# diagnosed a parse failure of its own, and there is no reason to be loose:
+# the string was a fixed literal, and it is present verbatim in all 8
+# affected attempts across run-20260908-0739 and run-20260914-1312.
+_LEGACY_PARSE_FAILURE_MARKER = "parse failure — defaulting to No"
+
+
+def _judge_parse_failed(row: dict) -> bool:
+    """Whether the judge failed to parse its own reply for this attempt.
+
+    An attempt like that is not a wrong diagnosis. The judge never answered,
+    so there is nothing to grade, the same distinction this file already draws
+    for an absent mitigation verdict.
+    """
+    if _val(row, "Diagnosis.unscored_reason") == _JUDGE_PARSE_FAILURE:
+        return True
+
+    return _LEGACY_PARSE_FAILURE_MARKER in _val(row, "Diagnosis.checklist")
+
+
+# Two-tailed 95% t critical values, df 1-30. A df beyond this table uses the
+# normal approximation (1.96), which is accurate to three figures by df=30.
+# run_stats.py imports this rather than keeping a second copy, so the two
+# scripts cannot drift into quoting intervals built from different tables.
+_T_TABLE = {
+    1: 12.706,
+    2: 4.303,
+    3: 3.182,
+    4: 2.776,
+    5: 2.571,
+    6: 2.447,
+    7: 2.365,
+    8: 2.306,
+    9: 2.262,
+    10: 2.228,
+    11: 2.201,
+    12: 2.179,
+    13: 2.160,
+    14: 2.145,
+    15: 2.131,
+    16: 2.120,
+    17: 2.110,
+    18: 2.101,
+    19: 2.093,
+    20: 2.086,
+    21: 2.080,
+    22: 2.074,
+    23: 2.069,
+    24: 2.064,
+    25: 2.060,
+    26: 2.056,
+    27: 2.052,
+    28: 2.048,
+    29: 2.045,
+    30: 2.042,
+}
+
+
+def _t_crit(df: int) -> float:
+    return _T_TABLE.get(df, 1.96)
+
+
+# The three checklist dimensions, in the order rca_checklists.yaml declares
+# them. Listed rather than read from whatever keys a row happens to carry, so
+# a row missing a dimension reads as missing instead of shrinking the report.
+_DIMENSION_IDS = ("D1", "D2", "D3")
+
+
+def _composite(row: dict) -> float | None:
+    """This attempt's composite score, or None when the cell holds no number.
+
+    None rather than 0.0. An attempt with no score is not an attempt the judge
+    scored zero, the same distinction this file already draws for an absent
+    mitigation verdict. The current judge returns before writing a composite
+    for an attempt it could not score, so that column is empty there.
+    """
+    try:
+        return float(_val(row, "Diagnosis.composite_score"))
+    except ValueError:
+        return None
+
+
+def _dimension_scores(row: dict) -> dict[str, dict]:
+    """This row's Diagnosis.dimensions cell, one entry per dimension it names.
+
+    The cell is a repr of a dict, written by python's own str(), so
+    literal_eval reads it and nothing in it can execute. A cell that does not
+    parse yields {}, and a cell missing one dimension yields the others: one
+    malformed row should cost its own attempt, not the run's report, which is
+    how every other field here already degrades.
+    """
+    try:
+        parsed = ast.literal_eval(_val(row, "Diagnosis.dimensions"))
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    return {did: parsed[did] for did in _DIMENSION_IDS if isinstance(parsed.get(did), dict)}
+
+
+def _dimension_summary(rows: list[dict]) -> dict[str, dict]:
+    """Mean and full histogram for each dimension, over `rows`.
+
+    The three answer different questions, so they are never collapsed into one
+    number here. In the A/B this was written for, D1 and D3 each moved about
+    0.10 while D2 moved -0.01; a composite mean alone says only that something
+    moved.
+
+    Names come from the rows rather than a table in this file, so a renamed or
+    re-versioned checklist prints its own.
+    """
+    scores: dict[str, list[float]] = {did: [] for did in _DIMENSION_IDS}
+    names: dict[str, str] = {}
+    for row in rows:
+        for did, entry in _dimension_scores(row).items():
+            try:
+                scores[did].append(float(entry["score"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if did not in names and isinstance(entry.get("name"), str):
+                names[did] = entry["name"]
+
+    return {
+        did: {
+            "name": names.get(did, ""),
+            "n": len(values),
+            "mean": round(statistics.mean(values), 4),
+            "histogram": _histogram(values),
+        }
+        for did, values in scores.items()
+        if values
+    }
+
+
+def _histogram(values: list[float]) -> list[tuple[float, int]]:
+    """Every value that occurs, with its count, ascending.
+
+    Exact rather than binned. A dimension takes four values and the composite
+    at most 64, and no archived run has shown more than 13 distinct composites,
+    so the whole distribution fits in a line or two and nothing has to be
+    thrown away to summarise it.
+    """
+    counts: dict[float, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+
+    return sorted(counts.items())
+
+
+def _clustered_ci(problem_means: list[float]) -> dict | None:
+    """95% t interval on the mean composite, taking the problem as the unit.
+
+    Three attempts on one problem are not three independent observations: they
+    face the same injected fault and the same ground truth, and an attempt that
+    is hard for one ref tends to be hard on all three tries. An interval built
+    from 63 attempts as if they were independent is narrower than the data
+    supports. This takes each problem's own mean as one observation and puts a
+    t interval on those.
+
+    Stated because these numbers get quoted. The interval assumes the
+    per-problem means are independent of each other and roughly normal. That is
+    a much weaker assumption than treating the attempt scores as normal, which
+    they plainly are not: they are U-shaped and discrete. It is still an
+    assumption, and with 21 problems it is not checkable from the data.
+
+    The centre is the unweighted mean of the per-problem means, which equals
+    the attempt-level mean only when every problem contributed the same number
+    of attempts. Both are reported so an unbalanced run cannot pass one off as
+    the other. Bounds are clipped into [0, 1] because the composite is bounded;
+    an interval that runs to a bound is a sign the t approximation is being
+    asked for more than it can give.
+
+    None below two problems: an interval from zero degrees of freedom is not a
+    result.
+    """
+    k = len(problem_means)
+    if k < 2:
+        return None
+
+    centre = statistics.mean(problem_means)
+    half = _t_crit(k - 1) * statistics.stdev(problem_means) / math.sqrt(k)
+
+    return {
+        "centre": round(centre, 4),
+        "low": round(max(0.0, centre - half), 4),
+        "high": round(min(1.0, centre + half), 4),
+        "clusters": k,
+    }
+
+
+def _score_summary(rows: list[dict]) -> dict | None:
+    """The continuous endpoint over one population of attempts.
+
+    None when no attempt in the population carries a composite at all, so a run
+    predating the column reads as unmeasured rather than as a run that scored
+    zero.
+
+    per_problem is the per-problem mean vector. It is the input a paired
+    two-arm comparison needs and this script deliberately does not compute one:
+    scoring a run and comparing two runs are different jobs, and every entry
+    point here takes exactly one run directory.
+    """
+    values: list[float] = []
+    by_problem: dict[str, list[float]] = {}
+    scored_rows: list[dict] = []
+    for row in rows:
+        composite = _composite(row)
+        if composite is None:
+            continue
+        values.append(composite)
+        by_problem.setdefault(_val(row, "problem_id"), []).append(composite)
+        scored_rows.append(row)
+
+    if not values:
+        return None
+
+    # method="inclusive", not the default "exclusive". Exclusive extrapolates
+    # past the observed data, and on a two-attempt population it returns q1
+    # -0.25 and q3 1.25 for values of 0.0 and 1.0: an IQR outside the range the
+    # composite can take. Inclusive interpolates between order statistics and
+    # never leaves [min, max]. Clipping the exclusive result instead would
+    # print 0.00 where the estimator said -0.25, which reads as a real quartile
+    # rather than as an estimator being asked for more than the data holds.
+    quartiles = statistics.quantiles(values, n=4, method="inclusive") if len(values) > 1 else None
+    problem_means = [statistics.mean(v) for _, v in sorted(by_problem.items())]
+
+    return {
+        "n": len(values),
+        "problems": len(by_problem),
+        "mean": round(statistics.mean(values), 4),
+        "median": round(statistics.median(values), 4),
+        "sd": round(statistics.stdev(values), 4) if len(values) > 1 else 0.0,
+        "q1": round(quartiles[0], 4) if quartiles else None,
+        "q3": round(quartiles[2], 4) if quartiles else None,
+        # The two ends of a U-shaped distribution, named rather than left for
+        # the reader to find in the histogram. The zero count is the one that
+        # moved most in the A/B this was written for.
+        "zero": sum(1 for v in values if v == 0.0),
+        "perfect": sum(1 for v in values if v >= 1.0),
+        "histogram": _histogram(values),
+        "clustered_ci95": _clustered_ci(problem_means),
+        "dimensions": _dimension_summary(scored_rows),
+        "per_problem": [
+            {"problem_id": pid, "n": len(v), "mean": round(statistics.mean(v), 4)}
+            for pid, v in sorted(by_problem.items())
+        ],
+    }
+
+
 # The four token types brain-go reports, all input-side except output. Both
 # providers report cache reads and writes OUTSIDE the input count, so these sum
 # to real consumption without double counting. There is no cached output:
@@ -216,6 +541,15 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
 
     diag_graded = [r for r in rows if _val(r, "Diagnosis.success")]
     diag_ok = [r for r in diag_graded if _val(r, "Diagnosis.success") == "True"]
+
+    # Attempts the judge never scored. Split by whether the run's own rows
+    # already keep them out of the rates: the current judge leaves
+    # Diagnosis.success empty, so they land in "ungraded" on their own, while
+    # an archived run recorded False and they are inside both diagnosis rates
+    # and the E2E rate, pulling each one down by an attempt.
+    judge_failed = [r for r in rows if _judge_parse_failed(r)]
+    judge_failed_as_zero = [r for r in judge_failed if _val(r, "Diagnosis.success") == "False"]
+    judge_failed_attempts = sorted((_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in judge_failed)
     mitig_graded = [r for r in rows if _val(r, "Mitigation.success")]
     mitig_ok = [r for r in mitig_graded if _val(r, "Mitigation.success") == "True"]
     # Anything neither True nor False was counted as a graded failure, silently
@@ -335,6 +669,37 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
             "strict_pct": _rate(len(diag_ok), attempts),
             "graded_pct": _rate(len(diag_ok), len(diag_graded)),
             "ungraded": attempts - len(diag_graded),
+            # graded_pct with the judge's own failures taken out of the
+            # denominator too. Equal to graded_pct on a run whose rows already
+            # leave them ungraded; higher on an archived run that recorded
+            # them as False.
+            "judge_scored_pct": _rate(len(diag_ok), len(diag_graded) - len(judge_failed_as_zero)),
+        },
+        # The continuous endpoint, beside the binary one rather than instead
+        # of it.
+        #
+        # "all" is every attempt carrying a composite. On an archived run that
+        # includes the judge's own parse failures, which were forced to 0.0 and
+        # so pull the mean down for something that is not a wrong diagnosis;
+        # "judge_scored" is the same population with those taken out. On a
+        # current run the judge writes no composite for an attempt it could not
+        # score, so the two populations are already equal, exactly as
+        # graded_pct and judge_scored_pct already are.
+        "diagnosis_score": {
+            "all": _score_summary(rows),
+            "judge_scored": _score_summary([r for r in rows if not _judge_parse_failed(r)]),
+            # Attempts with no composite cell at all. Unmeasured, not zero.
+            "no_score": len([r for r in rows if _composite(r) is None]),
+            # How many of "all" are the judge's own failures sitting at 0.0,
+            # which is the whole size of the gap between the two populations.
+            "parse_failures_scored_zero": len([r for r in judge_failed if _composite(r) is not None]),
+        },
+        # Attempts with no judge verdict at all, named so they are never read
+        # as diagnosis failures.
+        "judge_parse_failures": {
+            "count": len(judge_failed),
+            "counted_as_failures": len(judge_failed_as_zero),
+            "attempts": judge_failed_attempts,
         },
         "mitigation": {
             "correct": len(mitig_ok),
@@ -550,6 +915,100 @@ def _pct(value: float | None) -> str:
     return "  n/a" if value is None else f"{value:>4}%"
 
 
+def _histogram_text(hist: list) -> str:
+    """A histogram as "value xcount" pairs, in one string."""
+    return "  ".join(f"{float(value):.2f} x{count}" for value, count in hist)
+
+
+def render_diagnosis_score(ds: dict | None) -> list[str]:
+    """The continuous endpoint, as lines. Empty when no attempt carried a
+    composite, so a run predating the column says nothing rather than printing
+    a table of zeros."""
+    ds = ds or {}
+    every, scored = ds.get("all"), ds.get("judge_scored")
+    if not every:
+        return []
+
+    out = ["", "  Continuous score, which the binary verdict discards"]
+    out.append("  Diagnosis.success is composite >= 0.70, and composite is")
+    out.append("  0.33*D1 + 0.33*D2 + 0.34*D3 with each dimension scored (yes answers)/3.")
+    out.append("")
+    out.append(
+        f"    {'population':<16} {'n':>3} {'mean':>7} {'median':>7} {'sd':>6}  {'IQR':>11} {'at 0.0':>7} {'at 1.0':>7}"
+    )
+    for label, pop in (("all attempts", every), ("judge scored", scored)):
+        if not pop:
+            continue
+        iqr = "n/a" if pop["q1"] is None else f"{pop['q1']:.2f}-{pop['q3']:.2f}"
+        out.append(
+            f"    {label:<16} {pop['n']:>3} {pop['mean']:>7.4f} {pop['median']:>7.4f}"
+            f" {pop['sd']:>6.4f}  {iqr:>11} {pop['zero']:>7} {pop['perfect']:>7}"
+        )
+
+    forced = ds.get("parse_failures_scored_zero", 0)
+    if forced:
+        out.append("")
+        out.append(f"    {forced} of those attempts are judge parse failures recorded as 0.0. The judge")
+        out.append("    never answered, so they are not wrong diagnoses: quote the judge-scored")
+        out.append("    row, and say which one you quoted.")
+    if ds.get("no_score"):
+        out.append(f"    {ds['no_score']} attempt(s) carry no composite at all and are in neither row.")
+
+    # The interval and the dimension means describe one population, and it is
+    # the judge-scored one wherever there is one: a parse failure forced to 0.0
+    # is not a diagnosis the judge scored zero. Labelled either way, because on
+    # a run where the judge scored nothing at all the fallback is the other
+    # population and saying otherwise would be wrong.
+    reference = scored or every
+    reference_label = "judge-scored" if scored else "all"
+    ci = reference.get("clustered_ci95")
+    if ci:
+        out.append("")
+        out.append(f"    95% CI on the mean: {ci['low']:.4f} to {ci['high']:.4f}, centred on {ci['centre']:.4f}")
+        out.append(
+            f"    (t interval over {ci['clusters']} per-problem means, {ci['clusters'] - 1} df,"
+            f" {reference_label} attempts)."
+        )
+        out.append("    The problem is the unit, not the attempt: three attempts on one problem")
+        out.append("    face the same fault and the same ground truth, so an interval built from")
+        out.append("    them as independent observations is too narrow. The interval assumes the")
+        out.append("    per-problem means are independent and roughly normal. The attempt scores")
+        out.append("    themselves are neither, which is why they are not the unit here.")
+        if abs(ci["centre"] - reference["mean"]) > 5e-4:
+            out.append(f"    Its centre is the mean of the problem means ({ci['centre']:.4f}), not the")
+            out.append(f"    attempt-level mean ({reference['mean']:.4f}). They differ here because problems")
+            out.append("    contributed different numbers of scored attempts.")
+        out.append("")
+        out.append("    This interval describes this one run. Setting two of them side by side is")
+        out.append("    not a test of the difference between two runs, in either direction:")
+        out.append("    overlapping intervals do not show there is no difference, and separated")
+        out.append("    ones do not show there is. Two arms over the same problems are paired, so")
+        out.append("    compare them paired on problem, off diagnosis_score.*.per_problem in")
+        out.append("    --json. In the A/B this was written for, the arms' intervals overlapped")
+        out.append("    and the paired difference was +0.0795 with a 95% interval of -0.0796 to")
+        out.append("    +0.2387, so neither reading was available: the movement was inside noise.")
+
+    if reference.get("dimensions"):
+        out.append("")
+        out.append(f"    Per dimension, over the {reference_label} attempts. They answer different")
+        out.append("    questions, so a move in one is not a move in the score at large:")
+        for did, dim in sorted(reference["dimensions"].items()):
+            label = f"{did} {dim['name']}".strip()
+            out.append(f"      {label:<28} mean {dim['mean']:.4f}   {_histogram_text(dim['histogram'])}")
+
+    out.append("")
+    out.append(f"    Composite histogram: {_histogram_text(reference['histogram'])}")
+    extremes = reference["zero"] + reference["perfect"]
+    out.append(
+        f"    {extremes} of {reference['n']} {reference_label} attempts sit on exactly 0.0 or exactly 1.0. That is a"
+    )
+    out.append("    spiked distribution, not a smooth one, so read the histogram rather than")
+    out.append("    the mean alone: mean +/- sd on a [0, 1] scale that is mostly two spikes")
+    out.append("    runs outside the range the score can take.")
+
+    return out
+
+
 def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | None = None) -> str:
     out: list[str] = []
     d, m, e = s["diagnosis"], s["mitigation"], s["e2e"]
@@ -595,6 +1054,26 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
         f"  End to end     {_pct(e['strict_pct'])}  {e['correct']}/{s['attempts']}"
         f"    {_pct(e['graded_pct'])}  {e['correct']}/{e['graded']}"
     )
+    jpf = s.get("judge_parse_failures") or {"count": 0, "counted_as_failures": 0, "attempts": []}
+    if jpf["count"]:
+        out.append("")
+        out.append(
+            f"  judge parse failures: {jpf['count']} attempt(s) got no verdict because the "
+            "judge's own reply could not be parsed:"
+        )
+        for pid, attempt in jpf["attempts"]:
+            out.append(f"    {pid} attempt {attempt}")
+        if jpf["counted_as_failures"]:
+            out.append(
+                f"  {jpf['counted_as_failures']} of those are recorded as Diagnosis.success=False, so both diagnosis"
+            )
+            out.append(
+                f"  rates above count them as wrong answers. Excluding them the graded rate is "
+                f"{_pct(d['judge_scored_pct'])} ({d['correct']}/{d['graded'] - jpf['counted_as_failures']})."
+            )
+        else:
+            out.append("  They are already out of the graded rate; strict still counts them as failures.")
+
     out.append("")
     out.append("  strict counts an absent verdict as a failure; graded excludes it.")
     if m["absent"] and m["absent_all_censored"]:
@@ -610,6 +1089,8 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
     elif m["absent"]:
         out.append("  Some absent verdicts are not explained by a timeout, so neither column")
         out.append("  is clean. Find out why before quoting either.")
+
+    out.extend(render_diagnosis_score(s.get("diagnosis_score")))
 
     out.append("")
     for label, key in (

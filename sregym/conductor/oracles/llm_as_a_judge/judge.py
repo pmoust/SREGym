@@ -27,7 +27,25 @@ class ChecklistParseError(Exception):
 
 
 class JudgeParseError(Exception):
-    """Raised after all retries are exhausted when parsing checklist results."""
+    """Raised after all retries are exhausted when parsing checklist results.
+
+    Carries the judge's last reply so the caller can record it. Nothing else
+    in a run keeps that text, and without it an unscored attempt cannot be
+    explained or re-judged after the run.
+    """
+
+    def __init__(self, message: str, *, raw_response: str = "", attempts: int = 0):
+        super().__init__(message)
+        self.raw_response = raw_response
+        self.attempts = attempts
+
+
+# Values of JudgmentReport.unscored_reason, and of the Diagnosis.unscored_reason
+# column they reach the results CSV as. An unscored attempt is not a zero: the
+# judge produced no verdict, so there is nothing to grade, the same distinction
+# score_run.py already draws for an absent mitigation verdict.
+UNSCORED_JUDGE_PARSE_FAILURE = "judge_parse_failure"
+UNSCORED_BACKEND_UNAVAILABLE = "judge_backend_unavailable"
 
 
 class JudgmentResult(StrEnum):
@@ -324,13 +342,7 @@ fences, no preamble, no commentary.
         if self.backend is None:
             error_msg = "LLM judge backend is not initialized - skipping evaluation"
             print(f"Warning: {error_msg}")
-            return JudgmentReport(
-                verdict=None,
-                reasoning=error_msg,
-                composite_score=0.0,
-                checklist_version=self._checklist_version,
-                evaluator_model=self._evaluator_model(),
-            )
+            return self._unscored_report(UNSCORED_BACKEND_UNAVAILABLE, error_msg)
 
         # Handle empty / "I don't know" answers
         if not solution or not solution.strip():
@@ -338,7 +350,15 @@ fences, no preamble, no commentary.
 
         # Build and send prompt
         user_msg = self._build_user_message(solution, expectation)
-        raw_results = self._call_llm_with_retry(user_msg)
+        try:
+            raw_results = self._call_llm_with_retry(user_msg)
+        except JudgeParseError as exc:
+            # Unscored, not zero. Returned rather than raised because
+            # LLMAsAJudgeOracle.evaluate wraps this call in a bare
+            # `except Exception` that records success=False, which is the
+            # silent zero this path exists to stop.
+            print(f"Warning: {exc}")
+            return self._unscored_report(UNSCORED_JUDGE_PARSE_FAILURE, str(exc), raw_response=exc.raw_response)
 
         # Build question lookup from config
         q_lookup: dict[str, dict] = {}
@@ -446,46 +466,59 @@ fences, no preamble, no commentary.
         lines.append("]")
         return "\n".join(lines)
 
-    def _call_llm_with_retry(self, user_msg: str) -> list[dict]:
-        """Call the LLM and parse the response, retrying up to once per failure mode."""
-        messages = [
-            SystemMessage(content=self._system_prompt),
-            HumanMessage(content=user_msg),
-        ]
+    # Three calls, not two. At temperature 0.0 a retry that resends the
+    # identical prompt is close to a repeat of the call that just failed, so
+    # the old second attempt bought little; every retry now carries a
+    # correction naming the failure, and there is one more of them.
+    MAX_PARSE_ATTEMPTS = 3
 
+    def _retry_correction(self, error: Exception) -> str:
+        """The instruction appended to the prompt after a failed parse.
+
+        The old loop only corrected a missing-question response, and only on
+        the first retry, gated on ``"missing" in str(e)`` or the question count
+        appearing anywhere in the message. An "Invalid JSON" error matched
+        neither, so the one case that needs a format correction most got the
+        same prompt back.
+        """
+        return (
+            f"\n\nYour previous response could not be parsed: {error}. "
+            f"Respond with a single JSON array of exactly {self._num_questions} "
+            "objects and nothing else: no markdown fences, no preamble, no "
+            "commentary. Every question id listed above must appear exactly once."
+        )
+
+    def _call_llm_with_retry(self, user_msg: str) -> list[dict]:
+        """Call the LLM and parse the response, correcting and retrying on failure.
+
+        Raises ``JudgeParseError`` once every attempt has failed. It used to
+        return all-No answers instead, which scored the attempt 0.0 on every
+        dimension and made a judge that never answered look exactly like an
+        agent that answered wrongly. Four of the 63 attempts in
+        run-20260914-1312 went that way.
+        """
         last_error: Exception | None = None
-        for attempt in range(2):
+        last_raw = ""
+        prompt = user_msg
+        for attempt in range(self.MAX_PARSE_ATTEMPTS):
+            messages = [
+                SystemMessage(content=self._system_prompt),
+                HumanMessage(content=prompt),
+            ]
+            response = self.backend.inference(messages)
+            last_raw = (response.content or "").strip()
             try:
-                response = self.backend.inference(messages)
-                response_text = response.content.strip()
-                results = self._parse_response(response_text, self._all_question_ids)
-                return results
+                return self._parse_response(last_raw, self._all_question_ids)
             except ChecklistParseError as e:
                 last_error = e
-                print(f"Checklist parse attempt {attempt + 1} failed: {e}")
-                if attempt == 0:
-                    if "missing" in str(e).lower() or str(self._num_questions) in str(e):
-                        messages = [
-                            SystemMessage(content=self._system_prompt),
-                            HumanMessage(
-                                content=(
-                                    user_msg + f"\n\nYour previous response was missing some "
-                                    f"questions. Respond with all {self._num_questions}."
-                                )
-                            ),
-                        ]
+                print(f"Checklist parse attempt {attempt + 1} of {self.MAX_PARSE_ATTEMPTS} failed: {e}")
+                prompt = user_msg + self._retry_correction(e)
 
-        # After 2 failures, return defaults for missing questions
-        print(f"JudgeParseError: all retries exhausted – {last_error}")
-        return [
-            {
-                "id": qid,
-                "answer": "No",
-                "evidence": "parse failure — defaulting to No",
-                "confidence": "Low",
-            }
-            for qid in self._all_question_ids
-        ]
+        raise JudgeParseError(
+            f"judge response unparseable after {self.MAX_PARSE_ATTEMPTS} attempts: {last_error}",
+            raw_response=last_raw,
+            attempts=self.MAX_PARSE_ATTEMPTS,
+        )
 
     @staticmethod
     def _parse_response(response_text: str, expected_question_ids: list[str]) -> list[dict]:
@@ -517,6 +550,26 @@ fences, no preamble, no commentary.
             raise ChecklistParseError(f"Expected {num_expected} questions, got {len(data)}. Missing: {missing}")
 
         return data
+
+    def _unscored_report(self, reason: str, message: str, raw_response: str = ""):
+        """A report with no verdict, for an attempt the judge could not score.
+
+        Distinct from ``_empty_report``: that one is a real 0.0 for an agent
+        that submitted nothing, which is a graded failure. This one says the
+        judge never produced an answer, so there is nothing to grade and the
+        attempt belongs out of both the numerator and the denominator.
+        """
+        from sregym.conductor.oracles.llm_as_a_judge.models import JudgmentReport
+
+        return JudgmentReport(
+            verdict=None,
+            reasoning=message,
+            composite_score=0.0,
+            checklist_version=self._checklist_version,
+            evaluator_model=self._evaluator_model(),
+            unscored_reason=reason,
+            raw_response=raw_response,
+        )
 
     def _empty_report(self):
         """Return a report where all questions score No (empty/unknown answer)."""

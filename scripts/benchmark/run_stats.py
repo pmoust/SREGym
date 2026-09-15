@@ -75,7 +75,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from score_run import _val, load, score  # noqa: E402
+from score_run import _t_crit, _val, load, score  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = REPO_ROOT / "sregym" / "conductor" / "problems" / "registry.py"
@@ -252,46 +252,6 @@ def wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float] | 
     lo = max(0.0, center - half) * 100
     hi = min(1.0, center + half) * 100
     return (round(lo, 1), round(hi, 1))
-
-
-# Two-tailed 95% t critical values, df 1-30. A df beyond this table uses the
-# normal approximation (1.96), which is accurate to three figures by df=30.
-_T_TABLE = {
-    1: 12.706,
-    2: 4.303,
-    3: 3.182,
-    4: 2.776,
-    5: 2.571,
-    6: 2.447,
-    7: 2.365,
-    8: 2.306,
-    9: 2.262,
-    10: 2.228,
-    11: 2.201,
-    12: 2.179,
-    13: 2.160,
-    14: 2.145,
-    15: 2.131,
-    16: 2.120,
-    17: 2.110,
-    18: 2.101,
-    19: 2.093,
-    20: 2.086,
-    21: 2.080,
-    22: 2.074,
-    23: 2.069,
-    24: 2.064,
-    25: 2.060,
-    26: 2.056,
-    27: 2.052,
-    28: 2.048,
-    29: 2.045,
-    30: 2.042,
-}
-
-
-def _t_crit(df: int) -> float:
-    return _T_TABLE.get(df, 1.96)
 
 
 def stats_ci(xs: list[float]) -> dict | None:
