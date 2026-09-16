@@ -7,9 +7,9 @@ reasoned answer at all, and where did the tool calls go.
 
 The distinction matters because the two failure modes call for different work. An
 attempt that gathered evidence and reached the wrong conclusion is a reasoning
-problem. An attempt that gathered evidence and then submitted a template saying
-no evidence was collected is a plumbing problem, and it scores identically to
-the first while telling you nothing about the model.
+problem. An attempt that gathered nothing and then submitted a report saying so
+is a plumbing problem, and it scores identically to the first while telling you
+nothing about the model.
 
 Reads two artifacts per run, both written by the harness:
 
@@ -19,16 +19,48 @@ Reads two artifacts per run, both written by the harness:
   tool-calls.json            one file per attempt, counted by the driver from
                              the agent's own stream rather than from Prometheus.
 
-The harness writes tool-calls.json twice: once under the attempt's own results
-directory, keyed by problem and attempt, and once under .runtime/brain_go, keyed
-by an opaque per-investigation hash. Only the first is read here, matched by its
-path: the pattern requires a results/.../run_N/ shape, which the .runtime copy
-never has, so it is excluded on path shape alone, regardless of glob's
-hidden-directory handling. A pattern that matched the file name anywhere, with
-no such path constraint, would count 115 files for 63 attempts and inflate
-every share below it, and it would be the one relying on an accident instead:
-right only while the runtime directory stays hidden and include_hidden is
-never passed.
+Zero-evidence attempts are identified structurally, not by the wording of the
+report. The first version of this script matched a clause of brain-go's
+zero-evidence text. brain-go reworded that text in c17cfe9db and the marker
+matched nothing for the next seven days, while the script went on printing
+"zero-evidence template 0" and folding any such attempt into "reasoned but
+wrong" - a plumbing failure reported as a reasoning failure, in the direction
+that reads as good news. Two signals replace it, neither of which depends on
+what the report says:
+
+  no evidence in the report   brain-go renders one bullet per evidence item
+                              under an "## Evidence" heading and leaves the
+                              heading out when there are none.
+  no signal-worker tool call  in the diagnosis phase every call was issued by
+                              the hypothesis-generation planner and none by a
+                              signal worker, so no worker result could have
+                              reached the report.
+
+Both must hold, because either alone misclassifies attempts that are on file.
+The report signal alone counts a correct summary-only report:
+run-20260903-1259 has two, both graded correct. The tool signal alone counts an
+attempt whose planner did the reading itself: the 2026-09-15 control and
+treatment runs have one each, both carrying full evidence. On
+run-20260908-0739, the run the class was derived from, the pair selects exactly
+the 18 attempts the old marker selected.
+
+What can still go stale is the "## Evidence" heading, which is brain-go's own
+rendering. Renaming it makes every attempt read as zero-evidence, which fails
+loudly rather than quietly: the count jumps to the whole run, and report() says
+so when the class covers every attempt. An attempt with no tool-calls.json is
+judged on its report alone, which over-counts rather than under-counts.
+
+tool-calls.json is matched on its results path, not on its file name. The
+harness writes it once, into a staging directory .runtime/<agent>/<opaque id>/,
+and renames that whole directory onto results/.../<problem>/run_<n>/ when the
+attempt finalizes (sregym/run_artifacts.py). An attempt that never finalizes
+leaves its staging copy behind: the 2026-09-15 control archive holds 63
+finalized attempts and 52 such leftovers. Requiring the results/.../run_N/
+shape drops them on path shape alone. A pattern matching the file name anywhere
+returns the right 63 today only because glob skips dot-directories and .runtime
+is hidden - find(1) lists 115 files on the same tree - so it is right by
+accident, and would inflate every share below the moment include_hidden is
+passed or the staging root loses its dot.
 
 That provenance is why the by-node figures here are safe to compare across runs
 while token figures are not. Each box runs three slots against one brain-go
@@ -49,14 +81,14 @@ import re
 import statistics
 import sys
 
-# The zero-evidence diagnosis template, matched on the clause that carries its
-# claim. Every instance in run-20260908-0739 was byte-identical, so a substring
-# is enough and is more durable than pinning the whole text: the surrounding
-# wording has already changed once.
-ZERO_EVIDENCE_MARK = "could not produce a diagnosis because no observ"
-
 # brain-go's node name for the hypothesis-generation planner's own tool calls.
 PLANNER_NODE = "hypothesis_gen_tools"
+
+# The submitted report's evidence section and the bullets in it. The lookahead
+# stops at the next heading of any level, so a nested subsection stays inside
+# the section it belongs to.
+EVIDENCE_SECTION = re.compile(r"^#+ +Evidence[^\n]*$(.*?)(?=^#+ |\Z)", re.M | re.S)
+BULLET = re.compile(r"^\s*[-*] ", re.M)
 
 
 def _int(row: dict, key: str) -> int | None:
@@ -69,17 +101,39 @@ def _truthy(value: object) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
+def row_key(row: dict) -> tuple[str, str]:
+    """The (problem, attempt) identity a CSV row and a tool-calls path share."""
+    return (row.get("problem_id") or "", str(row.get("attempt") or ""))
+
+
 def load_attempts(run_dir: str) -> list[dict]:
-    """Every attempt row in the run, from the per-problem aggregate CSVs.
+    """Every attempt row in the run, at most one per (problem, attempt).
 
     The per-problem *_results.csv files carry the same verdicts but not the tool
     or token counts, so the aggregate is the one worth reading.
+
+    A resumed run writes its finished attempts twice: main.py seeds the new run
+    with the rows it read out of the previous CSV, then writes a fresh aggregate
+    into a new timestamped directory while the old aggregate stays on disk, so
+    the recursive glob reads those attempts from both. Later paths sort after
+    earlier ones because the directory name is a timestamp, so keeping the last
+    row for a key keeps the fresher copy. A row carrying no problem id or no
+    attempt number has no identity to deduplicate on and is kept as it is.
     """
     rows: list[dict] = []
+    seen: dict[tuple[str, str], int] = {}
 
     for path in sorted(glob.glob(f"{run_dir}/**/brain_go_ALL_results.csv", recursive=True)):
         with open(path, newline="") as handle:
-            rows.extend(csv.DictReader(handle))
+            for row in csv.DictReader(handle):
+                key = row_key(row)
+                if not all(key):
+                    rows.append(row)
+                elif key in seen:
+                    rows[seen[key]] = row
+                else:
+                    seen[key] = len(rows)
+                    rows.append(row)
 
     return rows
 
@@ -96,45 +150,102 @@ def attempt_key(path: str) -> tuple[str, str] | None:
     return (match.group(1), match.group(2)) if match else None
 
 
-def load_tool_calls(run_dir: str) -> tuple[collections.Counter, dict[str, collections.Counter], int, dict]:
-    """Tool calls by node, by phase and node, the run total, and per attempt.
+def load_tool_calls(run_dir: str) -> dict:
+    """Tool calls by node, by phase, the run totals, and the raw per-attempt files.
 
     Matched on the results path rather than on the file name, for the reason in
-    the module docstring: the same file exists a second time under a hidden
-    runtime directory and counting both doubles most of the run.
+    the module docstring: an unfinalized attempt leaves a second copy of the
+    same file under a hidden staging directory.
+
+    total and node_total count the same calls from the driver's two separate
+    accumulators, per_phase and per_phase_by_node. A call that arrives with no
+    node attached lands in the first and not the second, which is the one way
+    the by-node shares can be wrong while the total is right, so both are
+    returned and report() compares them.
     """
     by_node: collections.Counter = collections.Counter()
     by_phase_node: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    by_phase_tool: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     per_attempt: dict[tuple[str, str], dict] = {}
+    files = 0
     total = 0
+    node_total = 0
 
     for path in sorted(glob.glob(f"{run_dir}/**/results/**/run_*/tool-calls.json", recursive=True)):
         with open(path) as handle:
             data = json.load(handle)
 
+        files += 1
         count = data.get("total") or 0
         count = sum(count.values()) if isinstance(count, dict) else count
         total += count
-        by_node.update(data.get("by_node") or {})
+
+        nodes = data.get("by_node") or {}
+        by_node.update(nodes)
+        node_total += sum(nodes.values())
 
         for phase, counter in (data.get("by_phase_and_node") or {}).items():
             by_phase_node[phase].update(counter)
+
+        for phase, counter in (data.get("by_phase_and_tool") or {}).items():
+            by_phase_tool[phase].update(counter)
 
         key = attempt_key(path)
         if key:
             per_attempt[key] = data
 
-    return by_node, dict(by_phase_node), total, per_attempt
+    return {
+        "by_node": by_node,
+        "by_phase_node": dict(by_phase_node),
+        "by_phase_tool": dict(by_phase_tool),
+        "per_attempt": per_attempt,
+        "files": files,
+        "total": total,
+        "node_total": node_total,
+    }
 
 
-def classify(rows: list[dict]) -> dict:
+def evidence_items(submission: str) -> int:
+    """How many evidence items the submitted report lists.
+
+    brain-go renders one bullet per item under an "## Evidence" heading and
+    omits the heading when the report has none, so an absent section and an
+    empty one both count zero.
+    """
+    section = EVIDENCE_SECTION.search(submission)
+
+    return len(BULLET.findall(section.group(1))) if section else 0
+
+
+def signal_worker_calls(tool_calls: dict) -> int:
+    """Diagnosis-phase tool calls issued by a node other than the planner."""
+    by_node = (tool_calls.get("by_phase_and_node") or {}).get("diagnosis") or {}
+
+    return sum(count for node, count in by_node.items() if node != PLANNER_NODE)
+
+
+def is_zero_evidence(row: dict, tool_calls: dict | None) -> bool:
+    """Whether this attempt reported without evidence, on both available signals.
+
+    See the module docstring for why it takes both and for what each one alone
+    gets wrong. tool_calls is None when the attempt's tool-calls.json was not
+    archived, and then the report is the only signal there is.
+    """
+    if evidence_items(row.get("Diagnosis.submission") or "") > 0:
+        return False
+
+    return tool_calls is None or signal_worker_calls(tool_calls) == 0
+
+
+def classify(rows: list[dict], per_attempt: dict | None = None) -> dict:
     """Split the attempts into the three outcomes that need different work."""
+    per_attempt = per_attempt or {}
     correct, boilerplate, wrong = [], [], []
 
     for row in rows:
         if _truthy(row.get("Diagnosis.success")):
             correct.append(row)
-        elif ZERO_EVIDENCE_MARK in (row.get("Diagnosis.submission") or ""):
+        elif is_zero_evidence(row, per_attempt.get(row_key(row))):
             boilerplate.append(row)
         else:
             wrong.append(row)
@@ -182,29 +293,33 @@ def analyze(run_dir: str) -> dict | None:
     if not rows:
         return None
 
-    summary = classify(rows)
-    by_node, by_phase_node, tool_total, per_attempt = load_tool_calls(run_dir)
+    calls = load_tool_calls(run_dir)
+    summary = classify(rows, calls["per_attempt"])
+    by_node = calls["by_node"]
     csv_total = sum(v for v in (_int(r, "tool_calls") for r in rows) if v is not None)
 
     summary["rows"] = rows
     summary["by_node"] = by_node
-    summary["by_phase_node"] = by_phase_node
-    summary["tool_total"] = tool_total
+    summary["by_phase_node"] = calls["by_phase_node"]
+    summary["by_phase_tool"] = calls["by_phase_tool"]
+    summary["tool_files"] = calls["files"]
+    summary["tool_total"] = calls["total"]
+    summary["node_total"] = calls["node_total"]
     summary["csv_total"] = csv_total
     summary["planner_share"] = by_node.get(PLANNER_NODE, 0) / sum(by_node.values()) if by_node else None
 
     # Per attempt, not run-wide: whether the attempts that gave up on reporting
     # were also the ones that spent their calls in the planner is the question
     # the run-wide share cannot answer.
-    template_keys = {(r.get("problem_id", ""), str(r.get("attempt", ""))) for r in summary["boilerplate_rows"]}
+    template_keys = {row_key(r) for r in summary["boilerplate_rows"]}
     template_shares, reasoned_shares = [], []
 
-    for key, data in per_attempt.items():
+    for key, data in calls["per_attempt"].items():
         nodes = data.get("by_node") or {}
-        calls = sum(nodes.values())
-        if not calls:
+        count = sum(nodes.values())
+        if not count:
             continue
-        share = nodes.get(PLANNER_NODE, 0) / calls
+        share = nodes.get(PLANNER_NODE, 0) / count
         (template_shares if key in template_keys else reasoned_shares).append(share)
 
     summary["planner_share_template"] = statistics.median(template_shares) if template_shares else None
@@ -213,11 +328,52 @@ def analyze(run_dir: str) -> dict | None:
     return summary
 
 
+def reconciliation(summary: dict) -> tuple[list[str], bool]:
+    """The tool-call checks, as the lines render() prints and a verdict.
+
+    The two checks are not equally strong. main.py's _tool_calls copies the
+    json file's own "total" into the csv's tool_calls column, so csv against
+    json compares one number with itself: it catches a tool-calls.json this
+    script never read or read twice, not a count that was wrong when written.
+
+    by_node against total is a second count. The driver fills per_phase and
+    per_phase_by_node from separate accumulators, so a call recorded without a
+    node reaches the total and not the node table, and then every share below
+    is computed over a short denominator while the total still looks right.
+
+    A run with no tool-calls.json at all is unmeasured rather than broken,
+    which is how main.py reads an absent file too: every agent but brain_go,
+    and every archive older than the driver's counting, has none.
+    """
+    if not summary["tool_files"]:
+        return ["  tool calls: not recorded (no tool-calls.json under this run)"], True
+
+    files = (
+        "ok"
+        if summary["csv_total"] == summary["tool_total"]
+        else f"MISMATCH (json {summary['tool_total']} vs csv {summary['csv_total']})"
+    )
+    nodes = (
+        "ok"
+        if summary["node_total"] == summary["tool_total"]
+        else f"SHORT (by_node {summary['node_total']} of {summary['tool_total']}; shares below understate)"
+    )
+
+    return (
+        [
+            f"  tool-call files, csv vs json:       {files}",
+            f"  node attribution, by_node vs total: {nodes}",
+        ],
+        files == "ok" and nodes == "ok",
+    )
+
+
 def render(name: str, summary: dict) -> str:
     """The report analyze() computed, as the text report() prints."""
     rows = summary["rows"]
     by_node = summary["by_node"]
     by_phase_node = summary["by_phase_node"]
+    by_phase_tool = summary["by_phase_tool"]
 
     lines = [f"\n=== {name} ==="]
     lines.append(f"  attempts                {summary['attempts']}")
@@ -230,6 +386,14 @@ def render(name: str, summary: dict) -> str:
     )
     lines.append(f"  diagnosis rate, reasoned attempts only  {_pct(summary['diagnosis_rate_reasoned'])}")
 
+    if summary["boilerplate"] and summary["boilerplate"] == summary["attempts"]:
+        lines.append(
+            "  WARNING: every attempt classified zero-evidence. That is what a renamed"
+            "\n  '## Evidence' heading in brain-go's report looks like here, and it is more"
+            "\n  likely than a run in which nothing was collected at all. Check the heading"
+            "\n  against a submission before reading the split."
+        )
+
     if summary["boilerplate_rows"]:
         lines.append(
             f"  template attempts, diagnosis-phase tool calls: "
@@ -237,27 +401,31 @@ def render(name: str, summary: dict) -> str:
         )
     lines.append(f"  all attempts, diagnosis-phase tool calls:       {spread(rows, 'tool_calls_diagnosis')}")
 
-    # A mismatch means some attempt's tool-calls.json is missing or double
-    # counted, which would silently skew every share above it.
-    status = (
-        "ok"
-        if summary["csv_total"] == summary["tool_total"]
-        else f"MISMATCH (json {summary['tool_total']} vs csv {summary['csv_total']})"
-    )
-    lines.append(f"  tool-call reconciliation: {status}")
+    lines.extend(reconciliation(summary)[0])
 
     if by_node:
-        lines.append("  tool calls by node:")
+        lines.append("  tool calls by issuing node, all phases:")
         total = sum(by_node.values())
         for node, count in by_node.most_common():
             flag = "  <- planner" if node == PLANNER_NODE else ""
             lines.append(f"    {node:24s} {count:6d}  {100 * count / total:5.1f}%{flag}")
+        lines.append(
+            "    (which node issued the call, not what the call read: a planner-issued"
+            "\n     get_logs counts under the planner. The tool table says what was read.)"
+        )
 
     diagnosis = by_phase_node.get("diagnosis")
     if diagnosis:
         total = sum(diagnosis.values())
         share = 100 * diagnosis.get(PLANNER_NODE, 0) / total
-        lines.append(f"  planner share, diagnosis phase only: {share:.1f}%")
+        lines.append(f"  planner share of calls issued, diagnosis phase only: {share:.1f}%")
+
+    diagnosis_tools = by_phase_tool.get("diagnosis")
+    if diagnosis_tools:
+        lines.append("  diagnosis-phase tool calls by tool:")
+        total = sum(diagnosis_tools.values())
+        for tool, count in diagnosis_tools.most_common():
+            lines.append(f"    {tool:24s} {count:6d}  {100 * count / total:5.1f}%")
 
     if summary["planner_share_template"] is not None and summary["planner_share_reasoned"] is not None:
         lines.append(
@@ -329,9 +497,11 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     current = report(os.path.basename(args.run_dir.rstrip("/")), args.run_dir)
+    summaries = [current]
 
     if args.baseline:
         base = report(os.path.basename(args.baseline.rstrip("/")), args.baseline)
+        summaries.append(base)
         print(
             compare(
                 os.path.basename(args.baseline.rstrip("/")),
@@ -341,7 +511,10 @@ def main(argv: list[str]) -> int:
             )
         )
 
-    return 0
+    # Nonzero on a failed reconciliation. The report still prints every number,
+    # because the failure says the shares are untrustworthy rather than absent,
+    # but a caller scripting this must not read an unreconciled run as clean.
+    return 0 if all(reconciliation(s)[1] for s in summaries) else 1
 
 
 if __name__ == "__main__":
