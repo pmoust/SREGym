@@ -19,14 +19,14 @@ so a rewording cannot break it, and ZERO_EVIDENCE_NEW below is brain-go's
 current wording rendered in the same shape - it fails against the old prose
 marker and passes against the criterion in the script.
 
-Re-check when brain-go changes what a diagnosis report looks like, which the
-tests here cannot see:
-
-    scripts/benchmark/classify_run.py <a fresh 63-attempt run archive>
-
-and read "zero-evidence template" against the submissions. Every attempt in the
-class, or every attempt out of it, means the report format moved; report()
-prints a warning for the first case.
+That removes one dependency on brain-go and does not remove the rest. The
+script's docstring lists all three and says what each one does when it moves;
+the tests here cannot see any of them, because every fixture in this file is a
+copy taken at a point in time. Two of the three are guarded and the guards are
+pinned below. The third, the evidence heading, is not: renaming it moves the
+count by one or by nothing on the archives on file, so there is nothing to
+assert on. Re-checking it means running the script over an archive with known
+zero-evidence attempts and reading the count against the submissions by hand.
 """
 
 import importlib.util
@@ -42,9 +42,11 @@ classify_run = importlib.util.module_from_spec(_SPEC)
 sys.modules["classify_run"] = classify_run
 _SPEC.loader.exec_module(classify_run)
 
-# Verbatim from run-20260908-0739-4fc0249e, where 18 of 63 attempts submitted
-# this and nothing else, byte-identical including the harness's truncation
-# ellipsis. Summary only: no Findings, no Theories, no Evidence.
+# Transcribed from run-20260908-0739-4fc0249e, where 18 of 63 attempts
+# submitted this and nothing else, all the same 215 characters. Not a byte
+# copy: the archive stores the trailing ellipsis double-encoded, as
+# c3 a2 c2 80 c2 a6, and this is the single character that decodes to. Summary
+# only, no Findings, no Theories, no Evidence, which is the part that matters.
 ZERO_EVIDENCE_OLD = (
     "## Summary\n\nInvestigation of investigation could not produce a diagnosis "
     "because no observability signals (metrics, logs, traces) were collected. "
@@ -300,6 +302,17 @@ def test_evidence_items_counts_bullets_and_not_the_heading():
     assert classify_run.evidence_items("## Evidence\n\n- [e1] one\n\n## Recommended actions\n\n- do a thing\n") == 1
 
 
+def test_evidence_items_reads_the_heading_and_list_shapes_brain_go_emits():
+    """brain-go has two evidence renderers, "### Evidence" in diagnosis.go and
+    the "## Evidence" every archive here carries, so the level cannot be
+    pinned. Numbered items count as items, and the heading match does not
+    depend on the case or on the space after the hashes."""
+    assert classify_run.evidence_items("### Evidence\n\n- [e1] one\n") == 1
+    assert classify_run.evidence_items("## Evidence\n\n1. [e1] one\n2. [e2] two\n") == 2
+    assert classify_run.evidence_items("## evidence\n\n- [e1] one\n") == 1
+    assert classify_run.evidence_items("##Evidence\n\n- [e1] one\n") == 1
+
+
 def test_signal_worker_calls_ignores_the_planner_and_the_mitigation_phase():
     assert classify_run.signal_worker_calls(WORKERS_RAN) == 27
     assert classify_run.signal_worker_calls(PLANNER_ONLY) == 0
@@ -433,7 +446,7 @@ def test_a_tool_calls_file_beside_run_n_on_a_visible_path_is_not_counted(tmp_pat
     """The path constraint has to do the work, not glob's dot-directory
     handling. This copy sits under results/<stamp>/brain_go/<problem>/ with
     nothing hidden anywhere in its path, so a pattern matching the file name
-    anywhere counts it and the results/.../run_N/ pattern does not."""
+    anywhere counts it and the run_N pattern does not."""
     run = _run(
         tmp_path,
         [_attempt()],
@@ -445,6 +458,21 @@ def test_a_tool_calls_file_beside_run_n_on_a_visible_path_is_not_counted(tmp_pat
     assert calls["total"] == 10
     assert calls["by_node"]["state"] == 10
     assert len(calls["per_attempt"]) == 1
+
+
+def test_tool_calls_are_found_when_the_tool_is_pointed_below_results(tmp_path):
+    """argparse offers "a run directory, or its parent", and a run archive
+    nests four levels deeper than that. Requiring a results/ segment below
+    run_dir emptied the tool half of the criterion whenever someone pointed the
+    tool at one timestamped directory instead of the shard root, and said "not
+    recorded" with the files sitting right there. run_N is the segment that
+    discriminates; results/ never added anything."""
+    _run(tmp_path, [_attempt()], tool_calls=[("some_problem", "1", WORKERS_RAN)])
+    inner = tmp_path / "shard-0" / "slots" / "0" / "results" / "0908_0744"
+    calls = classify_run.load_tool_calls(str(inner))
+
+    assert calls["files"] == 1
+    assert calls["total"] == 88
 
 
 def test_attempt_key_reads_problem_and_attempt_from_the_path(tmp_path):
@@ -491,6 +519,23 @@ def test_a_resumed_row_takes_its_later_copy(tmp_path):
 
     assert summary["attempts"] == 1
     assert summary["correct"] == 1
+
+
+def test_a_submission_that_is_not_valid_utf_8_still_loads(tmp_path):
+    """The archives are not clean text. run-20260908-0739 stores its template's
+    trailing ellipsis double-encoded, and a byte that decodes as nothing at all
+    is the same class of damage. Reading without errors="replace", as
+    score_run.py already does, turns one bad byte into a dead run."""
+    run = _run(tmp_path, [_attempt()])
+    csv_path = next(Path(run).rglob("brain_go_ALL_results.csv"))
+    raw = csv_path.read_bytes()
+    assert b"NetworkPolicy" in raw
+    csv_path.write_bytes(raw.replace(b"NetworkPolicy", b"NetworkPolic\xe9"))
+
+    rows = classify_run.load_attempts(str(run))
+
+    assert len(rows) == 1
+    assert "## Evidence" in rows[0]["Diagnosis.submission"]
 
 
 def test_a_row_with_no_identity_is_kept_rather_than_collapsed(tmp_path):
@@ -572,10 +617,12 @@ def test_report_prints_a_mismatch_naming_both_totals_when_a_file_is_missing(tmp_
 
 
 def test_report_flags_a_by_node_shortfall_the_csv_check_cannot_see(tmp_path, capsys):
-    """The driver fills total and by_node from separate accumulators, so a call
-    recorded with no node reaches the total and not the node table. The csv
-    column is a copy of that same total, so the file check still says ok while
-    every share printed below is computed over 60 of 100 calls."""
+    """An archive written before by_node existed: the total is right and the
+    node table is absent or short. The csv column is a copy of that same total,
+    so the file check still says ok while every share printed below is computed
+    over 60 of 100 calls. Not a second independent count of the same calls -
+    the driver increments both counters in one branch, so a live archive always
+    reconciles."""
     run = _run(
         tmp_path,
         [_attempt(**{"tool_calls": "100"})],
@@ -610,9 +657,11 @@ def test_report_prints_the_three_way_split_and_the_reasoned_only_rate(tmp_path, 
 
 
 def test_report_warns_when_the_class_covers_every_attempt(tmp_path, capsys):
-    """What a renamed Evidence heading in brain-go looks like from here. The
-    criterion cannot tell that case from a run that collected nothing, so the
-    report says which one is more likely instead of letting the number stand."""
+    """A whole run in the class is possible and rare, so the report says to go
+    and look. It is not a rename tripwire and does not claim to be: rewriting
+    the evidence heading across the 2026-09-15 control run moves the count from
+    0 to 1 of 63, and across the treatment run and run-20260914-1312 from 0 to
+    0, none of which this condition sees."""
     run = _run(
         tmp_path,
         [
@@ -626,7 +675,6 @@ def test_report_warns_when_the_class_covers_every_attempt(tmp_path, capsys):
 
     assert "zero-evidence template  2" in out
     assert "WARNING: every attempt classified zero-evidence" in out
-    assert "'## Evidence' heading" in out
 
 
 def test_report_does_not_warn_when_some_attempt_reasoned(tmp_path, capsys):
@@ -641,6 +689,46 @@ def test_report_does_not_warn_when_some_attempt_reasoned(tmp_path, capsys):
     classify_run.report("run-x", str(run))
 
     assert "WARNING" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "by_node",
+    [
+        {"hypothesis_gen_tools_v2": 7, "metrics": 3},
+        {"unknown": 10},
+        {"hypothesis_gen_tools": 7, "unknown": 3},
+    ],
+    ids=["planner-node-renamed", "attribution-dropped", "attribution-partial"],
+)
+def test_report_warns_when_node_attribution_is_not_the_expected_shape(tmp_path, capsys, by_node):
+    """Two ways brain-go can silently kill the tool half of the criterion, both
+    reproduced on run-20260908-0739: renaming nodeGenTools out from under
+    PLANNER_NODE, and dropping node attribution so the driver's omitempty
+    fallback writes "unknown". Either takes that run's 18 zero-evidence
+    attempts to 0 with no report-format change and nothing else moving. The
+    third case is the partial one, where the planner is still named and only
+    some calls lost their node, and it is the only case that pins the "unknown"
+    half of the condition: the other two happen to have no planner in by_node
+    either."""
+    run = _run(
+        tmp_path,
+        [_attempt()],
+        tool_calls=[("some_problem", "1", {"total": 10, "by_node": by_node})],
+    )
+    classify_run.report("run-x", str(run))
+    out = capsys.readouterr().out
+
+    assert "WARNING: node attribution is not the shape" in out
+    assert "nodeGenTools" in out
+
+
+def test_report_does_not_warn_on_ordinary_node_attribution(tmp_path, capsys):
+    """The guard is one condition on by_node, so it has to stay quiet on every
+    archive on file. WORKERS_RAN is run-20260908-0739's first attempt."""
+    run = _run(tmp_path, [_attempt()], tool_calls=[("some_problem", "1", WORKERS_RAN)])
+    classify_run.report("run-x", str(run))
+
+    assert "node attribution is not the shape" not in capsys.readouterr().out
 
 
 def test_report_prints_the_by_node_shares_with_the_planner_flagged(tmp_path, capsys):

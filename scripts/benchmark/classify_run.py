@@ -44,23 +44,58 @@ treatment runs have one each, both carrying full evidence. On
 run-20260908-0739, the run the class was derived from, the pair selects exactly
 the 18 attempts the old marker selected.
 
-What can still go stale is the "## Evidence" heading, which is brain-go's own
-rendering. Renaming it makes every attempt read as zero-evidence, which fails
-loudly rather than quietly: the count jumps to the whole run, and report() says
-so when the class covers every attempt. An attempt with no tool-calls.json is
-judged on its report alone, which over-counts rather than under-counts.
+Three things here are bound to brain-go's output, and all three go quiet if
+brain-go changes them. None announces itself:
 
-tool-calls.json is matched on its results path, not on its file name. The
-harness writes it once, into a staging directory .runtime/<agent>/<opaque id>/,
-and renames that whole directory onto results/.../<problem>/run_<n>/ when the
-attempt finalizes (sregym/run_artifacts.py). An attempt that never finalizes
-leaves its staging copy behind: the 2026-09-15 control archive holds 63
-finalized attempts and 52 such leftovers. Requiring the results/.../run_N/
-shape drops them on path shape alone. A pattern matching the file name anywhere
-returns the right 63 today only because glob skips dot-directories and .runtime
-is hidden - find(1) lists 115 files on the same tree - so it is right by
-accident, and would inflate every share below the moment include_hidden is
-passed or the staging root loses its dot.
+  the "## Evidence" heading   brain-go's own rendering. Renaming it drops
+                              evidence_items to zero everywhere, but because
+                              the criterion is an AND, only attempts that also
+                              made no worker call change class. Rewriting the
+                              heading across the 2026-09-15 control run moves
+                              the count from 0 to 1 of 63; across the treatment
+                              run and run-20260914-1312 it moves 0 to 0. So a
+                              dead criterion reads as one plumbing failure, or
+                              as nothing at all.
+  PLANNER_NODE                must equal brain-go's nodeGenTools
+                              (internal/chat/rci/agent.go). Change it and
+                              signal_worker_calls counts the planner as a
+                              worker: run-20260908-0739's 18 zero-evidence
+                              attempts become 0.
+  node attribution existing   brain-go's tool_start field is json:"node,
+                              omitempty" and brain-go tests that it is omitted
+                              when unset; the driver maps an absent node to
+                              "unknown" (clients/brain_go/driver.py). brain-go
+                              dropping attribution, with no report-format
+                              change at all, turns the same 18 into 0.
+
+report() warns on the last two, which are one condition on by_node. The first
+has no guard: it is not detectable from the numbers, since its effect is a
+count moving by one or by nothing. When brain-go changes what a diagnosis
+report looks like, re-run
+
+    scripts/benchmark/classify_run.py <an archive with known zero-evidence attempts>
+
+and check the count against the submissions by hand. run-20260908-0739 is the
+reference: 63 attempts, 18 zero-evidence, 11 of those also mitigated.
+
+An attempt with no tool-calls.json is judged on its report alone, which
+over-counts rather than under-counts.
+
+tool-calls.json is matched on a run_<n>/ path segment, not on its file name.
+The harness writes it once, into a staging directory
+.runtime/<agent>/<opaque id>/, and renames that whole directory onto
+results/.../<problem>/run_<n>/ when the attempt finalizes
+(sregym/run_artifacts.py). An attempt that never finalizes leaves its staging
+copy behind: the 2026-09-15 control archive holds 63 finalized attempts and 52
+such leftovers, under opaque anon_<hex> names. Requiring run_<n>/ drops them on
+path shape alone. A pattern matching the file name anywhere returns the right
+63 today only because glob skips dot-directories and .runtime is hidden -
+find(1) lists 115 files on the same tree - so it is right by accident, and
+would inflate every share below the moment include_hidden is passed or the
+staging root loses its dot. The pattern does not also require a results/
+segment, because that segment discriminates nothing run_<n>/ does not, and
+requiring it silently emptied the tool-call half of the criterion whenever the
+tool was pointed at a directory below results/ rather than above it.
 
 That provenance is why the by-node figures here are safe to compare across runs
 while token figures are not. Each box runs three slots against one brain-go
@@ -81,14 +116,22 @@ import re
 import statistics
 import sys
 
-# brain-go's node name for the hypothesis-generation planner's own tool calls.
+# brain-go's node name for the hypothesis-generation planner's own tool calls,
+# which must stay equal to nodeGenTools in internal/chat/rci/agent.go.
 PLANNER_NODE = "hypothesis_gen_tools"
 
-# The submitted report's evidence section and the bullets in it. The lookahead
-# stops at the next heading of any level, so a nested subsection stays inside
-# the section it belongs to.
-EVIDENCE_SECTION = re.compile(r"^#+ +Evidence[^\n]*$(.*?)(?=^#+ |\Z)", re.M | re.S)
-BULLET = re.compile(r"^\s*[-*] ", re.M)
+# What clients/brain_go/driver.py records when a tool_start carries no node.
+# brain-go's node field is omitempty and brain-go tests that it is omitted when
+# unset, so this is a shape a live run can produce without anything failing.
+UNATTRIBUTED_NODE = "unknown"
+
+# The submitted report's evidence section and the list items in it. Both
+# heading levels are live: brain-go's evidence renderer writes "### Evidence"
+# and every archive here carries "## Evidence". The lookahead stops at the next
+# heading, so a nested subsection stays inside the section it belongs to, and
+# an item may be a bullet or a numbered entry.
+EVIDENCE_SECTION = re.compile(r"^#+ *Evidence[^\n]*$(.*?)(?=^#+ *\w|\Z)", re.M | re.S | re.I)
+BULLET = re.compile(r"^\s*(?:[-*]|\d+\.) ", re.M)
 
 
 def _int(row: dict, key: str) -> int | None:
@@ -124,7 +167,7 @@ def load_attempts(run_dir: str) -> list[dict]:
     seen: dict[tuple[str, str], int] = {}
 
     for path in sorted(glob.glob(f"{run_dir}/**/brain_go_ALL_results.csv", recursive=True)):
-        with open(path, newline="") as handle:
+        with open(path, newline="", encoding="utf-8", errors="replace") as handle:
             for row in csv.DictReader(handle):
                 key = row_key(row)
                 if not all(key):
@@ -153,9 +196,9 @@ def attempt_key(path: str) -> tuple[str, str] | None:
 def load_tool_calls(run_dir: str) -> dict:
     """Tool calls by node, by phase, the run totals, and the raw per-attempt files.
 
-    Matched on the results path rather than on the file name, for the reason in
-    the module docstring: an unfinalized attempt leaves a second copy of the
-    same file under a hidden staging directory.
+    Matched on a run_<n>/ path segment rather than on the file name, for the
+    reason in the module docstring: an unfinalized attempt leaves a second copy
+    of the same file under a hidden staging directory, named for an opaque id.
 
     total and node_total count the same calls from the driver's two separate
     accumulators, per_phase and per_phase_by_node. A call that arrives with no
@@ -171,8 +214,8 @@ def load_tool_calls(run_dir: str) -> dict:
     total = 0
     node_total = 0
 
-    for path in sorted(glob.glob(f"{run_dir}/**/results/**/run_*/tool-calls.json", recursive=True)):
-        with open(path) as handle:
+    for path in sorted(glob.glob(f"{run_dir}/**/run_*/tool-calls.json", recursive=True)):
+        with open(path, encoding="utf-8", errors="replace") as handle:
             data = json.load(handle)
 
         files += 1
@@ -336,10 +379,14 @@ def reconciliation(summary: dict) -> tuple[list[str], bool]:
     json compares one number with itself: it catches a tool-calls.json this
     script never read or read twice, not a count that was wrong when written.
 
-    by_node against total is a second count. The driver fills per_phase and
-    per_phase_by_node from separate accumulators, so a call recorded without a
-    node reaches the total and not the node table, and then every share below
-    is computed over a short denominator while the total still looks right.
+    by_node against total is not a second count either. The driver increments
+    its tool counter and its node counter in the same tool_start branch, with
+    an absent node falling back to "unknown" (clients/brain_go/driver.py), so
+    sum(by_node) equals total by construction for anything that driver wrote.
+    What it catches is an archive written before by_node existed, where the
+    node table is absent or empty while the total is right: stripping by_node
+    from run-20260908-0739 reports SHORT (by_node 0 of 9678). Every share below
+    the line would otherwise be computed over that empty table.
 
     A run with no tool-calls.json at all is unmeasured rather than broken,
     which is how main.py reads an absent file too: every agent but brain_go,
@@ -388,10 +435,24 @@ def render(name: str, summary: dict) -> str:
 
     if summary["boilerplate"] and summary["boilerplate"] == summary["attempts"]:
         lines.append(
-            "  WARNING: every attempt classified zero-evidence. That is what a renamed"
-            "\n  '## Evidence' heading in brain-go's report looks like here, and it is more"
-            "\n  likely than a run in which nothing was collected at all. Check the heading"
-            "\n  against a submission before reading the split."
+            "  WARNING: every attempt classified zero-evidence. A whole run collecting"
+            "\n  nothing is possible but rare, so read a submission before trusting the"
+            "\n  split. This says nothing about a renamed evidence heading, which moves"
+            "\n  the count by one or by nothing on the archives on file."
+        )
+
+    # PLANNER_NODE has to keep matching brain-go's nodeGenTools, and the node
+    # field it comes from is omitempty. Either shape breaks signal_worker_calls
+    # in the same direction the prose marker broke: every zero-evidence attempt
+    # reads as reasoned-but-wrong and the count goes to 0 with nothing else
+    # moving. On run-20260908-0739 that is 18 attempts to 0 under either.
+    if by_node and (PLANNER_NODE not in by_node or UNATTRIBUTED_NODE in by_node):
+        lines.append(
+            f"  WARNING: node attribution is not the shape the zero-evidence criterion"
+            f"\n  needs ({PLANNER_NODE!r} absent from by_node, or {UNATTRIBUTED_NODE!r}"
+            "\n  present). Treat every zero-evidence count below as unreliable: check"
+            "\n  PLANNER_NODE against brain-go's nodeGenTools, and check that tool_start"
+            "\n  still carries a node."
         )
 
     if summary["boilerplate_rows"]:
