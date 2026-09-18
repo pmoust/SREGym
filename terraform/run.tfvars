@@ -267,8 +267,89 @@ disk_iops = 16000
 # raised above. FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI turn
 # straight to RCI, so the agent branch #2815 touches is never taken here.
 #
-# This value must be bumped again before the run to include brain-go#2848, the
-# planner-evidence fix, which is the reason the run is worth doing: without it
-# 18 of 63 attempts submit boilerplate after gathering real evidence. Pinning
-# now records the intent; the sha below is current main and is not final.
-brain_go_ref = "5ff00330"
+# Paired with run-20260917-ctl3 (deda20910, 14/63), the last run on a clean
+# main at this shape. 24 commits separate them and the RCI ones are what the
+# run is for, not drift to be discounted:
+#
+#   - The observations channel, a signal agent reporting what its hypothesis
+#     does not explain, and one replan round over those observations
+#     (brain-go #3261). Before this an investigation drew hypotheses once; a
+#     worker that found the real signal while testing something else used it
+#     to reject that something else and the run ended.
+#   - key_observations on the report, a cached diagnosis system block, and an
+#     inconclusive run now making a diagnosis call and rendering an Observed
+#     signals block (brain-go #3269). ctl3 rendered nothing on an inconclusive
+#     attempt but the executive summary written around the top unverified
+#     theory.
+#   - The hypothesis diversity clause gated on a bound change signal, plus
+#     rci_signal_agent_dispatched_total and rci_symptom_improved_downgrade_total
+#     (brain-go #3289). ctl3 and run-20260917-base carried the ungated clause,
+#     which cost $122.82 -> $147.65 and moved metrics dispatch from 18 to 41
+#     attempts (Fisher p=0.0001). This account seeds no change connection, so
+#     the clause does not render here and the run should read like ctrl on
+#     routing and cost.
+#   - The replan round sized to what it verifies (brain-go ed0b84209). It now
+#     asks for min(1, distinct observations) hypotheses instead of up to
+#     MaxHypotheses, and a worker whose hypothesis cites a banked signal_ref
+#     is told that evidence is established and to confirm or refute with the
+#     fewest queries. #3261 shipped the round; this decides what it costs.
+#
+# Two more RCI commits are in the gap and neither renders on this account.
+# e41f3cc76 binds logs tools into the planner, which changes nothing here
+# because the planner already holds every observation tool (brain-go #2861:
+# custom MCP tools carry a bucket and no signal, so every observation-bucket
+# tool reaches every observation node). 3cbce3708 adds an alert-reproduction
+# addendum gated on Source == "alert", and the driver's turns are "chat".
+#
+# What this run answers, none of which a previous run could:
+#
+#   1. How many attempts end inconclusive, and how many of those now carry an
+#      Observed signals block. That block is the whole mechanism of #3269 and
+#      no archive has ever held one.
+#   2. The judge mean composite on the inconclusive subset against ctl3's. If
+#      naming what was seen helps, D1 and D3 move there first.
+#   3. How many attempts take the replan round and what it costs in tokens.
+#   4. rci_signal_agent_dispatched_total by signal, read directly instead of
+#      inferred from per-node token totals across two finished archives.
+#
+# Do not read the headline rate as a result. At 63 attempts per arm the
+# interval covers zero for anything under about 23pp, and the four counts
+# above are the measurement.
+#
+# Read every result beside the contamination column.
+# custom_mcp_breaker_trips_total and the line count of mcp_pf_restarts.jsonl
+# were 11 and 61 on
+# run-20260915-ctrl, 6 and 32 on ctl3, 3 and 25 on run-20260917-fix. Each trip
+# is a 120 second blackout on one connection, opened by three failed attempts
+# at brain-go's 30 second MCP timeout, and on the Temporal path the model is
+# told only "Tool execution failed." When it lands on sregym-kubectl the RCI
+# state agent holds no tools at all for that window. The cause is sregym#95:
+# the MCP server runs kubectl synchronously on one uvicorn worker, so a slow
+# call starves /healthz and the supervisor restarts a healthy forward.
+#
+# One risk carried over and still not exercised: entity-resolution confidence
+# tiers at >=0.75 and >=0.50 with two clarification halts. A score between
+# 0.20 and 0.60 that once proceeded to RCI now ends the turn with a question,
+# which kills an attempt before it investigates. Smoke one problem and confirm
+# the attempt carries a real investigation before letting the run stand.
+brain_go_ref = "380676943e3b124799a9bd573469d7082576bfa0"
+
+# Pinned for the same reason brain_go_ref is. sregym_ref defaults to "main"
+# and resolves at each instance's boot, so the four hosts in a run can check
+# out different commits if something merges while they are booting, and a
+# rerun weeks later is not the same run.
+#
+# Moved from 90ca3d03 (the #100 merge, which is what makes a run possible at
+# all: run-20260914-0912 scored 0 of 12 slots because #94's startup gate
+# required HTTP 200 from a /healthz the deployed MCP image does not serve).
+# f4d361b2 adds two scoring-side changes and no agent-side one:
+#
+#   - #102 leaves an attempt unscored when the judge cannot parse its reply,
+#     instead of scoring it zero. That was about 6% of attempts across four
+#     runs and two of them held the correct root cause. It changes the
+#     denominator, so the graded rate here is not directly comparable to a
+#     pre-#102 run's strict rate; score_run.py reports both.
+#   - #99 classifies failures into correct, reasoned-but-wrong and
+#     zero-evidence template on structure rather than wording, which is how
+#     the inconclusive subset in readout 2 gets counted.
+sregym_ref = "f4d361b2a1464cbf1c4b1af3908e310e7a0ee1f4"
