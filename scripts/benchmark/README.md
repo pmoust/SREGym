@@ -349,10 +349,12 @@ round (`internal/chat/rci/aggregator.go`'s `State.ReplanCount` is in-memory
 only), and it says so rather than guessing one from a proxy.
 
 The port-forward restart half of the contamination line reads
-`mcp_pf_restarts.jsonl`, which `archive_run.sh`'s own sync filters do not
-currently pull down (it carries no `logs/` path segment and a `.jsonl`
-extension, and neither is in the `--include` list below). Fetch it
-separately before running the readout on a run with restarts to check:
+`mcp_pf_restarts.jsonl`. `archive_run.sh` pulls it into
+`sregym-run-logs/<run-id>/`; it needs its own `--include` there because the
+file carries no `logs/` path segment and a `.jsonl` extension, so neither of
+that sync's other two patterns reaches it. An archive taken before that
+include was added will not have it, and the readout then reports the restart
+count as absent rather than as zero. Fetch it into an older archive with:
 
 ```bash
 aws s3 cp s3://<bucket>/<run-id>/ /path/to/brain-go/sregym-run-logs/<run-id>/ \
