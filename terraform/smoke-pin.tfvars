@@ -1,6 +1,6 @@
 # One problem at the run's exact pins, to answer the one question
 # terraform/run.tfvars says to answer before letting a scored run stand: does
-# an attempt on brain-go a7adabe14 carry a real investigation, or does the
+# an attempt at the pinned brain-go carry a real investigation, or does the
 # entity-resolution clarification halt end the turn with a question first.
 #
 # Not terraform/smoke.tfvars, which deliberately leaves both refs unset so it
@@ -68,5 +68,5 @@ brain_env = {
 # rule expire-noncurrent Enabled.
 results_bucket = "sregym-bench-results-819709950457"
 
-brain_go_ref = "380676943e3b124799a9bd573469d7082576bfa0"
-sregym_ref   = "f4d361b2a1464cbf1c4b1af3908e310e7a0ee1f4"
+brain_go_ref = "bcb45e7425286dafc9402e418c7d0c316993229a"
+sregym_ref   = "fbc5e5357e318b945f7e897d237940fe11b2bb39"
