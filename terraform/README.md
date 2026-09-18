@@ -45,7 +45,9 @@ role's ARN.
 
 ## Running
 
-Two named scenarios cover almost every launch:
+Two named scenarios cover almost every launch. `smoke-pin.tfvars` is a third,
+one problem at whatever refs the next scored run is pinned to, for validating
+a pin rather than testing current `main`:
 
 ```bash
 ./scripts/benchmark/launch.sh smoke     # 2 problems, proves the harness works
