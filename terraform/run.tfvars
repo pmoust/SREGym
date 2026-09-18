@@ -51,6 +51,24 @@
 # hours faster than three for a dollar less and one extra machine. Seven buys
 # another 1.2 hours for four more machines and is the shape that just failed.
 #
+# The wall and ec2 columns are stale. They follow from the 24.8 min median
+# above, which was measured under the old 1800s cap with 11 of that run's 60
+# attempts censored at it; the censored attempts are most of what put the
+# median there. Kept because the ranking of the three shapes still holds and
+# four boxes still follows from it.
+#
+# run-20260908-0739 ran this exact shape at 2400s and finished 63 of 63
+# attempts in 78 minutes: first fault 07:48:38, last log line 08:50:38, so
+# about 60 min of agent time over the deepest shard's 6 attempts, near 10 min
+# each, plus about 18 min of boot and setup. Expect 80 to 90 minutes and
+# around $9 of EC2, not 2.8h and $19.
+#
+# A short attempt is not an efficient one. The step budget, not the wall
+# clock, is what ended those attempts: TTM ran 240/436/871s against a 2400s
+# cap, and 18 of 63 exhausted CHAT_SERVICE_RCI_RECURSION_LIMIT and submitted
+# boilerplate. That budget is raised to 200 in brain_env below, so attempts
+# should get longer here, not shorter.
+#
 # 21 does not divide by 4, and here that costs nothing. Both splits are static
 # modulo (problem % shard_count, then index % runs_per_instance), so the shards
 # are 6/5/5/5, and across three slots a shard of six goes 2/2/2 while a shard of
