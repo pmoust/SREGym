@@ -74,8 +74,10 @@ before it reaches terraform, and refuses to proceed, before any AWS call, if:
 - the ref does not resolve to a commit at all
 - the commit resolves locally but was never pushed (the fleet clones from the
   remote, so a local-only commit is invisible to it)
-- the checkout that resolved it is dirty (a run whose code exists nowhere on
-  disk in the form it ran is unreproducible)
+- the checkout that resolved it has an uncommitted change to a tracked file (a
+  run whose code exists nowhere on disk in the form it ran is unreproducible).
+  Untracked files do not count: the fleet clones the commit from the remote, so
+  a file that is in no commit cannot reach it
 
 `scripts/benchmark/experiment.sh` exercises the same resolution and the same
 three checks from the command line, `--sregym-ref` / `--brain-go-ref`. It
