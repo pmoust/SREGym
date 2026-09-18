@@ -88,6 +88,41 @@
 # had already been billed. Every run to date has been us-east-2.
 region = "us-east-2"
 
+# READ THE WORKSPACE NOTE BELOW BEFORE PLANNING WITH THIS SET.
+#
+# s3.tf gates all five of its bucket resources on this variable being empty.
+# Which behaviour that gives depends entirely on whether the workspace you
+# plan in already manages the bucket, and the two cases are opposite:
+#
+#   - A workspace whose state does NOT hold the bucket (arm-control,
+#     arm-treat, any fresh worktree): leaving this empty means CreateBucket,
+#     which fails with 409 BucketAlreadyOwnedByYou after the security group
+#     has already been created. Setting it is what makes the launch work.
+#   - The primary checkout's default workspace, whose state DOES hold all
+#     five resources (terraform.tfstate, serial 320, verified 2026-09-18):
+#     setting this takes every one of them to count = 0, which plans five
+#     destroys. force_destroy is false so the bucket itself survives on
+#     BucketNotEmpty, but the public-access block, the AES256 default, the
+#     versioning and the lifecycle expiry are destroyed for real before that
+#     failure. Removing a public-access block is a security regression, not a
+#     bookkeeping one.
+#
+# So: plan the scored run from an arm workspace or a fresh worktree, never
+# from the default workspace with this line present. Every scored run to date
+# did exactly that, passing this value as -var from arm-control or arm-treat,
+# which is why the committed scenario never carried it and has never been
+# launchable on its own.
+#
+# variables.tf says to set this only for a bucket that already carries the
+# four settings s3.tf would otherwise apply. Checked against the live bucket
+# on 2026-09-18: BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy and
+# RestrictPublicBuckets all true, SSE AES256, versioning Enabled, lifecycle
+# rule expire-noncurrent Enabled. All four are present.
+#
+# The name is derived from the account id the same way s3.tf derives it, so
+# this is the same bucket, not a second one.
+results_bucket = "sregym-bench-results-819709950457"
+
 instance_count    = 4
 runs_per_instance = 3
 n_attempts        = 3
