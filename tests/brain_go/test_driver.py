@@ -8,6 +8,7 @@ local tools.
 import datetime
 import json
 import re
+import signal
 import subprocess
 from unittest import mock
 
@@ -599,3 +600,14 @@ def test_a_workflow_past_its_retention_is_an_expected_miss(monkeypatch, tmp_path
 
     assert driver._temporal_show("rci-uuid-1") is None
     warning.assert_not_called()
+
+
+def test_sigterm_unwinds_so_the_archive_step_runs():
+    # The harness sends SIGTERM to kill a timed-out agent, and that attempt is
+    # the one most worth archiving. Python's default action would end the
+    # interpreter without running main's finally, so the handler has to turn
+    # the signal into an unwind rather than let it kill the process outright.
+    with pytest.raises(SystemExit) as excinfo:
+        driver._unwind_on_sigterm(signal.SIGTERM, None)
+
+    assert excinfo.value.code == 128 + signal.SIGTERM

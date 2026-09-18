@@ -12,10 +12,27 @@ chart, so this walks the classes the registry names instead.
 import contextlib
 import inspect
 import re
+from unittest import mock
 
+import pytest
+
+from sregym.conductor.problems import registry as registry_module
 from sregym.conductor.problems.base import Problem
 from sregym.conductor.problems.khaos_faults import _KHAOS_FAULT_COMPONENTS, KhaosFaultName
-from sregym.conductor.problems.registry import ProblemRegistry
+
+
+@pytest.fixture
+def registry():
+    """The problem registry, built without touching a cluster.
+
+    ProblemRegistry.__init__ ends by constructing KubeCtl, which calls exit(1)
+    when there is no kubeconfig rather than raising. Without this the whole
+    file passes on a machine with a cluster and dies on every machine without
+    one, which is every CI runner, so the coverage claim below would never be
+    checked where it matters.
+    """
+    with mock.patch.object(registry_module, "KubeCtl"):
+        return registry_module.ProblemRegistry().PROBLEM_REGISTRY
 
 
 def _classes(entry):
@@ -47,9 +64,7 @@ def _own_source(entry) -> str:
     return source
 
 
-def test_every_registered_problem_builds_a_structured_root_cause():
-    registry = ProblemRegistry().PROBLEM_REGISTRY
-
+def test_every_registered_problem_builds_a_structured_root_cause(registry):
     unstructured = sorted(
         pid for pid, entry in registry.items() if "build_structured_root_cause" not in _own_source(entry)
     )
@@ -66,12 +81,10 @@ def test_the_check_would_notice_a_free_form_problem():
     assert "build_structured_root_cause" not in _own_source(Problem)
 
 
-def test_every_registered_khaos_fault_names_its_hardware():
+def test_every_registered_khaos_fault_names_its_hardware(registry):
     # KhaosFaultProblem builds its root cause from a table, so the scan above is
     # satisfied by the call site whether or not a given fault is in that table.
     # This asserts the data instead of the code shape.
-    registry = ProblemRegistry().PROBLEM_REGISTRY
-
     missing = []
     for pid, entry in sorted(registry.items()):
         try:

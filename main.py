@@ -168,6 +168,11 @@ def _configure_model_environment(args) -> tuple[str, str]:
 
 _TOKEN_DELTA = Path(os.path.dirname(os.path.abspath(__file__))) / "scripts" / "benchmark" / "token_delta.py"
 
+# How long an agent gets to finish writing after the harness decides it is done.
+# The agent archives its Temporal histories on the way out, and that work is
+# bounded by the driver's own per-export timeout.
+AGENT_REAP_GRACE_SECONDS = 60
+
 
 def _parse_structured_root_cause(root_cause: str | None) -> tuple[str, str, str]:
     """Split Problem.build_structured_root_cause output into its parts.
@@ -723,7 +728,13 @@ def driver_loop(
                     if time.time() - agent_start_time > agent_timeout:
                         timed_out = True
                         console.log(f"⏰ Agent timeout ({agent_timeout}s) exceeded, killing agent")
-                        LAUNCHER.cleanup_agent(agent_to_run)
+                        # The normal path waits 60s for the agent before reaping
+                        # it, and the agent's own archive step is sized against
+                        # that. This path had cleanup_agent's 5s default, so the
+                        # attempt most worth reading afterwards was the one that
+                        # archived nothing. The agent still dies here; it just
+                        # gets the same room to finish writing.
+                        LAUNCHER.cleanup_agent(agent_to_run, timeout=AGENT_REAP_GRACE_SECONDS)
                         conductor.results["timed_out"] = True
                         conductor.results["agent_timeout_seconds"] = agent_timeout
                         console.log("🧹 Running conductor cleanup after agent timeout...")
@@ -759,7 +770,7 @@ def driver_loop(
                     agent_proc = LAUNCHER._procs.get(agent_to_run) or agent_proc
                     if agent_proc and not timed_out:
                         console.log("⏳ Waiting for agent process to complete...")
-                        timeout = 60  # seconds
+                        timeout = AGENT_REAP_GRACE_SECONDS
                         elapsed = 0
                         while elapsed < timeout:
                             agent_proc.proc.poll()

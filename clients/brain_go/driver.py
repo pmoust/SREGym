@@ -28,6 +28,7 @@ import datetime
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -866,7 +867,21 @@ Apply the fix, then confirm the application has recovered.
 # ---------------------------------------------------------------------------
 
 
+def _unwind_on_sigterm(signum, _frame):
+    """Turn the harness's SIGTERM into a normal unwind.
+
+    Python's default action for SIGTERM ends the interpreter without running
+    any finally block. The archive step at the end of main runs in one, and the
+    attempt most worth archiving is a timed-out one, which is exactly when the
+    harness sends this signal. Raising SystemExit lets the finally run inside
+    whatever grace the harness allows.
+    """
+    raise SystemExit(128 + signum)
+
+
 def main() -> int:
+    signal.signal(signal.SIGTERM, _unwind_on_sigterm)
+
     if not BRAIN_API_KEY:
         logger.error("BRAIN_API_KEY is unset. scripts/benchmark/setup_brain_go.sh writes it.")
 
