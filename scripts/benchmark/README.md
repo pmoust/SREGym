@@ -325,6 +325,40 @@ on its own — treat it as a rough estimate, not a precise score. That is a
 fact about how much data exists, not a sign the run went wrong. Add
 `--json` to either script for machine-readable output.
 
+**The RCI readout** (inconclusive rate, the Observed signals section, the
+new RCI counters, contamination, and the judge score restricted to the
+inconclusive subset):
+
+```bash
+python3 scripts/benchmark/readout_run.py /path/to/brain-go/sregym-results/<run-id>
+```
+
+Reads `Diagnosis.submission` for the exact inconclusive lead sentence and
+for an `## Observed signals` section within it, and aggregates
+`custom_mcp_breaker_trips_total`, `rci_signal_agent_dispatched_total` and
+`rci_symptom_improved_downgrade_total` from the same `*tokens*.prom` files
+`score_run.py`'s token total reads, grouped by shard: within one shard the
+counter only grows, so the max across everything scraped from that box is
+exact, and shards sum because that is where one brain-go process ends and
+the next begins. A counter absent from every file in the run prints as not
+present rather than as zero, so a run that predates a counter is never
+mistaken for one where it legitimately never fired.
+
+It does not print a replan count: brain-go has no counter for a replan
+round (`internal/chat/rci/aggregator.go`'s `State.ReplanCount` is in-memory
+only), and it says so rather than guessing one from a proxy.
+
+The port-forward restart half of the contamination line reads
+`mcp_pf_restarts.jsonl`, which `archive_run.sh`'s own sync filters do not
+currently pull down (it carries no `logs/` path segment and a `.jsonl`
+extension, and neither is in the `--include` list below). Fetch it
+separately before running the readout on a run with restarts to check:
+
+```bash
+aws s3 cp s3://<bucket>/<run-id>/ /path/to/brain-go/sregym-run-logs/<run-id>/ \
+  --recursive --exclude "*" --include "*mcp_pf_restarts.jsonl"
+```
+
 **What the token scrape archives.** `scrape_tokens.sh` writes
 `sregym-tokens.prom` into a shard's log tree from brain-go's two metrics
 endpoints (chat on `:9091`, tworker on `:9092`). It runs from `sync_logs`, so
