@@ -333,6 +333,32 @@ def test_a_dirty_worktree_is_refused_on_a_non_default_ref(tmp_path):
     assert "worktree" in r.stderr and "dirty" in r.stderr
 
 
+def test_an_untracked_file_does_not_count_as_dirty(tmp_path):
+    """The counterpart to the test above: an untracked file cannot be part of
+    the commit the on-origin check just cleared, so it cannot reach the fleet
+    or change what runs, and refusing the launch over one names a
+    reproducibility problem the run does not have.
+
+    This is not hypothetical. Both real checkouts carry untracked scratch
+    notes, an .idea/ and stray .DS_Store files, which made every pinned launch
+    from them fail with a message about unreproducible code.
+    """
+    repo = _repo(tmp_path / "r")
+    _remote(repo)
+    _scenario_with_ref(repo, "custom", "sregym_ref", "pushed-feature")
+    _git(repo, "checkout", "-qb", "pushed-feature")
+    (repo / "feature.txt").write_text("committed\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feature commit")
+    _git(repo, "push", "-q", "origin", "pushed-feature")
+    # Untracked only: never added, so no commit can carry it.
+    (repo / "scratch-notes.md").write_text("notes nobody committed\n")
+
+    r = _run(repo, "custom", "--plan-only")
+
+    assert "dirty" not in r.stderr
+
+
 def test_a_pushed_branch_resolves_to_its_correct_sha(tmp_path):
     """The success path: a branch name in the tfvars resolves to the exact
     SHA it was pushed at, and that is what gets pinned.

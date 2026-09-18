@@ -175,9 +175,19 @@ resolve() {
     return 1
   fi
 
-  # 3. Is the worktree that resolved it clean. A run whose code exists
-  # nowhere, neither pinned nor on disk in the form it ran, is unreproducible.
-  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+  # 3. Is the worktree that resolved it clean, counting tracked files only.
+  # A run whose code exists nowhere, neither pinned nor on disk in the form it
+  # ran, is unreproducible, and an uncommitted edit to a tracked file is
+  # exactly that: the engineer reads their own change on disk and the fleet
+  # clones something else.
+  #
+  # Untracked files are not that. They cannot be part of the commit check 2
+  # just proved is on origin, so they cannot reach the fleet or change what
+  # runs. Counting them refuses every launch from a checkout holding scratch
+  # notes, an .idea/ or a stray .DS_Store, which is what both of these
+  # checkouts hold, and the refusal names a reproducibility problem the run
+  # does not have.
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
     echo "launch: $name worktree in $dir is dirty, refusing to pin ref '$ref'" >&2
     echo "launch: a run whose code exists nowhere is unreproducible; commit or stash first" >&2
     return 1

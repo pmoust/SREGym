@@ -196,7 +196,8 @@ Then launch it the normal way:
 preview ran: does it resolve, was it pushed, is the worktree clean), prints
 what it is about to bill you for, and asks before it applies. It also
 writes a manifest recording every setting — including which ref actually
-ran and whether the checkout that resolved it was dirty — so a run's
+ran and whether the checkout that resolved it had uncommitted tracked
+changes — so a run's
 provenance never depends on remembering what you typed.
 
 **If your `--problems` spec unions a named set with extra bare ids**
