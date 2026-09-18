@@ -191,8 +191,17 @@ echo "[archive] logs -> $LOGS"
 # fixed for, one file type over. These land here rather than in results/,
 # which never includes .log at all: structured scores and evidence go to
 # results/, raw traces to logs/.
+#
+# mcp_pf_restarts.jsonl is the third pattern. It records every port-forward
+# restart per slot and sits at shard-N/slots/M/mcp_pf_restarts.jsonl, with no
+# logs/ segment and a .jsonl suffix, so neither pattern above reaches it. It
+# is what makes a contaminated attempt identifiable: a restart kills the MCP
+# connection under a running attempt, and on the three scored runs before this
+# was noticed the counts were 61, 32 and 25. Reading a score without it means
+# reading a degraded run as a bad one.
 aws s3 sync "$SRC" "$LOGS/" --region "$REGION" \
-  --exclude "*" --include "*logs/*" --include "*.log" --only-show-errors
+  --exclude "*" --include "*logs/*" --include "*.log" \
+  --include "*mcp_pf_restarts.jsonl" --only-show-errors
 
 # Per-attempt files under a run_N directory, which is what a "scored
 # problem-run" is. Counting *_ALL_results.csv instead reported 0 for most of a
