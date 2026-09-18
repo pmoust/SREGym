@@ -21,6 +21,7 @@ from pathlib import Path
 def collect(root: Path) -> tuple[list[dict], list[Path]]:
     """Return manifests keyed by problem, plus the specs that named no component."""
     by_problem: dict[str, dict] = {}
+    paths: dict[str, Path] = {}
     unlabeled: list[Path] = []
 
     for path in sorted(root.rglob("fault-spec.json")):
@@ -34,12 +35,15 @@ def collect(root: Path) -> tuple[list[dict], list[Path]]:
         if not problem:
             unlabeled.append(path)
             continue
-        if not spec.get("component"):
-            unlabeled.append(path)
 
         previous = by_problem.get(problem)
         if previous is None or spec.get("attempt", 0) >= previous.get("attempt", 0):
             by_problem[problem] = spec
+            paths[problem] = path
+
+    # Counted after the dedup, not during it. An earlier attempt with no
+    # component does not make the problem unlabeled when the winning one has it.
+    unlabeled += [paths[p] for p, spec in sorted(by_problem.items()) if not spec.get("component")]
 
     manifests = [
         {

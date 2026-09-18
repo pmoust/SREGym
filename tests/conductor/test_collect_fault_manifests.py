@@ -74,3 +74,25 @@ def test_missing_keys_fall_back_rather_than_raise(tmp_path):
     assert manifests[0]["component"] == ""
     assert manifests[0]["injected_at"] is None
     assert len(unlabeled) == 1
+
+
+def test_unlabeled_counts_problems_not_attempt_files(tmp_path):
+    # The summary sentence says "problems", so the number must be in that unit.
+    # Three attempts of one unlabeled problem is one unlabeled problem.
+    for i in (1, 2, 3):
+        _spec(tmp_path, f"a{i}", problem="mystery", component="", attempt=i)
+
+    manifests, unlabeled = collect(tmp_path)
+
+    assert len(manifests) == 1
+    assert len(unlabeled) == 1
+
+
+def test_an_earlier_unlabeled_attempt_does_not_count_when_the_winner_has_a_component(tmp_path):
+    _spec(tmp_path, "a1", problem="incorrect_image", component="", attempt=1)
+    _spec(tmp_path, "a2", problem="incorrect_image", component="frontend", attempt=2)
+
+    manifests, unlabeled = collect(tmp_path)
+
+    assert manifests[0]["component"] == "frontend"
+    assert unlabeled == []

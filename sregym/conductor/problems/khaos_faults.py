@@ -199,6 +199,14 @@ class KhaosFaultConfig(BaseModel):
     default_args: list[int | str] = Field(default_factory=list)
 
 
+# A khaos fault's config description is written for a reader, not for the
+# scorer. Naming the hardware the fault sits on lets the offline scorer match a
+# hypothesis against it, the same way the composed hardware narratives below do.
+_KHAOS_FAULT_COMPONENTS = {
+    KhaosFaultName.latent_sector_error: "node-storage",
+}
+
+
 class KhaosFaultProblem(Problem):
     def __init__(
         self,
@@ -227,7 +235,15 @@ class KhaosFaultProblem(Problem):
 
         self._reinjection_monitor: _FaultReinjectionMonitor | None = None
 
-        self.root_cause = cfg.description
+        component = _KHAOS_FAULT_COMPONENTS.get(self.fault_name)
+        if component:
+            self.root_cause = self.build_structured_root_cause(
+                component=component,
+                namespace=self.namespace,
+                description=cfg.description,
+            )
+        else:
+            self.root_cause = cfg.description
 
         self.diagnosis_oracle = LLMAsAJudgeOracle(problem=self, expected=self.root_cause)
         self.mitigation_oracle = AlertOracle(problem=self)

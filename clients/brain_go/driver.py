@@ -491,7 +491,7 @@ def confirm_persisted(investigation_uuid: str) -> None:
     # Written from the response already in hand, so this costs no second
     # request, and after the check rather than before it, so a run that is not
     # recording still logs that first.
-    write_artifact("rca_response.json", data.get("rca_response"))
+    write_artifact("rca_response.json", data.get("rca_response") or None)
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +716,15 @@ def write_artifact(name: str, payload: Any) -> None:
         logger.warning("could not write %s (non-fatal): %s", name, exc)
 
 
+# main.py waits 60s for this process after the conductor is done, then sends
+# SIGTERM to the whole process group. Two exports have to finish inside that
+# window or the kill lands mid-write: the interpreter dies without unwinding, so
+# nothing logs the miss and a half-written history still publishes. Keep the two
+# calls plus their overhead under the grace period rather than under the CLI's
+# own patience.
+TEMPORAL_SHOW_TIMEOUT = 25
+
+
 def _temporal_show(workflow_id: str) -> Any:
     """Export one workflow's full history as JSON, or None.
 
@@ -740,7 +749,7 @@ def _temporal_show(workflow_id: str) -> Any:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=TEMPORAL_SHOW_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:

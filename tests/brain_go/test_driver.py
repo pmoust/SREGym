@@ -447,6 +447,32 @@ def test_confirm_persisted_keeps_the_report(monkeypatch, tmp_path):
     assert json.loads((tmp_path / "rca_response.json").read_text()) == report
 
 
+@pytest.mark.parametrize("empty", [{}, "", []])
+def test_an_empty_report_writes_no_file(monkeypatch, tmp_path, empty):
+    # The log line above the write calls this NOT PERSISTED. Writing the file
+    # anyway would hand the scorer an empty report where it should read an
+    # absent one, which are different facts about the run.
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "session_x")
+    monkeypatch.setattr(
+        driver.requests,
+        "get",
+        lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"rca_response": empty}}),
+    )
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+
+    driver.confirm_persisted("uuid-1")
+
+    assert not (tmp_path / "rca_response.json").exists()
+
+
+def test_the_temporal_export_fits_inside_the_harness_grace_period():
+    # main.py waits 60s after the conductor is done, then SIGTERMs the process
+    # group. Two exports have to finish inside that window or the kill lands
+    # mid-write and nothing logs the miss.
+    assert driver.TEMPORAL_SHOW_TIMEOUT * 2 < 60
+
+
 def test_an_empty_report_writes_no_artifact(monkeypatch, tmp_path):
     """Absent must read as unmeasured, not as an empty result."""
     monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
