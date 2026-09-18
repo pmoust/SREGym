@@ -49,6 +49,14 @@ shard-level sregym-tokens.prom carries, so folding those files into the same
 shard group changes nothing -- they are earlier readings of the counter the
 shard-level file already caught at its highest.
 
+One case this undercounts and does not detect: a brain-go that restarts
+mid-run resets its counters to zero, so a shard holds two segments rather
+than one cumulative series, and max takes the larger segment instead of
+their sum. Checked on run-20260917-ctl3, where it does not arise: each
+shard's sregym-brain-go.log carries exactly one tworker start. A run whose
+brain-go did restart would need the segments summed, which means reading
+them in scrape order rather than taking a maximum.
+
 ## Item 3, replan rate
 
 internal/chat/rci/metrics.go (brain-go) has no counter for a replan round.
@@ -204,9 +212,10 @@ def restarts(run_dir: Path) -> dict | None:
     """Port-forward restart events from every mcp_pf_restarts.jsonl found.
 
     None when no file was found at all, so "zero restarts" and "not
-    archived" are never printed as the same thing. A line that is not valid
-    JSON is skipped rather than raising: one malformed line should cost
-    itself, not the whole count.
+    archived" are never printed as the same thing. A line that is not a JSON
+    object is skipped rather than raising: one malformed line should cost
+    itself, not the whole count. Not an object, not merely not JSON, because
+    json.loads("42") parses fine and hands back an int, which has no .get.
     """
     files = restart_files(run_dir)
     if not files:
@@ -219,10 +228,14 @@ def restarts(run_dir: Path) -> dict | None:
             if not line:
                 continue
             try:
-                event = json.loads(line).get("event", "")
+                parsed = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            events[event] += 1
+
+            if not isinstance(parsed, dict):
+                continue
+
+            events[str(parsed.get("event", ""))] += 1
 
     return {"restart": events.get("restart", 0), "events": dict(events), "files": len(files)}
 
@@ -282,7 +295,10 @@ def new_rci_counters(run_dir: Path) -> dict:
 
     return {
         "signal_agent_dispatched": by_signal,
-        "symptom_improved_downgrade": int(downgrade[""]) if downgrade else None,
+        # .get, matching contamination()'s reading of the breaker counter:
+        # the series is unlabelled today, and a labelled one should read as a
+        # missing bare series rather than take the script down.
+        "symptom_improved_downgrade": int(downgrade.get("", 0.0)) if downgrade else None,
     }
 
 

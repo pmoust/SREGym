@@ -218,8 +218,17 @@ def test_a_malformed_restart_line_costs_itself_not_the_count(tmp_path):
     logs_root = results.parent.parent / "sregym-run-logs" / results.name
     slot0 = logs_root / "shard-0" / "slots" / "0"
     slot0.mkdir(parents=True)
+    # Three shapes of bad line, not one. "not json" fails to parse, but 42
+    # and [1] parse fine and hand back an int and a list, neither of which
+    # has .get: catching only JSONDecodeError let those two through to an
+    # AttributeError that took the whole count down.
     (slot0 / "mcp_pf_restarts.jsonl").write_text(
-        '{"event":"restart","old_pid":"1","new_pid":"2"}\nnot json\n{"event":"restart","old_pid":"2","new_pid":"3"}\n'
+        '{"event":"restart","old_pid":"1","new_pid":"2"}\n'
+        "not json\n"
+        "42\n"
+        "[1]\n"
+        "null\n"
+        '{"event":"restart","old_pid":"2","new_pid":"3"}\n'
     )
 
     out = readout_run.restarts(results)
@@ -228,11 +237,28 @@ def test_a_malformed_restart_line_costs_itself_not_the_count(tmp_path):
 
 
 def test_no_restart_file_is_none_not_zero():
-    """Not archived and archived-with-zero-restarts must read differently:
-    archive_run.sh does not currently sync mcp_pf_restarts.jsonl at all (no
-    logs/ segment, .jsonl not .log), so a real run with real restarts can
-    still read as "not archived" until that file is fetched separately."""
+    """Not archived and archived-with-zero-restarts must read differently.
+    archive_run.sh syncs mcp_pf_restarts.jsonl now, but an archive taken
+    before that include was added does not have it, and a real run with real
+    restarts must not read as zero."""
     assert readout_run.restarts(Path("/nonexistent-for-this-test")) is None
+
+
+def test_a_labelled_downgrade_counter_reads_as_absent_not_a_crash(tmp_path):
+    """rci_symptom_improved_downgrade_total is unlabelled today. If it ever
+    gains a label, the bare series this reads disappears, and that must
+    report as absent rather than take the readout down with a KeyError."""
+    results = _archive(tmp_path, [_row("a")])
+    logs_root = results.parent.parent / "sregym-run-logs" / results.name
+    shard = logs_root / "shard-0"
+    shard.mkdir(parents=True)
+    (shard / "sregym-tokens.prom").write_text(
+        'rci_symptom_improved_downgrade_total{reason="x"} 3\n'
+    )
+
+    out = readout_run.new_rci_counters(results)
+
+    assert out["symptom_improved_downgrade"] == 0
 
 
 def test_the_same_restart_file_reached_by_two_roots_counts_once(tmp_path):
