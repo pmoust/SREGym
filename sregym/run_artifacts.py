@@ -23,6 +23,12 @@ class RunArtifacts:
     staging_root: Path
     active_dir: Path
     final_dir: Path
+    # Where the agent writes its own transcripts. It sits beside active_dir
+    # rather than inside it, because finalization scans every staged file for
+    # the real problem id and a transcript is the agent's own prose: one
+    # model-authored slug matching the id would cost the attempt its whole
+    # published tree. The harness folds this directory in after publishing.
+    archive_dir: Path
 
     @classmethod
     def create(
@@ -40,6 +46,8 @@ class RunArtifacts:
         staging_root.chmod(0o700)
         active_dir.mkdir(parents=True, exist_ok=False)
         (active_dir / "trajectory").mkdir()
+        archive_dir = staging_root / agent / f"{artifact_id}-archive"
+        archive_dir.mkdir(parents=True, exist_ok=False)
         return cls(
             artifact_id,
             problem_id,
@@ -47,6 +55,7 @@ class RunArtifacts:
             staging_root,
             active_dir,
             results_root / agent / problem_id / f"run_{attempt}",
+            archive_dir,
         )
 
     def finalize_and_publish(

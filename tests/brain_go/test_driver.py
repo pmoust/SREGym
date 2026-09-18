@@ -5,7 +5,9 @@ driver: a read timeout must not be retried, and the diagnosis phase must refuse
 local tools.
 """
 
+import ast
 import datetime
+import inspect
 import json
 import re
 import signal
@@ -442,6 +444,7 @@ def test_confirm_persisted_keeps_the_report(monkeypatch, tmp_path):
         lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"rca_response": report}}),
     )
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
 
     driver.confirm_persisted("uuid-1")
 
@@ -461,6 +464,7 @@ def test_an_empty_report_writes_no_file(monkeypatch, tmp_path, empty):
         lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"rca_response": empty}}),
     )
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
 
     driver.confirm_persisted("uuid-1")
 
@@ -485,6 +489,7 @@ def test_an_empty_report_writes_no_artifact(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(driver.logger, "error", mock.Mock())
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
 
     driver.confirm_persisted("uuid-1")
 
@@ -547,6 +552,7 @@ def test_histories_are_not_exported_without_an_investigation(monkeypatch):
 def test_the_child_history_is_exported_under_brain_gos_own_id(monkeypatch, tmp_path):
     """The RCI child's id is rci- plus the investigation uuid."""
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
     child = {
         "events": [
             {
@@ -576,6 +582,7 @@ def test_the_child_history_is_exported_under_brain_gos_own_id(monkeypatch, tmp_p
 def test_a_missing_temporal_cli_records_nothing_and_does_not_raise(monkeypatch, tmp_path):
     """A slot without the CLI is a miss, not a failure."""
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
     monkeypatch.setattr(
         driver.subprocess,
         "run",
@@ -590,6 +597,7 @@ def test_a_missing_temporal_cli_records_nothing_and_does_not_raise(monkeypatch, 
 def test_a_workflow_past_its_retention_is_an_expected_miss(monkeypatch, tmp_path):
     """An aged-out workflow is the expected miss, so it must not warn."""
     monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
     monkeypatch.setattr(
         driver.subprocess,
         "run",
@@ -611,3 +619,66 @@ def test_sigterm_unwinds_so_the_archive_step_runs():
         driver._unwind_on_sigterm(signal.SIGTERM, None)
 
     assert excinfo.value.code == 128 + signal.SIGTERM
+
+
+def test_main_installs_the_signal_handlers():
+    """Asserting the installer works does not assert main calls it.
+
+    The defect this pins is a missing registration, so the test has to fail when
+    the call is deleted from main rather than when the installer breaks.
+    """
+    tree = ast.parse(inspect.getsource(driver))
+
+    main_fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    called = {
+        node.func.id for node in ast.walk(main_fn) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "install_signal_handlers" in called, (
+        "main must install the SIGTERM handler, or the archive step never runs on a kill"
+    )
+
+
+def test_the_sigterm_handler_is_actually_installed():
+    # Calling the handler body proves it raises; it does not prove anything
+    # registered it, and the registration is the line that was missing.
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        driver.install_signal_handlers()
+
+        assert signal.getsignal(signal.SIGTERM) is driver._unwind_on_sigterm
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_a_transcript_never_lands_in_the_scanned_staging_directory(monkeypatch, tmp_path):
+    # Finalization scans every staged file for the real problem id and fails the
+    # whole attempt on a hit. A transcript is the model's own prose, so one
+    # generated slug matching a problem id would cost the attempt everything.
+    staged = tmp_path / "staged"
+    archive = tmp_path / "archive"
+    staged.mkdir()
+    archive.mkdir()
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(staged))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(archive))
+
+    driver.write_artifact("rci_history.json", {"events": ["incorrect_image"]}, transcript=True)
+    driver.write_artifact("tool-calls.json", {"kubectl": 3})
+
+    assert (archive / "rci_history.json").exists()
+    assert not (staged / "rci_history.json").exists()
+    assert (staged / "tool-calls.json").exists(), "harness bookkeeping still stages"
+
+
+def test_a_transcript_with_no_archive_dir_is_skipped_not_staged(monkeypatch, tmp_path):
+    # Falling back to the staging directory would reintroduce the hazard on any
+    # harness that does not export the archive directory.
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(staged))
+    monkeypatch.delenv("AGENT_ARCHIVE_DIR", raising=False)
+
+    driver.write_artifact("rci_history.json", {"events": []}, transcript=True)
+
+    assert list(staged.iterdir()) == []

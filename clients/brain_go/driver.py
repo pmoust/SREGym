@@ -492,7 +492,7 @@ def confirm_persisted(investigation_uuid: str) -> None:
     # Written from the response already in hand, so this costs no second
     # request, and after the check rather than before it, so a run that is not
     # recording still logs that first.
-    write_artifact("rca_response.json", data.get("rca_response") or None)
+    write_artifact("rca_response.json", data.get("rca_response") or None, transcript=True)
 
 
 # ---------------------------------------------------------------------------
@@ -688,12 +688,20 @@ def write_tool_calls(
         logger.warning("could not write tool calls (non-fatal): %s", exc)
 
 
-def write_artifact(name: str, payload: Any) -> None:
-    """Write one per-attempt artifact into AGENT_LOGS_DIR.
+def write_artifact(name: str, payload: Any, *, transcript: bool = False) -> None:
+    """Write one per-attempt artifact.
 
-    AGENT_LOGS_DIR is the attempt's own directory, exported by main.py's
-    _artifact_environment around the agent launch, which is how tool-calls.json
-    already lands beside the attempt it belongs to.
+    Two destinations, and the choice is a safety one rather than a preference.
+    Harness-generated bookkeeping goes to AGENT_LOGS_DIR, the attempt's staging
+    directory, which is how tool-calls.json already lands beside the attempt it
+    belongs to. Anything carrying the agent's own prose goes to
+    AGENT_ARCHIVE_DIR instead, and the harness folds that in after publishing.
+
+    Finalization scans every staged file for the real problem id and fails the
+    whole attempt on a hit. A transcript is the model's own text, so one
+    generated slug matching a problem id like incorrect_image would cost the
+    attempt every artifact it produced. Staging only text the harness wrote
+    keeps that gate reading what it was built to read.
 
     Best effort, for the reason write_tool_calls gives: a run's numbers are the
     product and a bookkeeping failure must not cost one. A None payload writes
@@ -703,9 +711,11 @@ def write_artifact(name: str, payload: Any) -> None:
     if payload is None:
         return
 
-    target = os.environ.get("AGENT_LOGS_DIR")
+    variable = "AGENT_ARCHIVE_DIR" if transcript else "AGENT_LOGS_DIR"
+
+    target = os.environ.get(variable)
     if not target:
-        logger.info("%s not recorded: AGENT_LOGS_DIR is unset", name)
+        logger.info("%s not recorded: %s is unset", name, variable)
 
         return
 
@@ -815,7 +825,7 @@ def write_temporal_histories(investigation_uuid: str) -> None:
 
     child_id = f"rci-{investigation_uuid}"
     child = _temporal_show(child_id)
-    write_artifact("rci_history.json", child)
+    write_artifact("rci_history.json", child, transcript=True)
 
     parent_id = _parent_workflow_id(child)
     if not parent_id:
@@ -823,7 +833,7 @@ def write_temporal_histories(investigation_uuid: str) -> None:
 
         return
 
-    write_artifact("turn_history.json", _temporal_show(parent_id))
+    write_artifact("turn_history.json", _temporal_show(parent_id), transcript=True)
 
 
 DIAGNOSIS_PROMPT = """You are investigating a Kubernetes application failure.
@@ -879,8 +889,18 @@ def _unwind_on_sigterm(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-def main() -> int:
+def install_signal_handlers() -> None:
+    """Install the handlers main needs before it does any work.
+
+    Separate from main so a test can assert the handler is installed. Calling
+    the handler body directly proves it raises; it does not prove anything
+    registered it, and the registration is the line that was missing.
+    """
     signal.signal(signal.SIGTERM, _unwind_on_sigterm)
+
+
+def main() -> int:
+    install_signal_handlers()
 
     if not BRAIN_API_KEY:
         logger.error("BRAIN_API_KEY is unset. scripts/benchmark/setup_brain_go.sh writes it.")

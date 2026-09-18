@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -172,6 +173,38 @@ _TOKEN_DELTA = Path(os.path.dirname(os.path.abspath(__file__))) / "scripts" / "b
 # The agent archives its Temporal histories on the way out, and that work is
 # bounded by the driver's own per-export timeout.
 AGENT_REAP_GRACE_SECONDS = 60
+
+# Where an agent writes its own transcripts, outside the staging directory that
+# finalization scans for the real problem id. Folded into the published tree by
+# _publish_archive once finalization has run.
+AGENT_ARCHIVE_DIR_ENV = "AGENT_ARCHIVE_DIR"
+
+
+def _publish_archive(run, published_run_dir: Path) -> None:
+    """Move the agent's transcripts into the published attempt directory.
+
+    They are written outside the staging tree so finalization's scan for the
+    real problem id never reads the agent's own prose. One model-authored slug
+    matching the id would otherwise fail finalization and cost the attempt every
+    artifact it produced, including the fault spec.
+
+    Best effort: a transcript that cannot be moved is logged and the attempt
+    keeps its results.
+    """
+    archive = getattr(run, "archive_dir", None)
+    if archive is None or not archive.is_dir():
+        return
+
+    for path in sorted(archive.iterdir()):
+        if not path.is_file():
+            continue
+        try:
+            shutil.move(str(path), str(published_run_dir / path.name))
+        except OSError as exc:
+            logger.warning("could not publish %s: %s", path.name, exc)
+
+    with contextlib.suppress(OSError):
+        archive.rmdir()
 
 
 def _parse_structured_root_cause(root_cause: str | None) -> tuple[str, str, str]:
@@ -457,10 +490,12 @@ def _tool_calls(active_dir: Path) -> dict[str, int]:
 def _artifact_environment(run: RunArtifacts):
     previous = {
         "AGENT_LOGS_DIR": os.environ.get("AGENT_LOGS_DIR"),
+        AGENT_ARCHIVE_DIR_ENV: os.environ.get(AGENT_ARCHIVE_DIR_ENV),
         HARNESS_ARTIFACT_ID_ENV: os.environ.get(HARNESS_ARTIFACT_ID_ENV),
         HARNESS_PROBLEM_ID_ENV: os.environ.get(HARNESS_PROBLEM_ID_ENV),
     }
     os.environ["AGENT_LOGS_DIR"] = str(run.active_dir.resolve())
+    os.environ[AGENT_ARCHIVE_DIR_ENV] = str(run.archive_dir.resolve())
     os.environ[HARNESS_ARTIFACT_ID_ENV] = run.artifact_id
     os.environ.pop(HARNESS_PROBLEM_ID_ENV, None)
     try:
@@ -830,6 +865,7 @@ def driver_loop(
 
                 if published_run_dir is not None:
                     _write_fault_spec(published_run_dir, conductor, pid, attempt)
+                    _publish_archive(run, published_run_dir)
 
                 all_results_for_agent.append(snapshot)
                 fieldnames = sorted({key for row in all_results_for_agent for key in row})
