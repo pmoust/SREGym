@@ -6,6 +6,7 @@ local tools.
 """
 
 import datetime
+import json
 import re
 import subprocess
 from unittest import mock
@@ -422,3 +423,153 @@ def test_the_prose_carries_the_exact_instant_the_window_cannot(monkeypatch):
     # And an ISO stamp before the word "between" must not disturb the parse,
     # since reFromTo matches from "between" onward.
     assert _FROM_TO.search(window.strip())
+
+
+def test_confirm_persisted_keeps_the_report(monkeypatch, tmp_path):
+    """The report is the only per-hypothesis record a run leaves behind.
+
+    Before this it was fetched, checked for emptiness and dropped, so every
+    verdict, evidence list and posterior an attempt produced died with the slot
+    and no offline scoring was possible.
+    """
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "session_x")
+    report = {"hypotheses_tested": [{"id": "h1", "status": "confirmed"}]}
+    monkeypatch.setattr(
+        driver.requests,
+        "get",
+        lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"rca_response": report}}),
+    )
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+
+    driver.confirm_persisted("uuid-1")
+
+    assert json.loads((tmp_path / "rca_response.json").read_text()) == report
+
+
+def test_an_empty_report_writes_no_artifact(monkeypatch, tmp_path):
+    """Absent must read as unmeasured, not as an empty result."""
+    monkeypatch.setattr(driver, "BRAIN_ADMIN_API_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(driver, "BRAIN_SESSION", "session_x")
+    monkeypatch.setattr(
+        driver.requests,
+        "get",
+        lambda *a, **k: mock.Mock(ok=True, json=lambda: {"data": {"state": "IN_PROGRESS"}}),
+    )
+    monkeypatch.setattr(driver.logger, "error", mock.Mock())
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+
+    driver.confirm_persisted("uuid-1")
+
+    assert not (tmp_path / "rca_response.json").exists()
+
+
+def test_write_artifact_survives_an_unwritable_target(monkeypatch, tmp_path):
+    """A bookkeeping failure must never cost a run its numbers."""
+    blocked = tmp_path / "file-not-a-dir"
+    blocked.write_text("x")
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(blocked))
+    warning = mock.Mock()
+    monkeypatch.setattr(driver.logger, "warning", warning)
+
+    driver.write_artifact("rca_response.json", {"a": 1})
+
+    warning.assert_called_once()
+
+
+def test_parent_workflow_id_is_read_off_the_start_event():
+    """The chat turn's id format is brain-go's business.
+
+    Rebuilding it here from the thread id would drift the first time brain-go
+    changes it, so it is read from the child's own start event instead.
+    """
+    history = {
+        "events": [
+            {
+                "eventId": "1",
+                "workflowExecutionStartedEventAttributes": {
+                    "parentWorkflowExecution": {"workflowId": "acct:3|cli:inv-abc", "runId": "r1"},
+                },
+            },
+        ],
+    }
+
+    assert driver._parent_workflow_id(history) == "acct:3|cli:inv-abc"
+
+
+@pytest.mark.parametrize(
+    "history",
+    [None, {}, {"events": []}, {"events": [{"eventId": "1"}]}],
+    ids=["none", "empty", "no-events", "orphan"],
+)
+def test_parent_workflow_id_yields_empty_on_an_unexpected_shape(history):
+    """An orphan child exports its own history and stops, rather than raising."""
+    assert driver._parent_workflow_id(history) == ""
+
+
+def test_histories_are_not_exported_without_an_investigation(monkeypatch):
+    """A turn that never opened an investigation has no history to export."""
+    show = mock.Mock()
+    monkeypatch.setattr(driver, "_temporal_show", show)
+
+    driver.write_temporal_histories("")
+
+    show.assert_not_called()
+
+
+def test_the_child_history_is_exported_under_brain_gos_own_id(monkeypatch, tmp_path):
+    """The RCI child's id is rci- plus the investigation uuid."""
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    child = {
+        "events": [
+            {
+                "eventId": "1",
+                "workflowExecutionStartedEventAttributes": {
+                    "parentWorkflowExecution": {"workflowId": "parent-1"},
+                },
+            },
+        ],
+    }
+    asked = []
+
+    def show(workflow_id):
+        asked.append(workflow_id)
+
+        return child if workflow_id.startswith("rci-") else {"events": []}
+
+    monkeypatch.setattr(driver, "_temporal_show", show)
+
+    driver.write_temporal_histories("uuid-1")
+
+    assert asked == ["rci-uuid-1", "parent-1"]
+    assert (tmp_path / "rci_history.json").exists()
+    assert (tmp_path / "turn_history.json").exists()
+
+
+def test_a_missing_temporal_cli_records_nothing_and_does_not_raise(monkeypatch, tmp_path):
+    """A slot without the CLI is a miss, not a failure."""
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        driver.subprocess,
+        "run",
+        mock.Mock(side_effect=FileNotFoundError("temporal")),
+    )
+
+    driver.write_temporal_histories("uuid-1")
+
+    assert not (tmp_path / "rci_history.json").exists()
+
+
+def test_a_workflow_past_its_retention_is_an_expected_miss(monkeypatch, tmp_path):
+    """An aged-out workflow is the expected miss, so it must not warn."""
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        driver.subprocess,
+        "run",
+        mock.Mock(return_value=mock.Mock(returncode=1, stdout="", stderr="workflow not found")),
+    )
+    warning = mock.Mock()
+    monkeypatch.setattr(driver.logger, "warning", warning)
+
+    assert driver._temporal_show("rci-uuid-1") is None
+    warning.assert_not_called()

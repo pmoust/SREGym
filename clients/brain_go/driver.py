@@ -432,7 +432,7 @@ def _run_label() -> str:
 
 
 def confirm_persisted(investigation_uuid: str) -> None:
-    """Check that the diagnosis turn actually recorded something.
+    """Check that the diagnosis turn actually recorded something, and keep it.
 
     Without this a misdirected session is invisible: brain-go's CompleteRCI
     swallows both a missing investigation and a state conflict as benign
@@ -480,6 +480,18 @@ def confirm_persisted(investigation_uuid: str) -> None:
             investigation_uuid,
             data.get("state"),
         )
+
+    # Keep the report. This is the only place it is ever read: the check above
+    # asks whether anything was written, and then the payload was dropped, so
+    # every per-hypothesis verdict, evidence list and posterior a run produced
+    # died with the slot. brain-go's evaluation harness scores exactly those
+    # fields, and it cannot recover them from the results CSV, which carries
+    # one judge verdict per attempt.
+    #
+    # Written from the response already in hand, so this costs no second
+    # request, and after the check rather than before it, so a run that is not
+    # recording still logs that first.
+    write_artifact("rca_response.json", data.get("rca_response"))
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +687,135 @@ def write_tool_calls(
         logger.warning("could not write tool calls (non-fatal): %s", exc)
 
 
+def write_artifact(name: str, payload: Any) -> None:
+    """Write one per-attempt artifact into AGENT_LOGS_DIR.
+
+    AGENT_LOGS_DIR is the attempt's own directory, exported by main.py's
+    _artifact_environment around the agent launch, which is how tool-calls.json
+    already lands beside the attempt it belongs to.
+
+    Best effort, for the reason write_tool_calls gives: a run's numbers are the
+    product and a bookkeeping failure must not cost one. A None payload writes
+    nothing, so an absent file reads as unmeasured rather than as an empty
+    result.
+    """
+    if payload is None:
+        return
+
+    target = os.environ.get("AGENT_LOGS_DIR")
+    if not target:
+        logger.info("%s not recorded: AGENT_LOGS_DIR is unset", name)
+
+        return
+
+    try:
+        path = Path(target) / name
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        logger.info("wrote %s (%d bytes)", name, path.stat().st_size)
+    except OSError as exc:
+        logger.warning("could not write %s (non-fatal): %s", name, exc)
+
+
+def _temporal_show(workflow_id: str) -> Any:
+    """Export one workflow's full history as JSON, or None.
+
+    The compose stack publishes Temporal's gRPC frontend on the host, so the
+    host CLI reaches it without going through the container. A slot without the
+    CLI installed logs once and records nothing, which is the same best-effort
+    contract as the rest of this file.
+    """
+    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
+    try:
+        proc = subprocess.run(
+            [
+                "temporal",
+                "workflow",
+                "show",
+                "--address",
+                address,
+                "--workflow-id",
+                workflow_id,
+                "--output",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info("temporal history for %s not exported: %s", workflow_id, exc)
+
+        return None
+
+    if proc.returncode != 0:
+        # A workflow that has already aged out of retention is the expected
+        # miss here, not a harness fault, so this is info rather than warning.
+        logger.info(
+            "temporal history for %s not exported (exit %d): %s",
+            workflow_id,
+            proc.returncode,
+            proc.stderr.strip()[:200],
+        )
+
+        return None
+
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        logger.warning("temporal history for %s did not decode (non-fatal): %s", workflow_id, exc)
+
+        return None
+
+
+def _parent_workflow_id(history: Any) -> str:
+    """The parent execution id recorded on a child workflow's start event.
+
+    Read from the history rather than rebuilt from the thread id, because the
+    chat turn's id format is brain-go's business and a copy here would drift
+    the first time it changes. An orphan or an unexpected shape yields "".
+    """
+    try:
+        events = history.get("events") or []
+        for event in events:
+            attrs = event.get("workflowExecutionStartedEventAttributes")
+            if attrs:
+                return (attrs.get("parentWorkflowExecution") or {}).get("workflowId", "") or ""
+    except AttributeError:
+        return ""
+
+    return ""
+
+
+def write_temporal_histories(investigation_uuid: str) -> None:
+    """Archive the RCI child's history and its parent chat turn's.
+
+    These two histories are the only record of what the investigation actually
+    asked its model. Every completion the run made is in them as an activity
+    input and result, in plain JSON, so an evaluation can be re-scored offline
+    against a recorded run instead of re-running the benchmark. Without this
+    the histories expire with the namespace's retention and the run is
+    unrepeatable.
+
+    The child's id is brain-go's own: rci- plus the investigation uuid. The
+    parent's is read off the child's start event.
+    """
+    if not investigation_uuid:
+        return
+
+    child_id = f"rci-{investigation_uuid}"
+    child = _temporal_show(child_id)
+    write_artifact("rci_history.json", child)
+
+    parent_id = _parent_workflow_id(child)
+    if not parent_id:
+        logger.info("no parent execution on %s; turn history not exported", child_id)
+
+        return
+
+    write_artifact("turn_history.json", _temporal_show(parent_id))
+
+
 DIAGNOSIS_PROMPT = """You are investigating a Kubernetes application failure.
 
 Application: {app_name}
@@ -836,6 +977,11 @@ def main() -> int:
 
     finally:
         write_tool_calls(tool_calls, tool_calls_by_node)
+        # Same finally as the tool counts, and for the same reason: the attempts
+        # worth reading afterwards include the ones that failed. An investigation
+        # that was never opened has no history to export, which write_temporal_histories
+        # treats as nothing to do.
+        write_temporal_histories(opened[1] if opened else "")
 
 
 if __name__ == "__main__":
