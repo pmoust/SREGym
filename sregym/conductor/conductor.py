@@ -95,6 +95,12 @@ class Conductor:
         # tie the incident window to a value that moves for a different reason.
         self.fault_injected_at: float | None = None
 
+        # Ground truth for the injected fault, captured in memory at injection
+        # time and written to disk only after the agent process is gone. The
+        # spec names the faulty component, so it must never be reachable from
+        # the agent's own working directory while the agent is running.
+        self.fault_spec: dict | None = None
+
     @property
     def current_problem(self):
         """Return the current problem, raising if none is loaded."""
@@ -179,6 +185,10 @@ class Conductor:
         self.waiting_for_agent = False
         self._evaluating = False
         self.fault_injected = False
+        # Reset with the flag, so an attempt that never injects cannot inherit
+        # the previous attempt's timestamp or spec.
+        self.fault_injected_at = None
+        self.fault_spec = None
 
         if not self.tasklist:
             self.logger.warning("Empty tasklist; no stages configured for this problem.")
@@ -244,6 +254,13 @@ class Conductor:
 
         problem.inject_fault()
         self.fault_injected_at = time.time()
+        self.fault_spec = {
+            "problem_id": self.problem_id,
+            "problem_class": type(problem).__name__,
+            "namespace": getattr(problem, "namespace", None),
+            "root_cause": getattr(problem, "root_cause", None),
+            "fault_injected_at": self.fault_injected_at,
+        }
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
 

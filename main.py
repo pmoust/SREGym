@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
@@ -167,6 +167,83 @@ def _configure_model_environment(args) -> tuple[str, str]:
 
 
 _TOKEN_DELTA = Path(os.path.dirname(os.path.abspath(__file__))) / "scripts" / "benchmark" / "token_delta.py"
+
+
+def _parse_structured_root_cause(root_cause: str | None) -> tuple[str, str, str]:
+    """Split Problem.build_structured_root_cause output into its parts.
+
+    The format is ``[fault_spec] component=<c>; namespace=<n> || <description>``.
+    Returns empty strings for anything the text does not carry, so a problem
+    that wrote a free-form root cause still yields a usable description.
+    """
+    if not root_cause:
+        return "", "", ""
+
+    text = root_cause.strip()
+    description = text
+    meta = ""
+    if text.startswith("[fault_spec]"):
+        body = text[len("[fault_spec]") :].strip()
+        meta, _, description = body.partition("||")
+        meta, description = meta.strip(), description.strip()
+
+    fields = {}
+    for part in meta.split(";"):
+        key, _, value = part.partition("=")
+        if value:
+            fields[key.strip()] = value.strip()
+
+    return fields.get("component", ""), fields.get("namespace", ""), description
+
+
+def _write_fault_spec(run_dir: Path, conductor, problem_id: str, attempt: int) -> None:
+    """Record the injected fault's ground truth beside the attempt's artifacts.
+
+    The field names are the ones the offline scorer unmarshals, so collecting a
+    run's manifests is a concatenation of these files rather than a translation.
+    The description and raw root cause ride along for debugging; the scorer
+    ignores keys it does not know.
+
+    Call this on the published directory, after finalize_and_publish returns.
+    Two reasons it goes last rather than into the staging directory. The agent
+    gets the staging directory as AGENT_LOGS_DIR, and this file names the faulty
+    component, so it must not exist while the agent can read it. Finalization
+    also rejects any staged artifact carrying the real problem id, which this
+    file does carry; the published tree is where that id is the canonical one.
+
+    The file is written for every published attempt, including one where nothing
+    was injected. A missing file then means the attempt never published, and an
+    empty component means the problem carried no parseable label; those are
+    different bugs and the scorer reports them separately.
+    """
+    captured = getattr(conductor, "fault_spec", None) or {}
+    root_cause = captured.get("root_cause")
+    component, namespace, description = _parse_structured_root_cause(root_cause)
+
+    injected_at = captured.get("fault_injected_at")
+    if injected_at is not None:
+        injected_at = datetime.fromtimestamp(injected_at, UTC).isoformat().replace("+00:00", "Z")
+
+    spec = {
+        "problem": captured.get("problem_id") or problem_id,
+        "component": component,
+        # The structured root cause is authoritative. The problem's own
+        # namespace is the fallback, because a problem that names no namespace
+        # leaves the scorer matching on the component alone.
+        "namespace": namespace or (captured.get("namespace") or ""),
+        "mechanism": captured.get("problem_id") or problem_id,
+        "injected_at": injected_at,
+        "attempt": attempt,
+        "problem_class": captured.get("problem_class"),
+        "description": description,
+        "root_cause": root_cause,
+    }
+
+    path = run_dir / "fault-spec.json"
+    try:
+        path.write_text(json.dumps(spec, indent=2, sort_keys=True, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", path, exc)
 
 
 def _token_snapshot(out: Path) -> None:
@@ -739,6 +816,9 @@ def driver_loop(
                         exc,
                     )
                     published_run_dir = None
+
+                if published_run_dir is not None:
+                    _write_fault_spec(published_run_dir, conductor, pid, attempt)
 
                 all_results_for_agent.append(snapshot)
                 fieldnames = sorted({key for row in all_results_for_agent for key in row})
