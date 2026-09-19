@@ -1,0 +1,48 @@
+name: Unit Tests
+
+# The harness and driver suites need no cluster and no credentials, so they run
+# on every change rather than only when someone remembers to run pytest.
+# Several of them pin invariants that are otherwise unenforced: that every
+# registered problem builds a structured root cause, and that the agent's
+# transcripts stay outside the directory finalization scans.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/workflows/claude.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/workflows/claude.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      # No kubeconfig on this runner. The suites are written to work without
+      # one, and a failure here means a test reached for a cluster it should
+      # not need.
+      - name: Run the harness and driver suites
+        run: uv run pytest tests/brain_go tests/conductor -v

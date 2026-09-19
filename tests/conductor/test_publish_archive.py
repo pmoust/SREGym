@@ -37,26 +37,36 @@ def test_a_missing_archive_directory_is_not_an_error(tmp_path):
 def test_the_timed_out_attempt_reaps_with_the_named_grace():
     """A structural check, because the timeout path needs a whole attempt to run.
 
-    The 60s window the driver's export was sized against only exists on the
-    normal path. Dropping the timeout kwarg here silently puts the timed-out
-    attempt back on cleanup_agent's 5s default, which is the attempt most worth
-    archiving.
+    It binds to the timeout branch rather than counting calls file-wide. The
+    earlier version counted every graced cleanup_agent in the module, so moving
+    the kwarg onto the normal path satisfied it while the timed-out attempt went
+    back to cleanup_agent's 5s default, and that path is the one whose driver
+    needs up to 50s to export two histories.
     """
     tree = ast.parse(inspect.getsource(main))
 
-    graced = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "cleanup_agent"
-        and any(
-            kw.arg == "timeout" and isinstance(kw.value, ast.Name) and kw.value.id == "AGENT_REAP_GRACE_SECONDS"
-            for kw in node.keywords
-        )
+    def graced_calls(node):
+        return [
+            call
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "cleanup_agent"
+            and any(
+                kw.arg == "timeout" and isinstance(kw.value, ast.Name) and kw.value.id == "AGENT_REAP_GRACE_SECONDS"
+                for kw in call.keywords
+            )
+        ]
+
+    # The branch is the one guarding on the agent having outlived its timeout.
+    timeout_branches = [
+        node for node in ast.walk(tree) if isinstance(node, ast.If) and "agent_timeout" in ast.dump(node.test)
     ]
 
-    assert len(graced) == 1, "the timeout path must reap with AGENT_REAP_GRACE_SECONDS, not cleanup_agent's default"
+    assert len(timeout_branches) == 1, "expected exactly one agent-timeout branch"
+    assert len(graced_calls(timeout_branches[0])) == 1, (
+        "the timeout path must reap with AGENT_REAP_GRACE_SECONDS, not cleanup_agent's default"
+    )
 
 
 def test_the_agent_environment_exports_the_archive_directory(tmp_path):
