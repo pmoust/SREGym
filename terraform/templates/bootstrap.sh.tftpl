@@ -263,6 +263,23 @@ curl -fsSL https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin s
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
 unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --update
 
+# The Temporal CLI. clients/brain_go/driver.py exports each attempt's chat
+# workflow history with `temporal workflow show` after the attempt is scored,
+# and swallows a missing binary at info level, so without this line every
+# export fails silently and no run archives a history. About 7 MB per
+# attempt, written after scoring, so it moves no TTL or TTM. brain-go's
+# compose publishes the frontend on 127.0.0.1:7233, which is the CLI's
+# default address. A failed download is logged rather than fatal: the run is
+# still worth having without histories, and the bootstrap log says why they
+# are absent.
+if curl -fsSL "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64" -o /tmp/temporal-cli.tar.gz \
+   && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \
+   && chmod +x /usr/local/bin/temporal; then
+  echo "[bootstrap] temporal cli: $(/usr/local/bin/temporal --version 2>&1 | head -1)"
+else
+  echo "[bootstrap] temporal cli install failed; workflow history export will be a no-op this run"
+fi
+
 # --- the harness ------------------------------------------------------------
 GH_TOKEN=$(aws ssm get-parameter --region "$REGION" --name "${github_token_ssm_path}" --with-decryption --query 'Parameter.Value' --output text)
 if [ -z "$GH_TOKEN" ] || [ "$GH_TOKEN" = "None" ]; then
