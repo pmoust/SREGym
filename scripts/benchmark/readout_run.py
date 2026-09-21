@@ -96,7 +96,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import score_run  # noqa: E402
 
-NEEDLE_INCONCLUSIVE = "Investigation inconclusive: none of the evaluated hypotheses could be confirmed"
+# The prefix, not the sentence. brain-go changed the sentence on 2026-09-18
+# ("no hypothesis was confirmed" replaced "none of the evaluated hypotheses
+# could be confirmed") and a full-sentence needle read 0 of 63 on a run that
+# had 21. The prefix is the stable part: it is the lead every inconclusive
+# report opens with, on both the old and the new text.
+NEEDLE_INCONCLUSIVE = "Investigation inconclusive"
+# brain-go's baseline_noise lead (2026-09-18): the report says the alert
+# fired on pre-existing traffic, not a regression. On the benchmark every
+# problem has an injected fault, so this lead is always a wrong answer there;
+# counting it says how often the new verdict ends a real-fault attempt.
+NEEDLE_BASELINE_NOISE = "Alert threshold reached by pre-existing baseline traffic"
 NEEDLE_OBSERVED_SIGNALS = "## Observed signals"
 
 _SHARD_RE = re.compile(r"(shard-\d+)")
@@ -259,6 +269,7 @@ def inconclusive(rows: list[dict]) -> dict:
     """
     subset = [r for r in rows if NEEDLE_INCONCLUSIVE in score_run._val(r, "Diagnosis.submission")]
     observed = [r for r in subset if NEEDLE_OBSERVED_SIGNALS in score_run._val(r, "Diagnosis.submission")]
+    baseline_noise = [r for r in rows if NEEDLE_BASELINE_NOISE in score_run._val(r, "Diagnosis.submission")]
 
     scores = []
     for row in subset:
@@ -270,21 +281,49 @@ def inconclusive(rows: list[dict]) -> dict:
         "attempts": len(rows),
         "inconclusive": len(subset),
         "observed_signals": len(observed),
+        "baseline_noise": len(baseline_noise),
         "judge_scored": len(scores),
         "composite_mean": round(sum(scores) / len(scores), 4) if scores else None,
     }
 
 
+def _bare(totals: dict[str, float]) -> int | None:
+    """The unlabelled series of a counter, or None when the counter is absent
+    from every file. .get rather than indexing, so a counter that gains a
+    label reads as a missing bare series instead of a KeyError."""
+    return int(totals.get("", 0.0)) if totals else None
+
+
+def _by_label(totals: dict[str, float], key: str) -> dict[str, int] | None:
+    if not totals:
+        return None
+
+    return {
+        (_label_value(labels, key) or labels or f"(no {key} label)"): int(value)
+        for labels, value in sorted(totals.items())
+    }
+
+
 def new_rci_counters(run_dir: Path) -> dict:
-    """Item 4: rci_signal_agent_dispatched_total by signal, and
-    rci_symptom_improved_downgrade_total.
+    """Items 3 and 4: the replan counters, the exclusion counter, the
+    exhausted-turn counter, dispatch by signal, and the symptom-improved
+    downgrade.
 
     A metric absent from every file in run_dir returns None for that entry,
     not 0: this run's brain-go build may predate the counter, which is a
     different fact from the counter firing zero times.
+
+    All of these are process-wide counters on one box's brain-go, so they
+    span the diagnosis and mitigation stages of every attempt on that box.
+    Nothing here splits them per stage or per attempt; a rate over attempts
+    is not derivable from them.
     """
     dispatched = grouped_totals(run_dir, "rci_signal_agent_dispatched_total")
     downgrade = grouped_totals(run_dir, "rci_symptom_improved_downgrade_total")
+    replan_round = grouped_totals(run_dir, "rci_replan_round_total")
+    replan_declined = grouped_totals(run_dir, "rci_replan_declined_total")
+    unexplaining = grouped_totals(run_dir, "rci_hypotheses_unexplaining_total")
+    exhausted = grouped_totals(run_dir, "rci_signal_turn_budget_exhausted_total")
 
     by_signal = None
     if dispatched:
@@ -295,16 +334,18 @@ def new_rci_counters(run_dir: Path) -> dict:
 
     return {
         "signal_agent_dispatched": by_signal,
-        # .get, matching contamination()'s reading of the breaker counter:
-        # the series is unlabelled today, and a labelled one should read as a
-        # missing bare series rather than take the script down.
-        "symptom_improved_downgrade": int(downgrade.get("", 0.0)) if downgrade else None,
+        "symptom_improved_downgrade": _bare(downgrade),
+        "replan_round": _bare(replan_round),
+        "replan_declined": _by_label(replan_declined, "reason"),
+        "hypotheses_unexplaining": _bare(unexplaining),
+        "turn_budget_exhausted": _by_label(exhausted, "signal"),
     }
 
 
 def replan_note() -> str:
-    """Item 3's answer: there is no counter, so this script prints why
-    rather than a derived number. See this file's own docstring.
+    """Item 3's answer for an archive whose brain-go predates the replan
+    counters (added 2026-09-18): there is nothing to read, so this prints
+    why rather than a derived number. See this file's own docstring.
     """
     return (
         "not computed: internal/chat/rci/metrics.go has no replan counter, and "
@@ -326,8 +367,24 @@ def render(name: str, readout: dict) -> str:
     lines.append(f"  Observed signals:  {inc['observed_signals']} of {inc['inconclusive']} inconclusive")
 
     lines.append("")
-    lines.append("3. Replan rate")
-    lines.append(f"  {replan_note()}")
+    lines.append("3. Replan round (process-wide counts, both stages, not a per-attempt rate)")
+    if rci["replan_round"] is None:
+        lines.append(f"  {replan_note()}")
+    else:
+        lines.append(f"  rci_replan_round_total:              {rci['replan_round']}")
+        if rci["replan_declined"] is None:
+            lines.append("  rci_replan_declined_total:           not present in this archive")
+        else:
+            lines.append("  rci_replan_declined_total, by reason:")
+            for reason, count in rci["replan_declined"].items():
+                lines.append(f"    {reason:<16} {count}")
+        if rci["hypotheses_unexplaining"] is None:
+            lines.append("  rci_hypotheses_unexplaining_total:   not present in this archive")
+        else:
+            lines.append(f"  rci_hypotheses_unexplaining_total:   {rci['hypotheses_unexplaining']}")
+    lines.append(
+        f"  baseline_noise lead in submissions:  {inc['baseline_noise']} of {inc['attempts']} (always wrong on an injected fault)"
+    )
 
     lines.append("")
     lines.append("4. New RCI counters")
@@ -341,6 +398,12 @@ def render(name: str, readout: dict) -> str:
         lines.append("  rci_symptom_improved_downgrade_total: not present in this archive")
     else:
         lines.append(f"  rci_symptom_improved_downgrade_total: {rci['symptom_improved_downgrade']}")
+    if rci["turn_budget_exhausted"] is None:
+        lines.append("  rci_signal_turn_budget_exhausted_total: not present in this archive")
+    else:
+        lines.append("  rci_signal_turn_budget_exhausted_total, by signal:")
+        for signal, count in rci["turn_budget_exhausted"].items():
+            lines.append(f"    {signal:<10} {count}")
 
     lines.append("")
     lines.append("5. Contamination")

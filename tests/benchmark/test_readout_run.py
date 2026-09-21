@@ -27,7 +27,9 @@ _READOUT_SPEC.loader.exec_module(readout_run)
 
 _COLUMNS = ["problem_id", "attempt", "Diagnosis.submission", "Diagnosis.composite_score"]
 
-_INCONCLUSIVE = "Investigation inconclusive: none of the evaluated hypotheses could be confirmed. Nothing panned out."
+_INCONCLUSIVE = "Investigation inconclusive: none of the evaluated hypotheses could be confirmed. "
+_INCONCLUSIVE_NEW = "Investigation inconclusive: no hypothesis was confirmed. Highest-probability unconfirmed theory: x (confidence: 3%, unverified). "
+_BASELINE_NOISE = "Alert threshold reached by pre-existing baseline traffic, not by a regression. Explanation: steady 401s (confidence: 72%). "
 _OBSERVED = "\n\n## Observed signals\n\n- something noted but unexplained\n"
 
 
@@ -252,9 +254,7 @@ def test_a_labelled_downgrade_counter_reads_as_absent_not_a_crash(tmp_path):
     logs_root = results.parent.parent / "sregym-run-logs" / results.name
     shard = logs_root / "shard-0"
     shard.mkdir(parents=True)
-    (shard / "sregym-tokens.prom").write_text(
-        'rci_symptom_improved_downgrade_total{reason="x"} 3\n'
-    )
+    (shard / "sregym-tokens.prom").write_text('rci_symptom_improved_downgrade_total{reason="x"} 3\n')
 
     out = readout_run.new_rci_counters(results)
 
@@ -310,3 +310,55 @@ def test_main_reproduces_the_documented_counts_end_to_end(tmp_path, capsys):
     assert out["inconclusive"]["inconclusive"] == 2
     assert out["inconclusive"]["attempts"] == 5
     assert out["contamination"]["breaker_trips"] == 1
+
+
+def test_both_inconclusive_sentences_count_and_the_lead_is_the_needle():
+    """brain-go changed the inconclusive sentence on 2026-09-18. A needle on the
+    old full sentence read 0 of 63 on a run that had 21. Both texts share the
+    lead, so the lead is what is matched; a report that mentions the word
+    elsewhere still does not count."""
+    rows = [
+        _row("a", submission=_INCONCLUSIVE, composite="0.0"),
+        _row("b", submission=_INCONCLUSIVE_NEW, composite="0.0"),
+        _row("c", submission="The evidence was inconclusive on one point but the root cause is X.", composite="1.0"),
+    ]
+    out = readout_run.inconclusive(rows)
+
+    assert out["inconclusive"] == 2
+
+
+def test_baseline_noise_lead_is_counted_over_all_attempts():
+    """The baseline_noise lead is not an inconclusive report and is counted
+    over every attempt, because on an injected fault it is always the wrong
+    answer and the question is how often the verdict ends a real-fault run."""
+    rows = [
+        _row("a", submission=_BASELINE_NOISE, composite="0.0"),
+        _row("b", submission=_INCONCLUSIVE_NEW, composite="0.0"),
+        _row("c", submission="Confirmed.", composite="1.0"),
+    ]
+    out = readout_run.inconclusive(rows)
+
+    assert out["baseline_noise"] == 1
+    assert out["inconclusive"] == 1
+
+
+def test_replan_counters_read_by_reason_and_absent_reads_as_none(tmp_path):
+    results = _archive(tmp_path, [_row("a")])
+    logs_root = results.parent.parent / "sregym-run-logs" / results.name
+    shard = logs_root / "shard-0"
+    shard.mkdir(parents=True)
+    (shard / "sregym-tokens.prom").write_text(
+        "rci_replan_round_total 42\n"
+        'rci_replan_declined_total{reason="budget"} 1\n'
+        'rci_replan_declined_total{reason="confirmed"} 81\n'
+        "rci_hypotheses_unexplaining_total 35\n"
+        'rci_signal_turn_budget_exhausted_total{signal="state"} 7\n'
+    )
+
+    out = readout_run.new_rci_counters(results)
+
+    assert out["replan_round"] == 42
+    assert out["replan_declined"] == {"budget": 1, "confirmed": 81}
+    assert out["hypotheses_unexplaining"] == 35
+    assert out["turn_budget_exhausted"] == {"state": 7}
+    assert out["signal_agent_dispatched"] is None
