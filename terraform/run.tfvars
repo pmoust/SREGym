@@ -267,93 +267,82 @@ disk_iops = 16000
 # raised above. FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI turn
 # straight to RCI, so the agent branch #2815 touches is never taken here.
 #
-# Paired with run-20260917-ctl3 (deda20910, 14/63), the last run on a clean
-# main at this shape. 35 commits separate them. The RCI ones are what the run
-# is for, not drift to be discounted, and there are more of them than when
-# this note was first written because the replan round kept moving:
+# The re-anchor. run-20260918-1536 (brain-go bcb45e742, 16/63) is the last
+# measurement of a shape that no longer exists on main. Between that pin and
+# ae48c4fc4, 75 commits landed and the RCI ones change what every attempt
+# does, all of them live on this account's chat turns:
 #
-#   - The observations channel, a signal agent reporting what its hypothesis
-#     does not explain, and one replan round over those observations
-#     (brain-go #3261). Before this an investigation drew hypotheses once.
-#   - key_observations on the report, a cached diagnosis system block, and an
-#     inconclusive run now making a diagnosis call and rendering an Observed
-#     signals block (#3269). ctl3 rendered nothing on an inconclusive attempt
-#     but the executive summary written around the top unverified theory.
-#   - The hypothesis diversity clause gated on a bound change signal, plus
-#     rci_signal_agent_dispatched_total and rci_symptom_improved_downgrade_total
-#     (#3289). ctl3 and run-20260917-base carried the ungated clause, which
-#     cost $122.82 -> $147.65 and moved metrics dispatch from 18 to 41
-#     attempts (Fisher p=0.0001). This account seeds no change connection, so
-#     the clause does not render here.
-#   - The replan round sized to min(1, distinct observations) (ed0b84209),
-#     then reshaped four more times on 09-18: a replan hypothesis must name
-#     the banked observation it explains by exact ref or it is not dispatched
-#     (8e49b1260, structural, behind a Temporal version gate that is on for
-#     every new run); a replan may answer with no hypothesis and the run then
-#     concludes to diagnosis (2fe64ec17); tested theories render with the
-#     evidence that refuted them, because prose alone let the planner
-#     re-propose all three rejected theories verbatim (f2495c789); a
-#     model-written observation ref is validated before it reaches state
-#     (9feaf970b). Together these mean a replan round can dispatch zero
-#     workers, which ctl3's replan-less run could not do either way.
-#   - rci_replan_round_total, rci_replan_declined_total{reason} and
-#     rci_hypotheses_unexplaining_total (bcb45e742, 8e49b1260), so the round
-#     is observable at all.
+#   - Default hypotheses 3 to 2 (c429c867a), so two workers fan out instead
+#     of three and a replan can add one, for a ceiling of three, not four.
+#   - Signal worker turn budget 10 to 6 per signal, 9 for changes
+#     (7edcf6e52), with a stop-early instruction in every persona
+#     (06201cb22) and a counter for a worker that hit its last turn still
+#     asking (ef2337732). The budget counts completion turns, not tool
+#     calls.
+#   - The planner and evaluator now see an incident symptom derived from the
+#     newest user message (a890fb8f4), which is the driver's problem text
+#     here, so the symptom_effect question is live and
+#     symptomCannotConfirmImprovement can demote for the first time.
+#   - A fourth evaluator verdict, baseline_noise (2583757ac), that leads the
+#     report with "Alert threshold reached by pre-existing baseline traffic".
+#     Every problem here has an injected fault, so that lead is always wrong
+#     on this benchmark; the readout counts how often it appears.
+#   - The inconclusive sentence names the top unrejected theory and is
+#     dropped only when every hypothesis was rejected (687e1347b); root-cause
+#     fields may cite only confirmed evidence (5c18eb521); the memory writer
+#     refuses a learning from a sub-0.60 confirmation (50e6da148), which is
+#     the between-attempt contamination channel on one account.
+#   - The replan and dispatch counters from the previous pin, plus the
+#     turn-budget-exhausted counter and a mandated-metrics coverage counter.
 #
-# Two RCI commits in the gap render nothing on this account. e41f3cc76 binds
-# logs tools into the planner, which changes nothing here because the planner
-# already holds every observation tool (brain-go #2861: custom MCP tools carry
-# a bucket and no signal). 3cbce3708 adds an alert-reproduction addendum gated
-# on Source == "alert", and the driver's turns are "chat".
+# Not live here, recorded so nobody expects them: the alert-query grounding
+# series (a81633e89, 44a23a008, 9396961fb, 80fbc3c1d) and prior-run
+# observations (930465014) key on an alert payload or rule, and the driver
+# sends chat turns; the Loki and Prometheus tool redirects are native tools,
+# and this account's telemetry is CUSTOM_MCP; the VCS changes have no
+# connection to bind. The 13 commits after dece9f85a touch no RCI path.
 #
-# What this run answers, none of which a previous run could:
+# What this run answers:
 #
-#   1. How many attempts end inconclusive, and how many of those carry an
-#      Observed signals block. That block is the whole mechanism of #3269 and
-#      no archive has ever held one.
-#   2. The judge mean composite on the inconclusive subset against ctl3's
-#      0.1318 over 22.
-#   3. Replan rounds granted, declines by reason, hypotheses excluded for
-#      naming no observation, and how many rounds answered empty. These are
-#      run-wide process counters, not a per-attempt rate: they say how often
-#      the round fired across the run, not what fraction of attempts took it.
-#      A per-attempt figure needs a per-attempt record that does not exist.
-#   4. rci_signal_agent_dispatched_total by signal, read directly instead of
-#      inferred from per-node token totals across two finished archives.
+#   1. Tokens per attempt and TTD against 1.20M and 232 s. Two workers and
+#      six turns should both push down; this sets the per-node targets.
+#   2. rci_signal_turn_budget_exhausted_total by signal. If state hits its
+#      six turns often, the cut starved the one worker that reads declared
+#      configuration.
+#   3. How many attempts end on the baseline_noise lead. Nonzero is a new
+#      way to be wrong that the previous pin did not have.
+#   4. Inconclusive count and Observed-signals presence against 21 and 20;
+#      dispatch by signal against logs 89 / state 82 / metrics 25 / traces 4;
+#      breaker trips and port-forward restarts against 4 and 20.
 #
-# Do not read the headline rate as a result. At 63 attempts per arm the
-# interval covers zero for anything under about 23pp, and the four counts
-# above are the measurement.
+# Do not read the headline rate as a result. At 63 attempts the interval
+# covers zero for anything under about 23pp. The nine-run band is 14 to 22.
 #
-# One confound this pairing carries and the contamination column exposes but
-# does not remove: sregym_ref below includes #106, which stops a slow kubectl
-# call from starving the MCP server's health probe. ctl3 ran without it and
-# carried 6 breaker trips and 32 port-forward restarts, each trip a 120 second
-# blackout on one connection during which the RCI state agent held no tools.
-# This run should carry close to zero. So a headline move against ctl3 is
-# partly the harness getting out of the way, not only brain-go reasoning
-# differently. If the headline moves enough that the split matters, the
-# control is deda20910 on this sregym_ref, one more run, not a guess.
+# This run is not paired with any earlier one on brain-go. It is the new
+# anchor: the regression rule (a drop of more than 10 of 63, or any of the
+# counts above outside the band of the last three clean runs) applies from
+# here.
 #
-# One risk carried over and still not exercised: entity-resolution confidence
-# tiers at >=0.75 and >=0.50 with two clarification halts. A score between
-# 0.20 and 0.60 that once proceeded to RCI now ends the turn with a question,
-# which kills an attempt before it investigates. Smoke one problem and confirm
-# the attempt carries a real investigation before letting the run stand.
-brain_go_ref = "bcb45e7425286dafc9402e418c7d0c316993229a"
+# One risk carried over and never exercised: entity-resolution confidence
+# tiers at >=0.75 and >=0.50 with two clarification halts. Smoke one problem
+# and confirm the attempt carries a real investigation before letting the
+# run stand.
+brain_go_ref = "ae48c4fc43887dbad30a694fd75699415e9e4697"
 
 # Pinned for the same reason brain_go_ref is. sregym_ref defaults to "main"
 # and resolves at each instance's boot, so the four hosts in a run can check
 # out different commits if something merges while they are booting, and a
 # rerun weeks later is not the same run.
 #
-# fbc5e535 is main after #105, #106 and #107. #106 is the one that changes
-# what a run measures: every MCP tool handler now runs its blocking work off
-# the event loop, so a slow kubectl no longer starves /healthz and the
-# supervisor no longer restarts a healthy forward (sregym#95). #107 adds
-# scripts/benchmark/readout_run.py and makes archive_run.sh pull
-# mcp_pf_restarts.jsonl. #105 is this scenario. Scoring-side changes from the
-# previous pin still apply: #102 leaves an unparseable judge reply unscored
-# rather than zero, which changes the denominator against pre-#102 runs, and
-# #99 classifies failures on structure.
-sregym_ref = "fbc5e5357e318b945f7e897d237940fe11b2bb39"
+# 6cbb3db8 is main after sregym#104 and sregym#110. #104 archives each
+# attempt's Temporal history and writes fault-spec.json with the injected
+# component after publish; verified after the fact to move no scored
+# quantity (TTL, TTM, judge ground truth, censoring all unchanged; a
+# timed-out attempt now gets up to 60 s of exit grace to archive, and 0
+# attempts timed out in the last two runs). #110 installs the Temporal CLI
+# the export needs, which no bootstrap had, so this is the first run whose
+# archive can hold histories (about 7 MB per attempt, written after
+# scoring), and fixes the readout's inconclusive needle, which read 0 of 63
+# on the 09-18 run. fault-spec.json's schema targets a Go struct that exists
+# on brain-go's exp/jev-rci branch only; nothing on main reads it yet.
+sregym_ref = "6cbb3db8ae05547922bd0d6aeb54472531a7e005"
