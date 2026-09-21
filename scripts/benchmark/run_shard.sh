@@ -170,8 +170,15 @@ fi
 # answering endpoint, because the body is an endless stream and only
 # --max-time ends it. See the healthz() docstring in
 # mcp_server/sregym_mcp_server.py.
+#
+# 3 seconds is the budget for one probe. /healthz answers in milliseconds when
+# the server's event loop is free, so anything past a few seconds means the
+# loop is busy or the forward is gone, and the probe has to end well inside
+# PF_PROBE_INTERVAL_SECONDS (15) so a cycle cannot overrun the next one.
+MCP_PROBE_TIMEOUT_SECONDS=3
+
 mcp_probe_code() {
-  curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+  curl -s -o /dev/null -w '%{http_code}' --max-time "$MCP_PROBE_TIMEOUT_SECONDS" \
     "http://127.0.0.1:$MCP_SERVER_PORT/healthz" 2>/dev/null
 }
 
@@ -206,6 +213,51 @@ mcp_probe_code() {
 # uses -- and still requires a strict 200 there.
 mcp_probe_answered() {
   [ -n "$1" ] && [ "$1" != "000" ]
+}
+
+# Whether the forwarded local port still completes a TCP handshake.
+#
+# This asks one question and reads one answer: did connect() succeed? curl
+# exit 7 is "failed to connect", which on loopback means nothing is bound,
+# so `kubectl port-forward` is no longer listening. Every other exit means
+# the handshake completed and the forward is still carrying bytes: 0 when
+# the app replied, 28 when it accepted and then said nothing inside the
+# budget. 28 is the case this function exists for, and it must read as
+# alive, because a busy server and a dead forward look identical to the
+# /healthz probe and only differ here.
+#
+# The path is "/" rather than /healthz on purpose: the reply is discarded
+# either way, and routing is not what is being measured.
+#
+# 3 seconds, the same budget as MCP_PROBE_TIMEOUT_SECONDS, bounds both the
+# handshake and the wait after it. A loopback connect either completes or is
+# refused at once, so the budget only matters when the listen backlog is
+# full, which is itself a forward that is carrying traffic.
+PF_CONNECT_TIMEOUT_SECONDS=3
+
+pf_port_accepts() {
+  local rc
+  curl -s -o /dev/null \
+    --connect-timeout "$PF_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$PF_CONNECT_TIMEOUT_SECONDS" \
+    "http://127.0.0.1:$MCP_SERVER_PORT/" 2>/dev/null
+  rc=$?
+  [ "$rc" -ne 7 ]
+}
+
+# Whether the forward is worth keeping. Alive means both halves hold: the
+# `kubectl port-forward` process is still there, and the port it bound still
+# accepts a connection. Either half failing means the forward is dead and a
+# restart is the only thing that can fix it.
+#
+# An empty pid counts as dead. The pid file is written before the supervisor
+# starts and rewritten atomically on every restart, so an unreadable one
+# means the supervisor has lost track of what it is supervising.
+pf_forward_alive() {
+  local pid="$1"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  pf_port_accepts
 }
 
 # --- MCP image --------------------------------------------------------------
@@ -379,9 +431,22 @@ run_slot() {
     PF_PID_FILE="$slot_dir/mcp-pf.pid"
     echo "$PF_PID" >"$PF_PID_FILE"
 
-    # Every restart the supervisor below performs, and every periodic deep
-    # check (see PF_DEEP_CHECK_EVERY_N_CYCLES below), is appended here as one
-    # JSON line. The file lives under slot_dir, inside SLOTS_DIR, so the
+    # Every restart the supervisor below performs, every probe timeout it
+    # declines to restart on, and every periodic deep check (see
+    # PF_DEEP_CHECK_EVERY_N_CYCLES below), is appended here as one JSON
+    # line. Three event names, and only one of them is a restart:
+    # "restart" the forward was replaced, "probe_timeout_forward_alive"
+    # /healthz went unanswered for PF_MISSES_BEFORE_RESTART probes in a row
+    # while the forward was still up, so the server was the unresponsive part
+    # and nothing was killed, and "deep_check_failed" /kubectl/sse answered
+    # something other than 200. readout_run.py counts "restart" lines, so a
+    # non-restart event must never borrow that name.
+    #
+    # Fields are added, never renamed: a reader of an older run's file still
+    # finds every field it knew. consecutive_misses is the newest, and says
+    # how many probes in a row had missed when the line was written.
+    #
+    # The file lives under slot_dir, inside SLOTS_DIR, so the
     # periodic and final `aws s3 sync` calls already ship it beside that
     # slot's *_results.csv files with no separate wiring: a post-hoc pass can
     # join on problem_id to flag which attempts ran through an outage instead
@@ -429,6 +494,7 @@ run_slot() {
     record_pf_event() {
       local restarts_file="$1" current_file="$2" previous_file="$3"
       local event="$4" old_pid="$5" new_pid="$6" detail="$7" lag_seconds="$8"
+      local misses="${9:-0}"
       local problem previous
       problem="$(cat "$current_file" 2>/dev/null || true)"
       previous="$(cat "$previous_file" 2>/dev/null || true)"
@@ -441,9 +507,11 @@ run_slot() {
         --arg previous_problem_id "$previous" \
         --arg detail "$detail" \
         --argjson detection_lag_seconds "$lag_seconds" \
+        --argjson consecutive_misses "$misses" \
         '{ts: $ts, event: $event, old_pid: $old_pid, new_pid: $new_pid,
           problem_id: $problem_id, previous_problem_id: $previous_problem_id,
-          detection_lag_seconds: $detection_lag_seconds, detail: $detail}' \
+          detection_lag_seconds: $detection_lag_seconds,
+          consecutive_misses: $consecutive_misses, detail: $detail}' \
         >>"$restarts_file"
     }
 
@@ -463,11 +531,20 @@ run_slot() {
     # (sregym#95) is that exec_kubectl_cmd_safely is a sync def FastMCP calls
     # inline on a single-worker uvicorn, so a blocking kubectl call can stall
     # the whole event loop and starve /healthz exactly as it used to starve
-    # /kubectl/sse. What is left of that is visible in this file as restarts
-    # whose gap from the previous one is well under
-    # PF_PROBE_INTERVAL_SECONDS: this loop cannot distinguish "the pod is
-    # actually down" from "the pod is too busy to answer for a moment", and
-    # fixing that distinction is out of scope here.
+    # /kubectl/sse. A busy server and a dead forward look identical to
+    # /healthz, so this loop does not decide on /healthz alone. Two rules
+    # below separate them: PF_MISSES_BEFORE_RESTART, and a check that the
+    # forward itself is gone before anything is killed.
+    #
+    # run-20260921-1250-532577fe is why. All 43 restarts in that run were
+    # false positives. A `kubectl rollout status --timeout=60s` or
+    # `--timeout=120s` inside the MCP server blocked its single event loop,
+    # /healthz went unanswered for the length of the command, and this loop
+    # killed a healthy forward every 19 seconds for that whole stretch. Each
+    # kill severed brain-go's SSE session, so a 30s tool call that would have
+    # finished became three failed retries and a 120s circuit-breaker trip.
+    # Five of the run's eight trips came from these loops, and one slot lost
+    # the last two minutes of all three mitigations to them.
     #
     # /healthz does not cover the SSE mounts themselves, so a broken Mount or
     # a fastmcp/starlette regression isolated to create_sse_app would report
@@ -486,8 +563,20 @@ run_slot() {
     PF_PROBE_INTERVAL_SECONDS=15
     PF_DEEP_CHECK_EVERY_N_CYCLES=20
     PF_DEEP_CHECK_TIMEOUT_SECONDS=5
+
+    # How many probes in a row must miss before a restart is considered at
+    # all. 3 at PF_PROBE_INTERVAL_SECONDS=15 is 45 seconds of silence, which
+    # covers brain-go's 30s per-call timeout: a tool call that is going to
+    # fail on its own has already failed before the supervisor acts, so a
+    # restart can no longer be what breaks a call that would have completed.
+    # One miss is not evidence of anything. A single success resets the
+    # count, so the three have to be consecutive.
+    PF_MISSES_BEFORE_RESTART=3
     (
       pf_cycle=0
+      # Consecutive /healthz misses. Reset by any success and by a restart,
+      # never by a miss.
+      pf_consecutive_misses=0
       # The lag record_pf_event writes is measured against this, not against
       # PF_PROBE_INTERVAL_SECONDS. Updated only when the healthz probe below
       # succeeds, never on a failure and never after the deep check: the
@@ -511,12 +600,36 @@ run_slot() {
           # consecutive failure's pf_lag accumulates on top of the first
           # instead of resetting to one interval every cycle -- a crash loop
           # of N restarts must report growing lag, not N copies of ~15.
+          pf_consecutive_misses=$(( pf_consecutive_misses + 1 ))
+          if [ "$pf_consecutive_misses" -lt "$PF_MISSES_BEFORE_RESTART" ]; then
+            echo "[slot $slot] MCP probe missed ($pf_consecutive_misses of $PF_MISSES_BEFORE_RESTART), waiting"
+            continue
+          fi
+
           old_pid="$(cat "$PF_PID_FILE" 2>/dev/null || true)"
-          echo "[slot $slot] MCP port-forward stopped serving, restarting"
+          if pf_forward_alive "$old_pid"; then
+            # The process is running and the port still completes a
+            # handshake, so the forward is carrying traffic and killing it
+            # would sever whatever is on it. The server is the unresponsive
+            # part, and a local restart cannot fix a server. Recorded under
+            # its own event name so the archive still shows the outage, and
+            # so the "restart" count stays a count of restarts.
+            echo "[slot $slot] MCP probe silent for $pf_consecutive_misses cycles, forward alive, not restarting"
+            record_pf_event "$PF_RESTARTS_FILE" "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" \
+              "probe_timeout_forward_alive" "$old_pid" "$old_pid" "healthz $pf_code" \
+              "$pf_lag" "$pf_consecutive_misses"
+            continue
+          fi
+
+          echo "[slot $slot] MCP port-forward gone after $pf_consecutive_misses probes, restarting"
           kill "$old_pid" 2>/dev/null || true
-          # Let the old process release the port before rebinding, or the new
-          # kubectl loses the race, exits, and the port stays dead a full cycle.
-          sleep 1
+          # No pause before rebinding. The old one-second wait existed so the
+          # dying kubectl could release the port first, and it cost a live
+          # tool call a "connection refused" every time it ran. It is no
+          # longer needed: the branch is only reached once pf_forward_alive
+          # has said the process is gone or the port refuses a connection, so
+          # there is no listener left to release and nothing for the new
+          # kubectl to race.
           nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
             -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
           new_pid="$!"
@@ -524,9 +637,13 @@ run_slot() {
           # new one, never a half-written file.
           echo "$new_pid" >"$PF_PID_FILE.tmp" && mv "$PF_PID_FILE.tmp" "$PF_PID_FILE"
           record_pf_event "$PF_RESTARTS_FILE" "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" \
-            "restart" "$old_pid" "$new_pid" "healthz $pf_code" "$pf_lag"
+            "restart" "$old_pid" "$new_pid" "healthz $pf_code" "$pf_lag" "$pf_consecutive_misses"
+          # The forward that was counted against is gone. Count the new one
+          # from zero, or the next single miss would restart immediately.
+          pf_consecutive_misses=0
           continue
         fi
+        pf_consecutive_misses=0
         pf_prev_checkpoint_epoch="$pf_checkpoint_epoch"
 
         if [ $(( pf_cycle % PF_DEEP_CHECK_EVERY_N_CYCLES )) -eq 0 ]; then
@@ -542,7 +659,8 @@ run_slot() {
             cur_pid="$(cat "$PF_PID_FILE" 2>/dev/null || true)"
             echo "[slot $slot] deep check: /kubectl/sse answered $deep_code, logging only"
             record_pf_event "$PF_RESTARTS_FILE" "$CURRENT_PROBLEM_FILE" "$PREVIOUS_PROBLEM_FILE" \
-              "deep_check_failed" "$cur_pid" "$cur_pid" "kubectl/sse $deep_code" "$deep_lag"
+              "deep_check_failed" "$cur_pid" "$cur_pid" "kubectl/sse $deep_code" "$deep_lag" \
+              "$pf_consecutive_misses"
           fi
         fi
       done

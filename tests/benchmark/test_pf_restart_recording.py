@@ -39,7 +39,9 @@ def _harness(tmp_path) -> Path:
     test FINDING 2's escaping fix without the test harness itself needing the
     same escaping the fix is supposed to provide."""
     script = tmp_path / "t.sh"
-    script.write_text(_record_pf_event_fn() + 'record_pf_event "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"\n')
+    script.write_text(
+        _record_pf_event_fn() + 'record_pf_event "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"\n'
+    )
     return script
 
 
@@ -53,6 +55,7 @@ def _run(
     new_pid="222",
     detail="healthz 000",
     lag_seconds="15",
+    consecutive_misses="3",
 ):
     restarts_file = tmp_path / "mcp_pf_restarts.jsonl"
     current_file = tmp_path / "current_problem"
@@ -74,6 +77,7 @@ def _run(
         new_pid,
         detail,
         lag_seconds,
+        consecutive_misses,
     ]
     proc = subprocess.run(argv, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -165,6 +169,7 @@ def test_events_append_rather_than_overwrite(tmp_path):
             new_pid,
             detail,
             "15",
+            "3",
         ]
         proc = subprocess.run(argv, capture_output=True, text=True)
         assert proc.returncode == 0, proc.stderr
@@ -300,19 +305,335 @@ def _supervisor_loop_body() -> str:
     its lag arithmetic separately and only proving the reimplementation
     agrees with itself.
 
-    Carries the two probe functions the loop calls, which live at file scope
-    in run_shard.sh rather than inside the loop. The real subshell inherits
-    them; a harness that pastes only the loop body does not, and the loop
-    would then read every cycle as a dead forward and restart on all of them.
-    They are extracted rather than stubbed so a caller's fake curl still
-    drives the real predicate."""
+    Carries the four probe functions the loop calls and the two timeout
+    constants they read, all of which live at file scope in run_shard.sh
+    rather than inside the loop. The real subshell inherits them; a harness
+    that pastes only the loop body does not, and the loop would then read
+    every cycle as a dead forward and restart on all of them. They are
+    extracted rather than stubbed so a caller's fake curl and fake kill still
+    drive the real predicates."""
     text = RUN_SHARD.read_text()
-    fns = []
-    for name in ("mcp_probe_code", "mcp_probe_answered"):
+    parts = []
+    for name in ("MCP_PROBE_TIMEOUT_SECONDS", "PF_CONNECT_TIMEOUT_SECONDS"):
+        found = [line for line in text.splitlines() if line.startswith(f"{name}=")]
+        assert len(found) == 1, f"{name} is not assigned exactly once at file scope: {found}"
+        parts.append(found[0] + "\n")
+    for name in ("mcp_probe_code", "mcp_probe_answered", "pf_port_accepts", "pf_forward_alive"):
         opener = f"{name}() {{"
-        fns.append(opener + text.split(opener, 1)[1].split("\n}\n", 1)[0] + "\n}\n")
+        parts.append(opener + text.split(opener, 1)[1].split("\n}\n", 1)[0] + "\n}\n")
     loop = "pf_cycle=0" + text.split("pf_cycle=0", 1)[1].split("\n    ) &", 1)[0]
-    return "\n".join(fns) + "\n" + loop
+    return "\n".join(parts) + "\n" + loop
+
+
+LOOP_CONSTANTS = (
+    "PF_PROBE_INTERVAL_SECONDS",
+    "PF_DEEP_CHECK_EVERY_N_CYCLES",
+    "PF_DEEP_CHECK_TIMEOUT_SECONDS",
+    "PF_MISSES_BEFORE_RESTART",
+)
+
+
+def _loop_constants() -> str:
+    """The supervisor's tuning constants, verbatim from run_shard.sh.
+
+    Extracted rather than restated, so a test that asserts a restart lands on
+    cycle 3 with a lag of 45 is asserting run_shard.sh's own 3 and 15. A
+    harness that hardcoded them would keep passing after someone changed the
+    production values, which is the one thing these tests are for.
+    """
+    lines = RUN_SHARD.read_text().splitlines()
+    out = []
+    for name in LOOP_CONSTANTS:
+        found = [line for line in lines if line.strip().startswith(f"{name}=")]
+        assert len(found) == 1, f"{name} is not assigned exactly once in run_shard.sh: {found}"
+        out.append(found[0].strip())
+    return "\n".join(out) + "\n"
+
+
+def _preamble(tmp_path, pid_file, clock_file, max_cycles) -> str:
+    """Everything the supervisor subshell inherits from run_slot, plus a fake
+    clock.
+
+    The clock lives in a file, not a shell variable: `pf_code=$(curl ...)` and
+    `pf_checkpoint_epoch=$(date +%s)` are command substitutions, which bash
+    always runs in a subshell, so an assignment a faked curl or date makes to
+    a plain variable is invisible once that subshell exits. A file write is a
+    real filesystem side effect and survives it.
+    """
+    clock_file.write_text("1000")
+    return (
+        _loop_constants()
+        + "MCP_SERVER_PORT=9999\n"
+        f'PF_PID_FILE="{pid_file}"\n'
+        f'PF_RESTARTS_FILE="{tmp_path}/restarts.jsonl"\n'
+        f'CURRENT_PROBLEM_FILE="{tmp_path}/current_problem"\n'
+        f'PREVIOUS_PROBLEM_FILE="{tmp_path}/previous_problem"\n'
+        "slot=test\n"
+        f"MAX_CYCLES={max_cycles}\n"
+        f'CLOCK_FILE="{clock_file}"\n'
+        'sleep() { echo $(( $(cat "$CLOCK_FILE") + $1 )) > "$CLOCK_FILE"; }\n'
+        'date() { cat "$CLOCK_FILE"; }\n'
+    )
+
+
+def _bounded_loop() -> str:
+    """The real supervisor loop, stopped after MAX_CYCLES instead of never."""
+    return _supervisor_loop_body().replace("while true; do", 'while [ "$pf_cycle" -lt "$MAX_CYCLES" ]; do')
+
+
+def _dead_forward_kill() -> str:
+    """A fake kill whose `kill -0` says the process is gone.
+
+    Only -0 is answered that way; the plain `kill "$old_pid"` in the restart
+    branch still succeeds, as it would against a real process that had just
+    exited and not yet been reaped.
+    """
+    return 'kill() { if [ "$1" = "-0" ]; then return 1; fi; return 0; }\n'
+
+
+def _live_forward_kill() -> str:
+    """A fake kill whose `kill -0` says the process is running."""
+    return "kill() { return 0; }\n"
+
+
+def _curl(healthz_code: str, connect_exit: int) -> str:
+    """A fake curl for both probes, told apart by the URL each one requests.
+
+    mcp_probe_code asks for /healthz and is read for its printed status code.
+    pf_port_accepts asks for / and is read for its exit status alone, where 7
+    is curl's "failed to connect" and anything else means the handshake
+    completed.
+    """
+    return (
+        "curl() {\n"
+        '  for a in "$@"; do\n'
+        '    case "$a" in\n'
+        f'      */healthz) echo -n "{healthz_code}"; return 0 ;;\n'
+        "    esac\n"
+        "  done\n"
+        f"  return {connect_exit}\n"
+        "}\n"
+    )
+
+
+def _run_loop(tmp_path, script_text: str) -> list[str]:
+    """Run one harness and return the captured event lines, in order."""
+    script = tmp_path / "t.sh"
+    script.write_text(script_text)
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    capture = tmp_path / "events.txt"
+    if not capture.exists():
+        return []
+    return capture.read_text().splitlines()
+
+
+def _event_capture(tmp_path) -> str:
+    """A record_pf_event stub that logs the cycle, the event name and the
+    miss count, which is everything the decision rule is judged on."""
+    return f'record_pf_event() {{ echo "$pf_cycle $4 ${{9:-0}}" >> "{tmp_path}/events.txt"; }}\n'
+
+
+def test_one_miss_does_not_restart(tmp_path):
+    """The false positive run-20260921-1250-532577fe was made of.
+
+    A single unanswered /healthz means the server did not reply inside
+    MCP_PROBE_TIMEOUT_SECONDS. That is what a busy event loop looks like, and
+    it is not evidence the forward is gone. Nothing may be killed and nothing
+    may be recorded on it.
+    """
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=1)
+        + _dead_forward_kill()
+        + _curl(healthz_code="000", connect_exit=7)
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == [], f"one miss must not act, got {events}"
+
+
+def test_two_misses_do_not_restart(tmp_path):
+    """The threshold is three, so the cycle right below it must still wait.
+    Two misses is 30s of silence, exactly brain-go's per-call timeout, where
+    a call that is going to fail has not yet finished failing."""
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=2)
+        + _dead_forward_kill()
+        + _curl(healthz_code="000", connect_exit=7)
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == [], f"two misses must not act, got {events}"
+
+
+def test_three_misses_with_a_dead_process_restart(tmp_path):
+    """The case the supervisor exists for. `kill -0` fails, so the `kubectl
+    port-forward` process is gone, nothing is carrying traffic, and only a
+    restart can bring the port back. The record says how many probes it took.
+    """
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=3)
+        + _dead_forward_kill()
+        + _curl(healthz_code="000", connect_exit=7)
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == ["3 restart 3"], f"expected one restart on cycle 3 at 3 misses, got {events}"
+
+
+def test_three_misses_with_a_refused_port_restart(tmp_path):
+    """The other half of the dead test: the process is still there but its
+    port refuses a connection, so the forward is not forwarding. A leftover
+    process is not a reason to keep a port that nothing can reach."""
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=3)
+        + _live_forward_kill()
+        + _curl(healthz_code="000", connect_exit=7)
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == ["3 restart 3"], f"expected one restart on cycle 3 at 3 misses, got {events}"
+
+
+def test_three_misses_with_a_live_forward_do_not_restart(tmp_path):
+    """The fix, stated as a test.
+
+    The process is running and the port completes a handshake, so the forward
+    is carrying brain-go's SSE session and the server is the part that is not
+    answering. Killing it would sever a live tool call to fix nothing, which
+    is what all 43 restarts in run-20260921-1250-532577fe did. The outage is
+    still recorded, under an event name that is not "restart" so
+    readout_run.py's restart count stays a count of restarts, and the pid file
+    is left untouched because no new forward was started.
+
+    One line per cycle past the threshold, not one per episode: the count is
+    not reset by this branch, so the records themselves show how long the
+    server stayed silent.
+    """
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=4)
+        + _live_forward_kill()
+        + _curl(healthz_code="000", connect_exit=0)
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == [
+        "3 probe_timeout_forward_alive 3",
+        "4 probe_timeout_forward_alive 4",
+    ], f"expected no restart and one alive record per cycle past the threshold, got {events}"
+    assert pid_file.read_text() == "999", "a forward that was never restarted must keep its pid"
+
+
+def test_a_success_between_misses_resets_the_counter(tmp_path):
+    """Consecutive means consecutive.
+
+    /healthz misses on cycles 1 and 2, answers on 3, then misses on 4, 5 and
+    6. The restart belongs on cycle 6. A counter that did not reset would
+    have reached three on cycle 4 and restarted a forward that had just
+    proved it was serving one cycle earlier.
+    """
+    pid_file = tmp_path / "mcp-pf.pid"
+    pid_file.write_text("999")
+
+    # Same shape as _curl, with the /healthz answer keyed on the cycle. The
+    # loop body's own pf_cycle is in scope by the time curl runs.
+    healthz_by_cycle = (
+        "curl() {\n"
+        '  for a in "$@"; do\n'
+        '    case "$a" in\n'
+        '      */healthz)\n'
+        '        if [ "$pf_cycle" = "3" ]; then echo -n "200"; else echo -n "000"; fi\n'
+        "        return 0 ;;\n"
+        "    esac\n"
+        "  done\n"
+        "  return 7\n"
+        "}\n"
+    )
+
+    events = _run_loop(
+        tmp_path,
+        _preamble(tmp_path, pid_file, tmp_path / "clock", max_cycles=6)
+        + _dead_forward_kill()
+        + healthz_by_cycle
+        + _event_capture(tmp_path)
+        + _bounded_loop()
+        + "\n",
+    )
+
+    assert events == ["6 restart 3"], (
+        "expected the restart on cycle 6, three misses after the cycle-3 success; "
+        f"a restart on cycle 4 would mean the success did not reset the count. Got {events}"
+    )
+
+
+def test_the_restart_branch_has_no_rebind_pause():
+    """The `sleep 1` between kill and rebind is gone, and must stay gone.
+
+    It was there so the dying kubectl could release the port first. The
+    branch is now only reached once pf_forward_alive has reported the process
+    gone or the port refusing, so there is no listener left to release, and
+    in run-20260921-1250-532577fe that pause handed a live tool call a
+    "connection refused" on every one of the 43 restarts.
+    """
+    text = RUN_SHARD.read_text()
+    branch = text.split('kill "$old_pid" 2>/dev/null || true', 1)[1].split("continue", 1)[0]
+    code = [line for line in branch.splitlines() if not line.lstrip().startswith("#")]
+
+    assert not [line for line in code if line.strip().startswith("sleep")], (
+        "no pause may sit between the kill and the rebind:\n" + "\n".join(code)
+    )
+
+
+def test_the_restart_is_gated_on_the_forward_being_dead():
+    """Static guard on the order of the two checks. The miss threshold comes
+    first, the liveness check second, and the restart only after both. An
+    edit that dropped either gate would still pass every dynamic test that
+    drives a dead forward, because a dead forward restarts under both the old
+    rule and the new one."""
+    loop = _supervisor_loop_body()
+
+    threshold_ix = loop.index('[ "$pf_consecutive_misses" -lt "$PF_MISSES_BEFORE_RESTART" ]')
+    alive_ix = loop.index('if pf_forward_alive "$old_pid"')
+    restart_ix = loop.index("nohup kubectl port-forward")
+    assert threshold_ix < alive_ix < restart_ix
+
+    # The alive branch records and continues; it must not reach the restart.
+    # Bounded on its own closing `fi` (10 spaces, its `if`'s own indentation)
+    # rather than on the restart, which sits after it in the same branch.
+    alive_branch = loop[alive_ix:].split("\n          fi\n", 1)[0]
+    assert "probe_timeout_forward_alive" in alive_branch
+    assert "kubectl port-forward" not in alive_branch
+    assert "kill " not in alive_branch
 
 
 def test_a_deep_check_failure_reports_its_own_short_lag(tmp_path):
@@ -328,40 +649,21 @@ def test_a_deep_check_failure_reports_its_own_short_lag(tmp_path):
     the cycle-20 gate fires) advances the clock by
     PF_DEEP_CHECK_TIMEOUT_SECONDS and reports a failing code.
     record_pf_event is stubbed to capture its own $8 (lag_seconds) argument.
-
-    The clock lives in a file, not a shell variable: `pf_code=$(curl ...)`
-    and `pf_checkpoint_epoch=$(date +%s)` are command substitutions, which
-    bash always runs in a subshell, so an assignment a faked curl or date
-    makes to a plain variable is invisible once that subshell exits. A file
-    write is a real filesystem side effect and survives it.
     """
-    loop_body = _supervisor_loop_body().replace("while true; do", 'while [ "$pf_cycle" -lt "$MAX_CYCLES" ]; do')
+    loop_body = _bounded_loop()
 
     pid_file = tmp_path / "mcp-pf.pid"
     pid_file.write_text("999")
     lag_capture = tmp_path / "lag.txt"
     clock_file = tmp_path / "clock"
-    clock_file.write_text("1000")
 
     script = tmp_path / "t.sh"
     script.write_text(
-        "PF_PROBE_INTERVAL_SECONDS=15\n"
-        "PF_DEEP_CHECK_EVERY_N_CYCLES=20\n"
-        "PF_DEEP_CHECK_TIMEOUT_SECONDS=5\n"
-        "MCP_SERVER_PORT=9999\n"
-        f'PF_PID_FILE="{pid_file}"\n'
-        f'PF_RESTARTS_FILE="{tmp_path}/restarts.jsonl"\n'
-        f'CURRENT_PROBLEM_FILE="{tmp_path}/current_problem"\n'
-        f'PREVIOUS_PROBLEM_FILE="{tmp_path}/previous_problem"\n'
-        "slot=test\n"
-        "MAX_CYCLES=20\n"
-        f'CLOCK_FILE="{clock_file}"\n'
-        'sleep() { echo $(( $(cat "$CLOCK_FILE") + $1 )) > "$CLOCK_FILE"; }\n'
-        'date() { cat "$CLOCK_FILE"; }\n'
+        _preamble(tmp_path, pid_file, clock_file, max_cycles=20)
         # healthz always answers 200 instantly; the deep check (identified by
         # its URL) is the one call this test is about, so it alone advances
         # the clock, and always fails.
-        "curl() {\n"
+        + "curl() {\n"
         '  for a in "$@"; do\n'
         '    case "$a" in\n'
         "      *kubectl/sse*)\n"
@@ -371,7 +673,9 @@ def test_a_deep_check_failure_reports_its_own_short_lag(tmp_path):
         "  done\n"
         '  echo -n "200"\n'
         "}\n"
-        f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n' + loop_body + "\n"
+        + f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n'
+        + loop_body
+        + "\n"
     )
     proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -381,137 +685,137 @@ def test_a_deep_check_failure_reports_its_own_short_lag(tmp_path):
 
 
 def test_a_restart_right_after_a_deep_check_cycle_reports_the_inflated_lag(tmp_path):
-    """The coordinator's fix request. The deep check on cycle 20 blocks for
-    close to PF_DEEP_CHECK_TIMEOUT_SECONDS against a live SSE stream whether
-    or not it fails (the same endless-body mechanism healthz() documents),
-    which delays how soon cycle 21's own sleep begins. So a restart detected
-    on cycle 21 -- right after that deep check, even though the deep check
-    itself reported healthy -- must report roughly
-    PF_PROBE_INTERVAL_SECONDS + PF_DEEP_CHECK_TIMEOUT_SECONDS (20), not
-    PF_PROBE_INTERVAL_SECONDS alone (15): the outage it reports could have
-    started any time in that whole window, not just the last 15s of it.
+    """The deep check on cycle 20 blocks for close to
+    PF_DEEP_CHECK_TIMEOUT_SECONDS against a live SSE stream whether or not it
+    fails (the same endless-body mechanism healthz() documents), which delays
+    how soon cycle 21's own sleep begins. A restart detected in the run of
+    misses that follows must carry that 5s as well as its own sleeps: the
+    outage it reports could have started any time in that whole window.
 
-    Drives the real loop body through 21 cycles: healthz answers 200 for
-    every cycle except the last, where it fails and triggers a restart; the
-    deep check on cycle 20 answers 200 (healthy) but still advances the fake
-    clock by PF_DEEP_CHECK_TIMEOUT_SECONDS, by the same mechanism as above.
+    Misses on cycles 21, 22 and 23 restart on 23, so the expected lag is
+    3 * PF_PROBE_INTERVAL_SECONDS + PF_DEEP_CHECK_TIMEOUT_SECONDS = 50, not
+    the 45 a reader ignoring the deep check would expect.
+
+    Drives the real loop body through 23 cycles: the deep check on cycle 20
+    answers 200 (healthy) but still advances the fake clock by
+    PF_DEEP_CHECK_TIMEOUT_SECONDS, healthz answers 200 through cycle 20 and
+    000 after it, and the forward is dead so the restart branch is reached.
     record_pf_event is stubbed to capture its own $8 (lag_seconds) argument.
-
-    The clock lives in a file, not a shell variable -- see the docstring on
-    test_a_deep_check_failure_reports_its_own_short_lag for why a plain
-    variable a faked curl or date assigns cannot survive being called
-    through `$(...)`, which always forks a subshell.
     """
-    loop_body = _supervisor_loop_body().replace("while true; do", 'while [ "$pf_cycle" -lt "$MAX_CYCLES" ]; do')
+    loop_body = _bounded_loop()
 
     pid_file = tmp_path / "mcp-pf.pid"
     pid_file.write_text("999")
     lag_capture = tmp_path / "lag.txt"
     clock_file = tmp_path / "clock"
-    clock_file.write_text("1000")
 
     script = tmp_path / "t.sh"
     script.write_text(
-        "PF_PROBE_INTERVAL_SECONDS=15\n"
-        "PF_DEEP_CHECK_EVERY_N_CYCLES=20\n"
-        "PF_DEEP_CHECK_TIMEOUT_SECONDS=5\n"
-        "MCP_SERVER_PORT=9999\n"
-        f'PF_PID_FILE="{pid_file}"\n'
-        f'PF_RESTARTS_FILE="{tmp_path}/restarts.jsonl"\n'
-        f'CURRENT_PROBLEM_FILE="{tmp_path}/current_problem"\n'
-        f'PREVIOUS_PROBLEM_FILE="{tmp_path}/previous_problem"\n'
-        "slot=test\n"
-        "MAX_CYCLES=21\n"
-        f'CLOCK_FILE="{clock_file}"\n'
-        'sleep() { echo $(( $(cat "$CLOCK_FILE") + $1 )) > "$CLOCK_FILE"; }\n'
-        'date() { cat "$CLOCK_FILE"; }\n'
+        _preamble(tmp_path, pid_file, clock_file, max_cycles=23)
+        + _dead_forward_kill()
         # kubectl/sse (the deep check, cycle 20 only) always advances the
-        # clock and reports healthy. healthz reports healthy through cycle
-        # 20 and fails on cycle 21 -- pf_cycle is a real variable in the loop
-        # body's own scope by the time curl runs, so this fake reads it
-        # directly rather than needing its own counter.
-        "curl() {\n"
+        # clock and reports healthy. healthz reports healthy through cycle 20
+        # and fails after it -- pf_cycle is a real variable in the loop body's
+        # own scope by the time curl runs, so this fake reads it directly
+        # rather than needing its own counter. The bare connect check falls
+        # through to exit 7, which is how the forward reads as gone.
+        + "curl() {\n"
         '  for a in "$@"; do\n'
         '    case "$a" in\n'
         "      *kubectl/sse*)\n"
         '        echo $(( $(cat "$CLOCK_FILE") + PF_DEEP_CHECK_TIMEOUT_SECONDS )) > "$CLOCK_FILE"\n'
-        '        echo -n "200"; return ;;\n'
+        '        echo -n "200"; return 0 ;;\n'
+        "      */healthz)\n"
+        '        if [ "$pf_cycle" -gt 20 ]; then echo -n "000"; else echo -n "200"; fi\n'
+        "        return 0 ;;\n"
         "    esac\n"
         "  done\n"
-        '  if [ "$pf_cycle" = "21" ]; then echo -n "000"; else echo -n "200"; fi\n'
+        "  return 7\n"
         "}\n"
-        f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n' + loop_body + "\n"
+        + f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n'
+        + loop_body
+        + "\n"
     )
     proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
 
     lags = lag_capture.read_text().split()
-    assert lags == ["20"], (
-        f"expected one restart event with lag 20 (15s sleep + the prior cycle's 5s deep check), got {lags}"
+    assert lags == ["50"], (
+        "expected one restart event with lag 50 (three 15s sleeps plus the cycle-20 deep check's 5s), "
+        f"got {lags}"
     )
 
 
 def test_a_crash_loop_reports_growing_lag_not_a_flat_interval(tmp_path):
-    """The bug a later delta review caught: pf_prev_checkpoint_epoch used to
-    advance unconditionally, including right after a failing healthz, so
-    every restart in a crash loop reported the same one-interval lag no
-    matter how long the forward had actually been down. That is exactly the
-    run-20260908-0739 pattern this field exists to characterize -- bursts of
-    up to 31 restarts in one slot -- so understating it there is the one
-    case this feature cannot afford to get wrong.
+    """pf_prev_checkpoint_epoch must not advance on a failing healthz, so
+    every restart in a crash loop reports how long the forward had actually
+    been unreachable rather than the same one-threshold lag each time. That
+    is exactly the run-20260908-0739 pattern this field exists to
+    characterize -- bursts of up to 31 restarts in one slot -- so
+    understating it there is the one case this feature cannot afford to get
+    wrong.
 
-    Drives the real loop through 3 cycles with healthz failing every time
-    (curl always reports 500) and record_pf_event stubbed to capture each
-    call's own $8 (lag_seconds) argument, in order. The checkpoint must stay
-    pinned at the pre-loop seed throughout, since a failing healthz must
-    never advance it (see the comment above pf_prev_checkpoint_epoch's
-    declaration), so lag grows across the three cycles rather than resetting
-    to ~15 every time. It grows by 16, not 15, after the first: the restart
-    branch's own `sleep 1` ("let the old process release the port before
-    rebinding") is real wall-clock time a crash loop pays on every failed
-    cycle, and this fake sleep() advances the same clock file that call
-    uses, so the correct expected sequence is 15, 31, 47 -- not the naive
-    15, 30, 45 a reader ignoring that pause would expect.
+    Drives the real loop through 9 cycles with healthz missing every time and
+    the forward dead, so a restart lands on cycles 3, 6 and 9. The checkpoint
+    stays pinned at the pre-loop seed throughout, giving 45, 90 and 135: three
+    sleeps per restart and nothing else, since the restart branch no longer
+    pauses before rebinding.
     """
-    loop_body = _supervisor_loop_body().replace("while true; do", 'while [ "$pf_cycle" -lt "$MAX_CYCLES" ]; do')
-
     pid_file = tmp_path / "mcp-pf.pid"
     pid_file.write_text("999")
     lag_capture = tmp_path / "lag.txt"
     clock_file = tmp_path / "clock"
-    clock_file.write_text("1000")
 
     script = tmp_path / "t.sh"
     script.write_text(
-        "PF_PROBE_INTERVAL_SECONDS=15\n"
-        "PF_DEEP_CHECK_EVERY_N_CYCLES=20\n"
-        "PF_DEEP_CHECK_TIMEOUT_SECONDS=5\n"
-        "MCP_SERVER_PORT=9999\n"
-        f'PF_PID_FILE="{pid_file}"\n'
-        f'PF_RESTARTS_FILE="{tmp_path}/restarts.jsonl"\n'
-        f'CURRENT_PROBLEM_FILE="{tmp_path}/current_problem"\n'
-        f'PREVIOUS_PROBLEM_FILE="{tmp_path}/previous_problem"\n'
-        "slot=test\n"
-        "MAX_CYCLES=3\n"
-        f'CLOCK_FILE="{clock_file}"\n'
-        'sleep() { echo $(( $(cat "$CLOCK_FILE") + $1 )) > "$CLOCK_FILE"; }\n'
-        'date() { cat "$CLOCK_FILE"; }\n'
-        # healthz fails on every cycle, so PF_DEEP_CHECK_EVERY_N_CYCLES's
-        # gate is never reached (each failing cycle continues before it) and
-        # this never needs to distinguish it from the deep check's own URL.
-        #
-        # 000, curl's code for no HTTP response at all, because that is what a
-        # dead forward actually produces: refused, nothing listening, or
-        # accepted and never answered. A status the app chose would mean the
-        # forward is carrying traffic and must not be restarted.
-        'curl() { echo -n "000"; }\n'
-        f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n' + loop_body + "\n"
+        _preamble(tmp_path, pid_file, clock_file, max_cycles=9)
+        + _dead_forward_kill()
+        # 000, curl's code for no HTTP response at all, because that is what
+        # a dead forward actually produces. PF_DEEP_CHECK_EVERY_N_CYCLES's
+        # gate is never reached: each missing cycle continues before it.
+        + _curl(healthz_code="000", connect_exit=7)
+        + f'record_pf_event() {{ echo "$8" >> "{lag_capture}"; }}\n'
+        + _bounded_loop()
+        + "\n"
     )
     proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
 
     lags = lag_capture.read_text().split()
-    assert lags == ["15", "31", "47"], (
-        "expected growing lag (15, then +16 per cycle for the interval plus the restart "
-        f"branch's own 1s port-release pause), got {lags}"
+    assert lags == ["45", "90", "135"], (
+        "expected a restart every PF_MISSES_BEFORE_RESTART cycles with lag growing by "
+        f"3 * PF_PROBE_INTERVAL_SECONDS each time, got {lags}"
     )
+
+
+def test_the_record_carries_the_consecutive_miss_count(tmp_path):
+    """Why the restart happened, in the record itself. A reader of an
+    archived run can tell a forward that vanished on the first probe from one
+    that went quiet for three, without re-deriving it from timestamps."""
+    restarts_file = _run(tmp_path, current_contents="p\n", consecutive_misses="3")
+
+    row = json.loads(restarts_file.read_text().strip())
+    assert row["consecutive_misses"] == 3
+
+
+def test_the_older_fields_keep_their_names_and_types(tmp_path):
+    """Backward compatibility. Fields are added, never renamed: a reader
+    written against an older run's file must still find everything it knew,
+    and readout_run.py counts lines whose event is exactly "restart"."""
+    restarts_file = _run(tmp_path, current_contents="p\n", event="probe_timeout_forward_alive")
+
+    row = json.loads(restarts_file.read_text().strip())
+    assert set(row) == {
+        "ts",
+        "event",
+        "old_pid",
+        "new_pid",
+        "problem_id",
+        "previous_problem_id",
+        "detection_lag_seconds",
+        "consecutive_misses",
+        "detail",
+    }
+    assert row["event"] == "probe_timeout_forward_alive", "a non-restart event may not borrow the restart name"
+    assert row["detail"] == "healthz 000"
+    assert isinstance(row["detection_lag_seconds"], int)

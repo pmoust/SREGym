@@ -40,13 +40,31 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SHARD = ROOT / "scripts" / "benchmark" / "run_shard.sh"
 
-PROBE_FNS = ("mcp_probe_code", "mcp_probe_answered")
+PROBE_FNS = ("mcp_probe_code", "mcp_probe_answered", "pf_port_accepts", "pf_forward_alive")
+PROBE_CONSTANTS = ("MCP_PROBE_TIMEOUT_SECONDS", "PF_CONNECT_TIMEOUT_SECONDS")
+
+
+def _probe_constants() -> str:
+    """The probe timeouts, verbatim from run_shard.sh.
+
+    Matched at column 0, which is what picks out the file-scope constants and
+    not the PF_* ones run_slot assigns, indented, inside itself. A harness that
+    pastes only function bodies has to carry these or curl runs with an empty
+    --max-time.
+    """
+    lines = RUN_SHARD.read_text().splitlines()
+    out = []
+    for name in PROBE_CONSTANTS:
+        found = [line for line in lines if line.startswith(f"{name}=")]
+        assert len(found) == 1, f"{name} is not assigned exactly once at file scope: {found}"
+        out.append(found[0])
+    return "\n".join(out) + "\n"
 
 
 def _probe_fns() -> str:
     """The probe function bodies, verbatim from run_shard.sh."""
     text = RUN_SHARD.read_text()
-    out = []
+    out = [_probe_constants()]
     for name in PROBE_FNS:
         opener = f"{name}() {{"
         assert text.count(opener) == 1, f"{name} is not defined exactly once in run_shard.sh"
@@ -189,6 +207,90 @@ def test_a_socket_that_never_answers_is_not_serving():
     # Distinguishes a --max-time expiry from an instant empty reply, which is
     # the whole point of this case. mcp_probe_code allows 3s.
     assert probe.seconds >= 2, f"expected a --max-time expiry, got {probe.seconds:.2f}s (socket closed early?)"
+
+
+def _predicate(snippet: str, port: int) -> bool:
+    """Run one shell predicate from run_shard.sh against `port` and report it.
+
+    Real sockets, same reason the probe tests above use them: what is under
+    test is which curl outcomes count as a connect, and a mocked curl would
+    only re-state the answer the test already assumed.
+    """
+    script = _probe_fns() + f'if {snippet}; then printf "yes\\n"; else printf "no\\n"; fi\n'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "MCP_SERVER_PORT": str(port)},
+        timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip() == "yes"
+
+
+def test_a_port_nothing_listens_on_does_not_accept():
+    """Connection refused, curl exit 7. This is the one case that proves the
+    forward is gone, and the only one the supervisor may restart on."""
+    assert _predicate("pf_port_accepts", _free_port()) is False
+
+
+def test_a_port_that_accepts_and_never_answers_still_accepts():
+    """The false positive that cost run-20260921-1250-532577fe 43 restarts.
+
+    The MCP server's event loop was blocked by a `kubectl rollout status
+    --timeout=60s`, so the handshake completed and no HTTP reply followed.
+    mcp_probe_code reads that as 000, identical to a dead forward.
+    pf_port_accepts is what separates them, so it must say yes here: the
+    forward is up and carrying whatever brain-go has on it.
+
+    The accepted socket is held for the whole call. Dropping it would let
+    CPython close it and turn this into curl exit 52 rather than the timeout
+    this case is about, which pf_port_accepts also reads as accepted, so the
+    test would pass without exercising anything.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    held = []
+    threading.Thread(target=lambda: held.append(listener.accept()[0]), daemon=True).start()
+    try:
+        accepts = _predicate("pf_port_accepts", port)
+    finally:
+        for sock in held:
+            sock.close()
+        listener.close()
+
+    assert accepts is True
+
+
+def test_a_port_that_answers_accepts(status_server):
+    """A healthy forward. Any status is an answer, so the connect plainly
+    happened."""
+    assert _predicate("pf_port_accepts", status_server(404)) is True
+
+
+def test_the_forward_is_alive_only_when_both_the_process_and_the_port_are(status_server):
+    """pf_forward_alive is the supervisor's kill gate: both halves must hold.
+
+    $$ is this bash's own pid, which is running by definition, so it stands in
+    for a live `kubectl port-forward`. 2**22 is above every default
+    /proc/sys/kernel/pid_max and above macOS's pid ceiling, so no process can
+    own it.
+    """
+    port = status_server(200)
+
+    assert _predicate('pf_forward_alive "$$"', port) is True
+    assert _predicate('pf_forward_alive "4194304"', port) is False
+    # Process alive, port refused: the forward died and left the process
+    # behind, or never bound. Restartable.
+    assert _predicate('pf_forward_alive "$$"', _free_port()) is False
+
+
+def test_an_empty_pid_is_not_alive(status_server):
+    """An unreadable pid file means the supervisor has lost track of what it
+    supervises, so it may not claim the forward is healthy."""
+    assert _predicate('pf_forward_alive ""', status_server(200)) is False
 
 
 def test_both_probe_sites_use_the_shared_helper():
