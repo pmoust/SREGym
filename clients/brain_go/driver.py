@@ -807,7 +807,7 @@ def _parent_workflow_id(history: Any) -> str:
     return ""
 
 
-def write_temporal_histories(investigation_uuid: str) -> None:
+def write_temporal_histories(investigation_uuid: str, suffix: str = "") -> None:
     """Archive the RCI child's history and its parent chat turn's.
 
     These two histories are the only record of what the investigation actually
@@ -819,13 +819,17 @@ def write_temporal_histories(investigation_uuid: str) -> None:
 
     The child's id is brain-go's own: rci- plus the investigation uuid. The
     parent's is read off the child's start event.
+
+    `suffix` goes into both file names, so an export taken part way through an
+    attempt does not overwrite the one taken at the end. The call site before
+    the mitigation turn says why the two are different histories.
     """
     if not investigation_uuid:
         return
 
     child_id = f"rci-{investigation_uuid}"
     child = _temporal_show(child_id)
-    write_artifact("rci_history.json", child, transcript=True)
+    write_artifact(f"rci_history{suffix}.json", child, transcript=True)
 
     parent_id = _parent_workflow_id(child)
     if not parent_id:
@@ -833,7 +837,7 @@ def write_temporal_histories(investigation_uuid: str) -> None:
 
         return
 
-    write_artifact("turn_history.json", _temporal_show(parent_id), transcript=True)
+    write_artifact(f"turn_history{suffix}.json", _temporal_show(parent_id), transcript=True)
 
 
 DIAGNOSIS_PROMPT = """You are investigating a Kubernetes application failure.
@@ -994,6 +998,21 @@ def main() -> int:
             logger.info("conductor went straight to done after diagnosis")
 
             return 0
+
+        # Export the diagnosis run now, because the mitigation turn is about to
+        # make it unreachable. brain-go names every RCI child workflow
+        # rci-<investigation uuid>, both turns of an attempt run on one
+        # investigation, so the mitigation turn starts a second workflow run
+        # under that same id, and `temporal workflow show` with no --run-id
+        # returns the latest run. The finally block below would then archive
+        # the mitigation run under the diagnosis run's name, which is what
+        # happened to 119 of the 121 histories archived from run-20260921-1250.
+        #
+        # Only on this path. When the conductor ends at diagnosis, the finally
+        # export is already the diagnosis run and a copy here would duplicate
+        # roughly 7 MB per attempt for nothing.
+        if opened:
+            write_temporal_histories(opened[1], suffix="_diagnosis")
 
         logger.info("=" * 30 + " MITIGATION " + "=" * 29)
         try:

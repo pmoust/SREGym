@@ -682,3 +682,113 @@ def test_a_transcript_with_no_archive_dir_is_skipped_not_staged(monkeypatch, tmp
     driver.write_artifact("rci_history.json", {"events": []}, transcript=True)
 
     assert list(staged.iterdir()) == []
+
+
+def test_a_suffixed_export_does_not_overwrite_the_unsuffixed_one(monkeypatch, tmp_path):
+    """Both turns of an attempt share one RCI workflow id.
+
+    `temporal workflow show` with no --run-id returns the latest run, so the
+    export taken before the mitigation turn and the one taken at the end are
+    different histories under the same id and need different names.
+    """
+    monkeypatch.setenv("AGENT_LOGS_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENT_ARCHIVE_DIR", str(tmp_path))
+    child = {
+        "events": [
+            {
+                "eventId": "1",
+                "workflowExecutionStartedEventAttributes": {
+                    "parentWorkflowExecution": {"workflowId": "parent-1"},
+                },
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        driver,
+        "_temporal_show",
+        lambda workflow_id: child if workflow_id.startswith("rci-") else {"events": ["parent"]},
+    )
+
+    driver.write_temporal_histories("uuid-1", suffix="_diagnosis")
+
+    assert (tmp_path / "rci_history_diagnosis.json").exists()
+    assert (tmp_path / "turn_history_diagnosis.json").exists()
+    assert not (tmp_path / "rci_history.json").exists()
+    assert not (tmp_path / "turn_history.json").exists()
+
+
+def _run_main(monkeypatch, stages: list[str]) -> list[tuple[str, str]]:
+    """Drive main() through a scripted conductor, recording what it did.
+
+    Everything that would leave the process is replaced. What is being pinned
+    is the order of the remaining calls, not any of their behaviour.
+    """
+    calls: list[tuple[str, str]] = []
+    remaining = iter(stages)
+
+    monkeypatch.setattr(driver, "BRAIN_API_KEY", "key")
+    monkeypatch.setattr(driver, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(driver, "resolve_problem_id", lambda: "network_policy_block")
+    monkeypatch.setattr(
+        driver,
+        "get_app_info",
+        lambda: {"name": "astronomy-shop", "namespace": "astronomy-shop", "descriptions": ""},
+    )
+    monkeypatch.setattr(driver, "open_investigation", lambda problem_id: ("thread-1", "uuid-1"))
+    monkeypatch.setattr(driver, "wait_for_stage", lambda targets, timeout=300: next(remaining))
+    monkeypatch.setattr(driver, "confirm_persisted", lambda uuid: calls.append(("confirm", uuid)))
+    monkeypatch.setattr(driver, "submit_to_conductor", lambda text: calls.append(("submit", text)))
+    monkeypatch.setattr(driver, "write_tool_calls", lambda *args: calls.append(("tool-calls", "")))
+    monkeypatch.setattr(
+        driver,
+        "write_temporal_histories",
+        lambda uuid, suffix="": calls.append(("history", suffix)),
+    )
+
+    def run_turn(prompt, thread_id, tools, counter, by_node):
+        phase = "mitigation" if prompt.startswith("Your task now") else "diagnosis"
+        calls.append(("turn", phase))
+
+        return "an answer"
+
+    monkeypatch.setattr(driver, "run_turn", run_turn)
+
+    assert driver.main() == 0
+
+    return [(kind, value) for kind, value in calls if kind != "submit"]
+
+
+def test_the_diagnosis_history_is_exported_before_the_mitigation_turn(monkeypatch):
+    """Exported mid-attempt or not at all.
+
+    The mitigation turn starts a second workflow run under the same RCI
+    workflow id, so the export in main()'s finally returns the mitigation run.
+    119 of the 121 histories archived from run-20260921-1250 are that run, and
+    the diagnosis run they were meant to record is gone.
+    """
+    calls = _run_main(monkeypatch, ["diagnosis", "mitigation", "done"])
+
+    assert calls == [
+        ("turn", "diagnosis"),
+        ("confirm", "uuid-1"),
+        ("history", "_diagnosis"),
+        ("turn", "mitigation"),
+        ("tool-calls", ""),
+        ("history", ""),
+    ]
+
+
+def test_a_diagnosis_only_attempt_exports_one_history(monkeypatch):
+    """The finally export already is the diagnosis run here.
+
+    A second copy would duplicate several MB per attempt and record nothing
+    the unsuffixed file does not already hold.
+    """
+    calls = _run_main(monkeypatch, ["diagnosis", "done"])
+
+    assert calls == [
+        ("turn", "diagnosis"),
+        ("confirm", "uuid-1"),
+        ("tool-calls", ""),
+        ("history", ""),
+    ]

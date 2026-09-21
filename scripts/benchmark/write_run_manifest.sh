@@ -18,11 +18,68 @@
 # state, plan output and user_data regardless.
 #
 # Usage: write_run_manifest.sh <output-path>
+#        write_run_manifest.sh --stages <output-path>
+#
 # Reads its content from the environment, so the caller decides what is known.
+# The second form rewrites only the stage lines of a manifest this script
+# already wrote, for the one field that is not knowable when the rest is: the
+# bootstrap writes the manifest and only then sources run_shard.sh, which is
+# where the tasklist gets generated. Same derivation either way, called from
+# one place, so the two forms cannot read a tasklist two different ways.
 
 set -uo pipefail
 
-OUT="${1:?usage: write_run_manifest.sh <output-path>}"
+STAGES_ONLY=0
+if [ "${1:-}" = "--stages" ]; then
+  STAGES_ONLY=1
+  shift
+fi
+
+OUT="${1:?usage: write_run_manifest.sh [--stages] <output-path>}"
+
+# Which stages ran, derived rather than asserted. sregym/conductor/tasklist.yml
+# selects stages per problem (diagnosis, mitigation, in that order); with no
+# such file the conductor runs both. The file is gitignored, so a git clone
+# never brings one: scripts/benchmark/write_tasklist.py generates it at shard
+# start, and the smoke-test workflow writes a mitigation-only one of its own.
+# Anything left on a box would silently change what a run measures, and a run
+# that cannot say which stages it graded cannot be compared against one that
+# graded more.
+#
+# A stage still needs its oracle attached: a problem with no mitigation_oracle
+# is skipped with "Mitigation oracle is not attached", which cannot be seen
+# from here. All 21 sregym-lite problems have one, checked against the
+# archived results rather than by reading the registry.
+emit_stages() {
+  local tasklist="${SREGYM_TASKLIST:-${WORKDIR:-.}/sregym/conductor/tasklist.yml}"
+  if [ -f "$tasklist" ]; then
+    echo "stages_source=tasklist.yml"
+    # Comments stripped first. The generated file carries a header saying where
+    # it came from, and a header that happened to name a stage would otherwise
+    # be read as that stage having run.
+    echo "stages=$(grep -v '^[[:space:]]*#' "$tasklist" | grep -oE '(diagnosis|mitigation)' | sort -u | paste -sd, -)"
+    echo "tasklist_sha256=$(shasum -a 256 "$tasklist" 2>/dev/null | cut -d" " -f1)"
+  else
+    echo "stages_source=conductor-default-no-tasklist"
+    echo "stages=diagnosis,mitigation"
+  fi
+}
+
+if [ "$STAGES_ONLY" = "1" ]; then
+  if [ ! -f "$OUT" ]; then
+    echo "write_run_manifest.sh --stages: $OUT does not exist" >&2
+    exit 1
+  fi
+  # Written to a sibling and moved, so a failure halfway through leaves the
+  # previous manifest intact rather than a truncated one. The refreshed lines
+  # land at the end of the file; nothing reads the manifest positionally.
+  TMP="$OUT.stages.$$"
+  {
+    grep -v -E '^(stages|stages_source|tasklist_sha256)=' "$OUT"
+    emit_stages
+  } >"$TMP" && mv "$TMP" "$OUT"
+  exit $?
+fi
 
 # The fully resolved problem id list, not PROBLEM_SET or PROBLEMS_OVERRIDE
 # verbatim: a run's provenance should not depend on whether the selection
@@ -108,26 +165,10 @@ print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOI
   # does and does not tell a reader about a node's actual bound toolset.
   echo "seeded_connection_buckets=$SEEDED_CONNECTION_BUCKETS"
 
-  # Which stages ran, derived rather than asserted. sregym/conductor/tasklist.yml
-  # selects stages per problem (diagnosis, mitigation, in that order); with no
-  # such file the conductor runs both. The file is gitignored, so a git clone
-  # never brings one, but CI writes a mitigation-only one, and anything left on a
-  # box would silently change what a run measures. A run that cannot say which
-  # stages it graded cannot be compared against one that graded more.
-  #
-  # A stage still needs its oracle attached: a problem with no mitigation_oracle
-  # is skipped with "Mitigation oracle is not attached", which cannot be seen
-  # from here. All 21 sregym-lite problems have one, checked against the
-  # archived results rather than by reading the registry.
-  TASKLIST="${SREGYM_TASKLIST:-${WORKDIR:-.}/sregym/conductor/tasklist.yml}"
-  if [ -f "$TASKLIST" ]; then
-    echo "stages_source=tasklist.yml"
-    echo "stages=$(grep -oE '(diagnosis|mitigation)' "$TASKLIST" | sort -u | paste -sd, -)"
-    echo "tasklist_sha256=$(shasum -a 256 "$TASKLIST" 2>/dev/null | cut -d" " -f1)"
-  else
-    echo "stages_source=conductor-default-no-tasklist"
-    echo "stages=diagnosis,mitigation"
-  fi
+  # Which stages ran. See emit_stages above; run_shard.sh calls this script a
+  # second time with --stages once it has generated the tasklist, because at
+  # this point in the bootstrap the file does not exist yet.
+  emit_stages
   # One KEY=VALUE per line, exactly as written into brain-go's deploy/.env.
   printf '%s\n' "${BRAIN_ENV_EXTRA:-}"
 } >"$OUT"

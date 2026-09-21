@@ -72,6 +72,11 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "SHARD_INDEX=1\n"
         "SHARD_COUNT=3\n"
         f"WORKDIR={ROOT}\n"
+        # Pointed at a path that does not exist, so the assertion below reads
+        # the no-tasklist branch whether or not somebody has run a shard in
+        # this checkout: run_shard.sh generates a real (gitignored) tasklist
+        # at WORKDIR/sregym/conductor/tasklist.yml.
+        f"SREGYM_TASKLIST={tmp_path / 'no-tasklist.yml'}\n"
         "BRAIN_GO_SHA=deadbeef\n"
         'BRAIN_ENV_EXTRA="CHAT_SERVICE_TURN_TIMEOUT=3600s"\n'
         f"MANIFEST={out}\n" + _manifest_block() + "\n"
@@ -212,6 +217,9 @@ def _write_manifest(tmp_path, problem_set: str, problems_override: str = "") -> 
     env = dict(os.environ)
     env["PROBLEM_SET"] = problem_set
     env["PROBLEMS_OVERRIDE"] = problems_override
+    # Same reason as above: a tasklist left in the checkout by a local shard
+    # run must not change what these cases measure.
+    env["SREGYM_TASKLIST"] = str(tmp_path / "no-tasklist.yml")
     proc = subprocess.run(
         ["bash", str(WRITE_MANIFEST), str(out)],
         cwd=ROOT,

@@ -90,6 +90,45 @@ if [ -z "$PROBLEMS" ]; then
 fi
 echo "[bootstrap] shard $SHARD_INDEX owns $(echo $PROBLEMS | wc -w) problems"
 
+# --- stages -----------------------------------------------------------------
+# Diagnosis only, unless SREGYM_STAGES says otherwise. brain-go does not do
+# mitigation as a product and no analysis reads the mitigation columns, so the
+# stage was buying nothing: the archived mitigation-only histories account for
+# 21.4M of run-20260921-1250's 60.15M tokens.
+#
+# It also cost the record of the turn we do measure. brain-go names every RCI
+# child workflow rci-<investigation uuid> and both turns of an attempt run on
+# one investigation, so the mitigation turn starts a second run under the same
+# workflow id, and `temporal workflow show` without a run id returns the latest
+# run. 119 of the 121 histories archived from that run are the mitigation turn.
+#
+# Generated from $PROBLEMS, not written by hand, because "not listed" is the
+# failure mode: the conductor grades both stages for any problem the file
+# forgets and only logs it. write_tasklist.py reads the file back and fails if
+# its problem set is not exactly $PROBLEMS.
+#
+# SREGYM_STAGES is diagnosis or diagnosis,mitigation and nothing else. A typo
+# would otherwise leave no file at all, which is the conductor's both-stage
+# default again, at twice the cost and looking like a normal run.
+TASKLIST_PATH="$WORKDIR/sregym/conductor/tasklist.yml"
+if ! TASKLIST_PATH="$TASKLIST_PATH" PROBLEMS="$PROBLEMS" \
+     SREGYM_STAGES="${SREGYM_STAGES:-diagnosis}" \
+     uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/write_tasklist.py"; then
+  terminate "tasklist generation rejected, see the error above"
+  exit 1
+fi
+
+# The manifest was written before this file existed: the bootstrap calls
+# write_run_manifest.sh and only then sources this one. Left alone it would
+# record the conductor's both-stage default on every diagnosis-only run, and a
+# run that misreports which stages it graded cannot be compared with anything.
+# Refreshed from the same derivation that wrote the line, not a second copy of
+# it. Best effort, like the original call: the manifest is provenance, and
+# losing it must not end a run that is otherwise ready to go.
+if [ -n "${MANIFEST:-}" ] && [ -f "${MANIFEST:-}" ]; then
+  bash "$WORKDIR/scripts/benchmark/write_run_manifest.sh" --stages "$MANIFEST" || true
+fi
+
 # --- run --------------------------------------------------------------------
 export AGENT_MODEL_ID="$AGENT_MODEL"
 export JUDGE_MODEL_ID="$JUDGE_MODEL"

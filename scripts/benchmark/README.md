@@ -394,6 +394,25 @@ its own: nobody has reconstructed which 90 the SREGym paper actually used
 (NOFireAI/brain-go#2221), so there is no "run everything" default and never
 will be until that's resolved.
 
+## Which stages a run grades
+
+Diagnosis only, by default. brain-go does not do mitigation as a product and
+no analysis reads the mitigation columns, while the stage was about half of a
+run's tokens: 21.4M of run-20260921-1250's 60.15M.
+
+`run_shard.sh` writes `sregym/conductor/tasklist.yml` at shard start, listing
+every problem the shard owns with the stages from `SREGYM_STAGES`. Set it to
+`diagnosis,mitigation` before sourcing `run_shard.sh` to get both back; any
+other value hard-stops the shard. The file is generated rather than checked
+in, because the conductor grades both stages for any problem the file does
+not list, so it has to be derived from the same list the shard runs.
+
+The run manifest records `stages`, `stages_source` and `tasklist_sha256`, so
+an archived run says which stages it graded. Diagnosis figures from a
+diagnosis-only run are comparable with earlier runs; the run total and
+time-to-done are not, and `score_run.py` refuses to report a mitigation or
+E2E figure when the stage did not run.
+
 ## Running your own branch
 
 `--sregym-ref`/`--brain-go-ref` (or `sregym_ref`/`brain_go_ref` directly in
