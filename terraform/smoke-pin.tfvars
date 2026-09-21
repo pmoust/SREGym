@@ -68,5 +68,5 @@ brain_env = {
 # rule expire-noncurrent Enabled.
 results_bucket = "sregym-bench-results-819709950457"
 
-brain_go_ref = "bcb45e7425286dafc9402e418c7d0c316993229a"
-sregym_ref   = "fbc5e5357e318b945f7e897d237940fe11b2bb39"
+brain_go_ref = "ae48c4fc43887dbad30a694fd75699415e9e4697"
+sregym_ref   = "6cbb3db8ae05547922bd0d6aeb54472531a7e005"
