@@ -130,6 +130,17 @@ from scripts.benchmark.seed_connections import ENDPOINTS
 print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_BUCKETS=""
 
+# The image the MCP pod is meant to run. Asked of the script that builds it
+# rather than restated here, so the manifest cannot name a tag nothing was
+# built under. This runs before run_shard.sh builds anything, so it records
+# the intent; what each pod actually started is recorded per slot in
+# mcp_pod_image.json.
+#
+# Worth recording at all because it was unrecorded and wrong: every run before
+# this one ran ghcr.io/sregym/sregym-mcp:latest, upstream's 2026-09-06 build,
+# and no artifact said so.
+MCP_IMAGE=$("$(dirname "$0")/build_mcp_image.sh" --print-name 2>/dev/null) || MCP_IMAGE=""
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -160,6 +171,9 @@ print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOI
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"
   echo "brain_go_sha=${BRAIN_GO_SHA:-}"
+  # sregym-mcp:<sregym sha>, built on the box and loaded into each slot's kind
+  # node. See the comment above for what it does and does not promise.
+  echo "mcp_image=$MCP_IMAGE"
   # kind:bucket[+bucket](,kind:bucket...) for each CUSTOM_MCP connection this
   # run seeded. See the comment above SEEDED_CONNECTION_BUCKETS for what this
   # does and does not tell a reader about a node's actual bound toolset.

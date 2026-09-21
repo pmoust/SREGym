@@ -55,12 +55,22 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   all. And it now accepts a forward only once it serves traffic, polled to a
   `PORT_FORWARD_READY_TIMEOUT` deadline, rather than on `poll() is None`: a
   process that binds but never answers was declared healthy and every later
-  call paid a full timeout.
+  call paid a full timeout. And `SREGYM_MCP_IMAGE` (empty by default) makes
+  `deploy()` apply a generated kustomize overlay that points the pod at that
+  image with `imagePullPolicy: Never`, instead of the committed kustomization's
+  `ghcr.io/sregym/sregym-mcp:latest` with `imagePullPolicy: Always`. The
+  benchmark sets it, so a pod runs this repo's MCP server rather than
+  upstream's published build.
 
-  The last two are plain bug fixes and the strongest candidates for
-  upstreaming; the flag is mirror-specific. Behaviour with the flag unset is
+  Two of these are plain bug fixes and the strongest candidates for
+  upstreaming: the early return in `start_port_forward` and the serves-traffic
+  acceptance. The two flags are mirror-specific. Behaviour with both unset is
   unchanged apart from those two fixes, which is what
   `tests/service/test_mcp_server_port_forward.py` pins.
+- `mcp_server/Dockerfile` — one added `COPY atif_converter/`. pyproject.toml
+  has listed that package since 2026-07-11 and the Dockerfile never copied it,
+  so `uv sync --frozen` fails with "package directory 'atif_converter' does not
+  exist" and no image can be built from this tree. Candidate for upstreaming.
 - `sregym/paths.py` — `SREGYM_CACHE_DIR` overrides the cache location, so runs
   sharing a host do not share a per-cluster baseline snapshot. Candidate for
   upstreaming.
@@ -77,7 +87,11 @@ path:
   (`setup_brain_go.sh`, `seed_connections.py`), computes the per-run
   environment that lets runs share a host (`run_slot_env.sh`), and deploys the
   MCP server once per instance before any slot starts (`deploy_mcp.py`), which
-  is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for. `run_shard.sh` holds
+  is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
+  `build_mcp_image.sh` builds that server's image from the checkout and names
+  it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it
+  into each slot's kind node, and `write_run_manifest.sh` records the same name
+  as the manifest's `mcp_image`. `run_shard.sh` holds
   the shard's resume, problem division and slot workers; it is sourced by the
   terraform bootstrap rather than executed, because user_data is capped at
   16384 bytes and `measure_user_data.py --check` is what keeps it under.

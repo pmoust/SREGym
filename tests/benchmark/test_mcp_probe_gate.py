@@ -3,15 +3,21 @@
 run-20260914-0912 produced zero results: all 12 slots logged "MCP port-forward
 never served" and self-terminated without running a single problem. The probe
 added in #94 required HTTP 200 from /healthz, a route that entered the source
-in that same commit. The pod does not run the image deployment.yaml names --
-`kubectl apply -k` applies a kustomization whose `images:` transform rewrites
-`sregym` to ghcr.io/sregym/sregym-mcp, pulled fresh from GHCR on every pod
-start by imagePullPolicy: Always. That published image was built 2026-09-06,
-has the five SSE mounts and no /healthz, and no Mount("/") to absorb the path,
-so Starlette answers 404. The slot logs agree that the app answered rather than
+in that same commit. The pod did not run the source: `kubectl apply -k` applied
+a kustomization whose `images:` transform rewrote `sregym` to
+ghcr.io/sregym/sregym-mcp, pulled fresh from GHCR on every pod start by
+imagePullPolicy: Always. That published image was built 2026-09-06, has the
+five SSE mounts and no /healthz, and no Mount("/") to absorb the path, so
+Starlette answered 404. The slot logs agree that the app answered rather than
 hanging: 29 clean "Handling connection" lines per forward with no forwarding
 errors, 29 probe cycles inside a 60s deadline whose sleep alone is 2s, i.e.
 curl returned in milliseconds.
+
+The benchmark now builds the image from the checkout and loads it into each
+slot's kind node, so a benchmark pod serves /healthz and answers 200. Both
+statuses stay pinned below: the deploy path applies the committed
+kustomization, published image and all, whenever SREGYM_MCP_IMAGE is unset,
+and neither caller of the predicate can act on the difference anyway.
 
 These run the real shell functions against real sockets, because the bug was
 in what curl's exit behaviour means, not in anything a mock of curl would
@@ -117,9 +123,11 @@ def status_server():
 def test_404_counts_as_serving(status_server):
     """The regression that cost run-20260914-0912 its entire run.
 
-    This is not a hypothetical status. It is what the deployed container
-    returns for /healthz today, and the old `= "200"` gate turned it into
-    "MCP port-forward never served" on all 12 slots.
+    This is not a hypothetical status. It is what ghcr.io/sregym/sregym-mcp
+    returns for /healthz, and the old `= "200"` gate turned it into "MCP
+    port-forward never served" on all 12 slots. A benchmark pod no longer runs
+    that image, but the deploy path still applies the committed kustomization
+    when SREGYM_MCP_IMAGE is unset, so the status is still reachable.
     """
     probe = _probe(status_server(404))
 
@@ -128,8 +136,9 @@ def test_404_counts_as_serving(status_server):
 
 
 def test_200_still_counts_as_serving(status_server):
-    """Whenever the image is rebuilt from source, the route appears and the
-    probe must keep passing rather than start failing the other way."""
+    """What a benchmark pod sends now that it runs an image built from this
+    checkout. The route exists there, so the probe must keep passing rather
+    than start failing the other way."""
     probe = _probe(status_server(200))
 
     assert probe.code == "200"

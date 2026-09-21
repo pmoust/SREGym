@@ -23,6 +23,11 @@ COPY clients/ ./clients/
 COPY scripts/ ./scripts/
 COPY llm_backend/ ./llm_backend/
 COPY logger/ ./logger/
+# Named in pyproject.toml's [tool.setuptools] packages, so `uv sync` below
+# builds the project and setuptools looks for it. Without this the build ends
+# at "error: package directory 'atif_converter' does not exist" and no image
+# can be built from this tree at all.
+COPY atif_converter/ ./atif_converter/
 
 # Install dependencies with uv
 RUN uv sync --frozen --no-dev

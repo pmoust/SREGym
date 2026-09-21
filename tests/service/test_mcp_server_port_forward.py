@@ -220,14 +220,16 @@ def test_is_port_forward_healthy_probes_healthz_not_a_real_session():
 def test_is_port_forward_healthy_true_on_any_answer(status):
     """Any status proves the forward carried the request to the app.
 
-    404 is the case this exists for, and is what the deployed container
-    actually returns. deploy() applies the kustomization with `kubectl apply
-    -k`, and its `images:` transform rewrites deployment.yaml's `sregym` to
-    ghcr.io/sregym/sregym-mcp, which imagePullPolicy: Always pulls fresh from
-    GHCR on every pod start. That published image was built 2026-09-06 and has
-    no /healthz route, which entered this repo on 2026-09-11 alongside this
-    probe (#94). Requiring 200 made this permanently False and aborted all 12
-    slots of run-20260914-0912.
+    404 is the case this exists for. With SREGYM_MCP_IMAGE unset, deploy()
+    applies the committed kustomization, whose `images:` transform rewrites
+    deployment.yaml's `sregym` to ghcr.io/sregym/sregym-mcp and whose
+    imagePullPolicy: Always pulls it fresh from GHCR on every pod start. That
+    published image was built 2026-09-06 and has no /healthz route, which
+    entered this repo on 2026-09-11 alongside this probe (#94). Requiring 200
+    made this permanently False and aborted all 12 slots of run-20260914-0912.
+
+    200 is what a benchmark pod sends: the benchmark sets SREGYM_MCP_IMAGE to
+    an image built from the checkout, where the route exists.
 
     503 is in here for the same reason rather than as a separate case: a
     caller acts on False by restarting `kubectl port-forward`, which cannot

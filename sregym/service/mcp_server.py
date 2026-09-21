@@ -1,8 +1,12 @@
+import contextlib
 import logging
 import os
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 
 import requests
 
@@ -16,6 +20,94 @@ logger = logging.getLogger("all.sregym.mcp_server")
 # answer until the pod behind the service does, and a pod that satisfied
 # wait_for_ready can still need a few seconds more.
 PORT_FORWARD_READY_TIMEOUT = 20
+
+# Image reference the MCP pod must run, or empty for the committed manifest's
+# own choice. The benchmark sets it to the image it built from the checkout and
+# loaded into the slot's kind node (scripts/benchmark/build_mcp_image.sh).
+MCP_IMAGE_ENV = "SREGYM_MCP_IMAGE"
+
+# The image name deployment.yaml carries, and the name the committed
+# kustomization rewrites it to. An overlay transforms the base's output, where
+# the rewrite has already happened, so the override has to match the second
+# name; the first is listed as well so this still works if the base ever stops
+# rewriting. A kustomize images entry that matches nothing is a no-op.
+IMAGE_MATCH_NAMES = ("sregym", "ghcr.io/sregym/sregym-mcp")
+
+
+def split_image_reference(image: str) -> tuple[str, str]:
+    """Split "repo:tag" into its two halves, tolerating a registry port.
+
+    A colon separates a tag only when what follows it is not a path, so
+    "localhost:5000/sregym-mcp" reads as a name with no tag rather than as
+    "localhost" tagged "5000/sregym-mcp".
+    """
+    head, sep, last = image.rpartition(":")
+    if sep and "/" not in last:
+        return head, last
+
+    return image, ""
+
+
+@contextlib.contextmanager
+def kustomize_root():
+    """The directory `kubectl apply -k` runs against.
+
+    With MCP_IMAGE_ENV unset this is the committed kustomization, unchanged:
+    the pod runs ghcr.io/sregym/sregym-mcp:latest and pulls it on every start.
+
+    With it set, the pod must run an image that exists only in the node's own
+    store, and that needs two changes rather than one. The tag is a git SHA
+    resolved at run time, so it cannot be written into a committed file, and
+    imagePullPolicy is not something kustomize's images transform can set at
+    all. So a temporary overlay is generated over a copy of the base, and the
+    committed manifest stays byte-identical to upstream's. The copy is what
+    lets the overlay reach the base by a relative path, which kustomize
+    accepts from any root.
+
+    imagePullPolicy becomes Never, not IfNotPresent. Both skip the pull when
+    the image is present; they differ when `kind load docker-image` did not
+    run, and then Never reports ErrImageNeverPull at once where IfNotPresent
+    spends a pull backoff on a tag no registry serves.
+    """
+    image = os.environ.get(MCP_IMAGE_ENV, "").strip()
+    if not image:
+        yield MCP_SERVER_K8S
+        return
+
+    name, tag = split_image_reference(image)
+    entries = "".join(
+        f"  - name: {match}\n    newName: {name}\n" + (f"    newTag: {tag}\n" if tag else "")
+        for match in IMAGE_MATCH_NAMES
+    )
+
+    with tempfile.TemporaryDirectory(prefix="sregym-mcp-kustomize-") as tmp:
+        root = Path(tmp)
+        shutil.copytree(MCP_SERVER_K8S, root / "base")
+        overlay = root / "overlay"
+        overlay.mkdir()
+        (overlay / "kustomization.yaml").write_text(
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources:\n"
+            "  - ../base\n"
+            "images:\n" + entries + "patches:\n"
+            "  - target:\n"
+            "      kind: Deployment\n"
+            "      name: mcp-server\n"
+            "    patch: |-\n"
+            "      apiVersion: apps/v1\n"
+            "      kind: Deployment\n"
+            "      metadata:\n"
+            "        name: mcp-server\n"
+            "      spec:\n"
+            "        template:\n"
+            "          spec:\n"
+            "            containers:\n"
+            "              - name: mcp-server\n"
+            "                imagePullPolicy: Never\n"
+        )
+        logger.info("MCP server image override: %s (imagePullPolicy Never)", image)
+        yield overlay
 
 
 class MCPServer:
@@ -89,7 +181,8 @@ class MCPServer:
                 self.start_port_forward()
             return
 
-        self.kubectl.exec_command(f"kubectl apply -k {MCP_SERVER_K8S}")
+        with kustomize_root() as root:
+            self.kubectl.exec_command(f"kubectl apply -k {root}")
         self.kubectl.wait_for_ready(self.namespace)
 
         if self._forward_is_external():
@@ -112,13 +205,15 @@ class MCPServer:
         caller acts on a False by tearing down and restarting `kubectl
         port-forward`, which cannot change a status the app chose to send.
 
-        It has to be any status rather than 200 to work at all. The pod does
-        not run the image deployment.yaml names: deploy() below runs `kubectl
-        apply -k`, and that kustomization's `images:` transform rewrites
-        `sregym` to ghcr.io/sregym/sregym-mcp, which imagePullPolicy: Always
-        pulls fresh from GHCR on every pod start. The published image was built
-        2026-09-06 and has no /healthz route, so Starlette answers 404 there.
-        Requiring 200 made this return False forever.
+        Accepting any status is what made this work when the route did not
+        exist in the pod. Without SREGYM_MCP_IMAGE the pod still runs
+        ghcr.io/sregym/sregym-mcp:latest, built 2026-09-06, with the five SSE
+        mounts, no /healthz and no Mount("/") to absorb the path, so Starlette
+        answers 404 there and requiring 200 returned False forever. The
+        benchmark now sets that variable and runs an image built from this
+        checkout, where /healthz answers 200, so both statuses reach this
+        method depending on which image the pod runs. Neither caller can act on
+        the difference, so neither is asked to tell them apart.
 
         Which path that actually saves: not the benchmark's fresh-cluster
         deploy, where SREGYM_EXTERNAL_PORT_FORWARD makes deploy() return before

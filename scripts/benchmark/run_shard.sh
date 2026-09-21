@@ -179,16 +179,20 @@ mcp_probe_code() {
 # A reply of any status proves the request crossed the forward and reached the
 # app, which is the only thing either caller is entitled to conclude from it.
 #
-# It has to be any status rather than 200 to work at all. The pod does not run
-# the image deployment.yaml names: `kubectl apply -k` (see MCPServer.deploy)
-# runs the kustomization next to it, whose `images:` transform rewrites
-# `sregym` to ghcr.io/sregym/sregym-mcp, and imagePullPolicy: Always pulls
-# that tag fresh from GHCR on every pod start. The published image was built
-# 2026-09-06; /healthz entered this repo on 2026-09-11 in the same commit that
-# pointed both probes at it (#94). Its sregym_mcp_server.py has the five SSE
-# mounts and no /healthz route, and no Mount("/") to absorb the path, so
-# Starlette answers 404. Every one of the 12 slots in run-20260914-0912
-# aborted on that 404 before running a single problem.
+# The pod now has the route. It runs the image built from this checkout (see
+# the MCP image section below), whose sregym_mcp_server.py serves /healthz and
+# answers 200. Accepting any status is what this file needed while the pod ran
+# ghcr.io/sregym/sregym-mcp:latest instead: that image was built 2026-09-06,
+# /healthz entered this repo on 2026-09-11 in the same commit that pointed both
+# probes at it (#94), and its five SSE mounts have no Mount("/") to absorb the
+# path, so Starlette answered 404 and every one of the 12 slots in
+# run-20260914-0912 aborted on it before running a problem.
+#
+# Kept as "any status" rather than tightened back to 200 now that 200 is what a
+# healthy pod sends. Neither caller can act on the difference between 200 and
+# 404 -- see the paragraph below -- and a slot that somehow deploys the old
+# image should reach seed_slot.sh's strict-200 wait on /kubectl/sse and fail
+# there, where the message names the endpoint the agent actually uses.
 #
 # 000 still fails, which is the failure #94 exists to catch: connection
 # refused, nothing listening, or a socket that accepts and never answers
@@ -203,6 +207,36 @@ mcp_probe_code() {
 mcp_probe_answered() {
   [ -n "$1" ] && [ "$1" != "000" ]
 }
+
+# --- MCP image --------------------------------------------------------------
+# Build the MCP server image from this checkout, so the pod runs the code this
+# repo has rather than upstream's published build. Until this ran, the
+# kustomization pointed at ghcr.io/sregym/sregym-mcp:latest with
+# imagePullPolicy: Always, an image built 2026-09-06: no /healthz route and no
+# anyio.to_thread.run_sync offload, so a `kubectl rollout status
+# --timeout=120s` held the single event loop and the supervisor below restarted
+# a working forward instead. That accounts for all 43 restarts in
+# run-20260921-1250.
+#
+# Once per box, here rather than in the bootstrap: the image is the same for
+# every slot, docker's cache is per box, and this file exists because
+# user_data is capped at 16384 bytes and anything addable to the bootstrap
+# should land here instead. The per-slot half is the `kind load` in run_slot
+# below, which has to wait for each slot's cluster to exist.
+#
+# A failed build is a hard stop. A slot that carried on would deploy the pod
+# with imagePullPolicy: Never against an image no node holds, sit in
+# ErrImageNeverPull, and abort at the port-forward gate with a message about
+# the forward rather than about the image.
+MCP_IMAGE=$("$WORKDIR/scripts/benchmark/build_mcp_image.sh") || {
+  terminate "could not build the MCP server image"
+  exit 1
+}
+# Read by MCPServer.deploy() (sregym/service/mcp_server.py), which generates a
+# kustomize overlay naming this image with imagePullPolicy: Never. Exported
+# here so every slot's deploy_mcp.py call inherits it.
+export SREGYM_MCP_IMAGE="$MCP_IMAGE"
+echo "[bootstrap] MCP server image $MCP_IMAGE"
 
 # --- slot workers -----------------------------------------------------------
 # Each slot is one concurrent SREGym run on this instance, and needs four
@@ -250,6 +284,17 @@ run_slot() {
       return 1
     fi
 
+    # A kind node keeps its own image store, separate from the host docker
+    # daemon that built the image, so the build above is invisible in here
+    # until it is loaded. Per slot rather than per box for that reason: each
+    # slot owns one cluster and the load has to follow that cluster's creation.
+    # It costs one copy of the image per slot and no registry round trip.
+    echo "[slot $slot] loading $SREGYM_MCP_IMAGE into $KIND_CLUSTER_NAME"
+    if ! kind load docker-image "$SREGYM_MCP_IMAGE" --name "$KIND_CLUSTER_NAME"; then
+      echo "[slot $slot] loading the MCP image into $KIND_CLUSTER_NAME failed, slot aborted"
+      return 1
+    fi
+
     # Put an MCP server in the cluster before seeding. The conductor deploys one
     # itself, but from deploy_app(), which runs per problem inside
     # start_problem() -- too late, because seeding has to discover the tool
@@ -271,6 +316,22 @@ run_slot() {
       echo "[slot $slot] MCP server deploy failed, slot aborted"
       return 1
     fi
+
+    # What the pod is actually running, read off the pod rather than assumed
+    # from what was asked for. imageID is the resolved digest, so it separates
+    # "the requested tag" from "the bytes that started", which is exactly the
+    # distinction that went unnoticed while every pod silently ran a build from
+    # 2026-09-06. Written as .json into slot_dir, under SLOTS_DIR, so the
+    # periodic and final `aws s3 sync` ship it with that slot's results and
+    # archive_run.sh's existing *.json include pulls it back down.
+    jq -nc \
+      --arg requested "$SREGYM_MCP_IMAGE" \
+      --arg image "$(kubectl get pod -n sregym -l app.kubernetes.io/name=mcp-server \
+        -o jsonpath='{.items[*].status.containerStatuses[*].image}' 2>/dev/null)" \
+      --arg image_id "$(kubectl get pod -n sregym -l app.kubernetes.io/name=mcp-server \
+        -o jsonpath='{.items[*].status.containerStatuses[*].imageID}' 2>/dev/null)" \
+      '{requested_image: $requested, pod_image: $image, pod_image_id: $image_id}' \
+      >"$slot_dir/mcp_pod_image.json" || true
 
     # The port-forward is ours, not the deploy script's. MCPServer starts one
     # as a subprocess.Popen child, which dies when that script exits, so the

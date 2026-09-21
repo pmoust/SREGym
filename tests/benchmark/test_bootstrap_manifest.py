@@ -101,6 +101,10 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "judge_model",
         "sregym_ref",
         "brain_go_ref",
+        # Which MCP server image the run deployed. No run before this field
+        # existed could say, and every one of them ran upstream's 2026-09-06
+        # build rather than the checkout's code.
+        "mcp_image",
         "stages",
         "seeded_connection_buckets",
     ):
