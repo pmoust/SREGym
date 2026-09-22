@@ -1,0 +1,14 @@
+# Build context for mcp_server/Dockerfile, whose context is the repo root
+# because it copies pyproject.toml, uv.lock and six top-level packages.
+# Docker tars the whole context to the daemon before it reads a single COPY,
+# so everything here is excluded for size alone: on the benchmark box the
+# checkout carries a full clone, the applications submodule and a populated
+# .venv by the time build_mcp_image.sh runs, none of which the image needs.
+.git
+.venv
+SREGym-applications
+sregym-results
+sregym-run-logs
+logs
+**/__pycache__
+**/.pytest_cache
