@@ -44,5 +44,11 @@ jobs:
       # No kubeconfig on this runner. The suites are written to work without
       # one, and a failure here means a test reached for a cluster it should
       # not need.
-      - name: Run the harness and driver suites
-        run: uv run pytest tests/brain_go tests/conductor -v
+      #
+      # tests/benchmark covers the shard scripts, the run manifest, the
+      # archive and the scorer. Until it was listed here it ran only when
+      # someone remembered to, so a change to run_shard.sh could land with
+      # its tests red. The suite skips the cases that need terraform or
+      # kubectl when those are absent and reaches for no cluster.
+      - name: Run the harness, driver and benchmark suites
+        run: uv run pytest tests/brain_go tests/conductor tests/benchmark -v
