@@ -726,6 +726,7 @@ def _run_main(monkeypatch, stages: list[str]) -> tuple[list[tuple[str, str]], li
     say which state it returned on.
     """
     calls: list[tuple[str, str]] = []
+    prompts: list[str] = []
     remaining = iter(stages)
 
     def wait_for_stage(targets, timeout=300):
@@ -746,7 +747,7 @@ def _run_main(monkeypatch, stages: list[str]) -> tuple[list[tuple[str, str]], li
     monkeypatch.setattr(
         driver,
         "get_app_info",
-        lambda: {"name": "astronomy-shop", "namespace": "astronomy-shop", "descriptions": ""},
+        lambda: dict(_run_main.app_info),
     )
     monkeypatch.setattr(driver, "open_investigation", lambda problem_id: ("thread-1", "uuid-1"))
     monkeypatch.setattr(driver, "wait_for_stage", wait_for_stage)
@@ -762,17 +763,24 @@ def _run_main(monkeypatch, stages: list[str]) -> tuple[list[tuple[str, str]], li
     def run_turn(prompt, thread_id, tools, counter, by_node):
         phase = "mitigation" if prompt.startswith("Your task now") else "diagnosis"
         calls.append(("turn", phase))
+        prompts.append(prompt)
 
         return "an answer"
 
     monkeypatch.setattr(driver, "run_turn", run_turn)
 
-    assert driver.main() == 0
+    assert driver.main() == _run_main.want_exit
+
+    _run_main.prompts = prompts
 
     return (
         [(kind, value) for kind, value in calls if kind not in ("submit", "stage")],
         [value for kind, value in calls if kind == "stage"],
     )
+
+
+_run_main.app_info = {"app_name": "astronomy-shop", "namespace": "astronomy-shop", "descriptions": ""}
+_run_main.want_exit = 0
 
 
 def test_the_diagnosis_history_is_exported_before_the_mitigation_turn(monkeypatch):
@@ -846,3 +854,32 @@ def test_a_teardown_that_outlasts_the_wait_still_ends_the_attempt_cleanly(monkey
         ("tool-calls", ""),
         ("history", ""),
     ]
+
+
+def test_the_diagnosis_prompt_names_the_application_the_conductor_reports(monkeypatch):
+    """/get_app returns the name under "app_name", and the prompt must carry it.
+
+    The driver read "name" and fell back to "unknown", so every diagnosis
+    prompt in every archived run said "Application: unknown" and brain-go's
+    entity resolution never had anything to resolve on the benchmark.
+    """
+    _run_main(monkeypatch, ["diagnosis", "done"])
+
+    assert "Application: astronomy-shop" in _run_main.prompts[0]
+    assert "unknown" not in _run_main.prompts[0]
+
+
+def test_a_response_with_no_app_name_ends_the_attempt_before_any_turn(monkeypatch):
+    """A missing name is a hard stop, not a placeholder.
+
+    The old default of "unknown" is exactly how the wrong key went unnoticed
+    for weeks. If the conductor's response shape changes again, the attempt
+    must fail and say which keys it got, before it spends a single LLM call.
+    """
+    monkeypatch.setattr(_run_main, "app_info", {"namespace": "astronomy-shop", "descriptions": ""})
+    monkeypatch.setattr(_run_main, "want_exit", 1)
+
+    calls, _ = _run_main(monkeypatch, ["diagnosis"])
+
+    assert ("turn", "diagnosis") not in calls
+    assert _run_main.prompts == []

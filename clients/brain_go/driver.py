@@ -927,8 +927,22 @@ def main() -> int:
         return 1
 
     app_info = get_app_info()
+    # The conductor's /get_app returns the name under "app_name". Reading
+    # "name" here left every diagnosis prompt of every archived run saying
+    # "Application: unknown", and nothing failed, so it went unnoticed for
+    # weeks. A missing name is therefore a hard stop rather than a default:
+    # the conductor sets app_name for every registered app, so its absence
+    # means the response shape changed, and the attempt must say so instead
+    # of writing a placeholder into every prompt again. The name goes into
+    # the prompt text, not onto the investigation as a pre-resolved entity.
+    app_name = app_info.get("app_name")
+    if not app_name:
+        logger.error("conductor /get_app returned no app_name: %s", sorted(app_info))
+
+        return 1
+
     params = {
-        "app_name": app_info.get("name", "unknown"),
+        "app_name": app_name,
         "namespace": app_info.get("namespace", "unknown"),
         "descriptions": app_info.get("descriptions", ""),
         "window": incident_window(app_info.get("incident_start")),
