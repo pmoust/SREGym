@@ -130,6 +130,18 @@ from scripts.benchmark.seed_connections import ENDPOINTS
 print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_BUCKETS=""
 
+# The signal each seeded connection declared, same source and same caveat as
+# the buckets above. A connection with no entry is written as "-": it reaches
+# every node in its bucket, which is what every run before signals existed
+# had. Recorded because it is the difference between a run whose metrics,
+# logs and traces agents held one server each and a run where they held the
+# same three.
+SEEDED_CONNECTION_SIGNALS=$(uv run python -c "
+from scripts.benchmark.seed_connections import ENDPOINTS, SIGNALS
+
+print(','.join(f'{path}:{\"+\".join(SIGNALS.get(path) or [\"-\"])}' for _, path, _, _ in ENDPOINTS))
+" 2>/dev/null) || SEEDED_CONNECTION_SIGNALS=""
+
 # The image the MCP pod is meant to run. Asked of the script that builds it
 # rather than restated here, so the manifest cannot name a tag nothing was
 # built under. This runs before run_shard.sh builds anything, so it records
@@ -178,6 +190,7 @@ MCP_IMAGE=$("$(dirname "$0")/build_mcp_image.sh" --print-name 2>/dev/null) || MC
   # run seeded. See the comment above SEEDED_CONNECTION_BUCKETS for what this
   # does and does not tell a reader about a node's actual bound toolset.
   echo "seeded_connection_buckets=$SEEDED_CONNECTION_BUCKETS"
+  echo "seeded_connection_signals=$SEEDED_CONNECTION_SIGNALS"
 
   # Which stages ran. See emit_stages above; run_shard.sh calls this script a
   # second time with --stages once it has generated the tasklist, because at

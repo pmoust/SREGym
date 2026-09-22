@@ -294,6 +294,21 @@ def test_the_manifest_records_the_buckets_seed_connections_actually_seeds(tmp_pa
     assert fields["seeded_connection_buckets"] == expected
 
 
+def test_the_manifest_records_the_signals_seed_connections_actually_seeds(tmp_path):
+    """seeded_connection_signals must track SIGNALS the same way.
+
+    A connection with no entry is written as "-", so the line always names
+    every seeded endpoint and a reader can tell "unscoped" from "missing".
+    """
+    from scripts.benchmark.seed_connections import ENDPOINTS, SIGNALS
+
+    fields = _write_manifest(tmp_path, "sregym-lite")
+
+    expected = ",".join(f"{path}:{'+'.join(SIGNALS.get(path) or ['-'])}" for _, path, _, _ in ENDPOINTS)
+    assert fields["seeded_connection_signals"] == expected
+    assert fields["seeded_connection_signals"] == "kubectl:-,prometheus:metrics,jaeger:traces,loki:logs"
+
+
 def test_the_shard_handoff_is_declared_once():
     """Two handoff blocks shipped on main once, from a bad rebase resolution.
 

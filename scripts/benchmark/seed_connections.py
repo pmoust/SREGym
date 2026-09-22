@@ -59,6 +59,27 @@ ENDPOINTS: list[tuple[str, str, list[str], bool]] = [
     ("sregym-loki", "loki", ["observation"], False),
 ]
 
+# Which evidence domain each observation endpoint answers, written into the
+# connection config as `signals`. Bucket alone cannot tell the three apart:
+# brain-go maps its metrics, logs and traces nodes to the one `observation`
+# bucket, so with bucket as the only tag every observation connection reached
+# all three nodes and the metrics, logs and traces agents held identical
+# toolsets (run-20260921-1250: nine tools each, the same nine). With `signals`
+# set, brain-go's ToolsForNode keeps a connection's tools on the nodes that
+# bind that signal natively and drops them elsewhere, so each agent holds its
+# own server. Values are brain-go's signal names (internal/chat/tools); an
+# unknown value is dropped there with a warning and leaves the connection
+# unscoped, which is the pre-signals behaviour, not a hidden tool.
+#
+# kubectl is absent on purpose: the state node applies no signal filter and
+# "state" is not an accepted value, so a key there would only produce the
+# warning.
+SIGNALS: dict[str, list[str]] = {
+    "prometheus": ["metrics"],
+    "jaeger": ["traces"],
+    "loki": ["logs"],
+}
+
 DISCOVERY_TIMEOUT_S = 30.0
 
 
@@ -88,9 +109,18 @@ async def discover_tools(url: str, headers: dict[str, str]) -> list[dict[str, An
 
 
 def build_config(
-    mcp_base: str, path: str, needs_session: bool, session_id: str, tools: list[dict[str, Any]]
+    mcp_base: str,
+    path: str,
+    needs_session: bool,
+    session_id: str,
+    tools: list[dict[str, Any]],
+    signals: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build one CUSTOM_MCP connection config.
+
+    `signals` is written only when non-empty. An empty list and an absent key
+    mean the same thing to brain-go (unscoped), so omitting it keeps the config
+    of an unscoped connection byte-identical to what earlier runs seeded.
 
     `tool_allowlist` is deliberately absent. It is tri-state in brain-go: absent
     exposes every cached tool, present-but-empty exposes none. Writing `[]` here
@@ -113,6 +143,9 @@ def build_config(
 
     if needs_session:
         config["headers"] = {"sregym_ssid": session_id}
+
+    if signals:
+        config["signals"] = list(signals)
 
     return config
 
@@ -218,7 +251,7 @@ def main() -> int:
             args.session,
             csrf,
             name,
-            build_config(args.mcp_base, path, needs_session, args.session_id, tools),
+            build_config(args.mcp_base, path, needs_session, args.session_id, tools, SIGNALS.get(path)),
             buckets,
         )
 
