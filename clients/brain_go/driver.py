@@ -993,9 +993,23 @@ def main() -> int:
         if opened:
             confirm_persisted(opened[1])
 
-        stage = wait_for_stage({"mitigation", "done"})
-        if stage == "done":
-            logger.info("conductor went straight to done after diagnosis")
+        # tearing_down is in the set because a diagnosis-only tasklist skips
+        # the mitigation stage, and the conductor then reports tearing_down
+        # for the whole of the Helm uninstall and the namespace-deletion wait
+        # before it says done. The wait after the mitigation turn already
+        # lists it for the same reason. Reaching it means the same thing as
+        # done here: there is no second turn coming, and the answer was
+        # submitted and confirmed above, so a teardown that outlasts the wait
+        # ends the attempt quietly rather than with a traceback.
+        try:
+            stage = wait_for_stage({"mitigation", "done", "tearing_down"})
+        except TimeoutError:
+            logger.warning("conductor did not leave the diagnosis stage; exiting anyway")
+
+            return 0
+
+        if stage != "mitigation":
+            logger.info("conductor went to %s after diagnosis; no mitigation turn", stage)
 
             return 0
 

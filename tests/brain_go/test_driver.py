@@ -717,14 +717,28 @@ def test_a_suffixed_export_does_not_overwrite_the_unsuffixed_one(monkeypatch, tm
     assert not (tmp_path / "turn_history.json").exists()
 
 
-def _run_main(monkeypatch, stages: list[str]) -> list[tuple[str, str]]:
+def _run_main(monkeypatch, stages: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
     """Drive main() through a scripted conductor, recording what it did.
 
     Everything that would leave the process is replaced. What is being pinned
-    is the order of the remaining calls, not any of their behaviour.
+    is the order of the remaining calls, not any of their behaviour. The
+    second value is the conductor states the driver consumed, so a test can
+    say which state it returned on.
     """
     calls: list[tuple[str, str]] = []
     remaining = iter(stages)
+
+    def wait_for_stage(targets, timeout=300):
+        # The conductor's stage sequence, consumed in order. A state the
+        # caller did not ask for is skipped, as the real function does by
+        # polling past it; running out of states is the real function's
+        # timeout, so the driver's handling of a slow teardown is exercised.
+        for stage in remaining:
+            calls.append(("stage", stage))
+            if stage in targets:
+                return stage
+
+        raise TimeoutError("scripted conductor never reached " + ", ".join(sorted(targets)))
 
     monkeypatch.setattr(driver, "BRAIN_API_KEY", "key")
     monkeypatch.setattr(driver, "install_signal_handlers", lambda: None)
@@ -735,7 +749,7 @@ def _run_main(monkeypatch, stages: list[str]) -> list[tuple[str, str]]:
         lambda: {"name": "astronomy-shop", "namespace": "astronomy-shop", "descriptions": ""},
     )
     monkeypatch.setattr(driver, "open_investigation", lambda problem_id: ("thread-1", "uuid-1"))
-    monkeypatch.setattr(driver, "wait_for_stage", lambda targets, timeout=300: next(remaining))
+    monkeypatch.setattr(driver, "wait_for_stage", wait_for_stage)
     monkeypatch.setattr(driver, "confirm_persisted", lambda uuid: calls.append(("confirm", uuid)))
     monkeypatch.setattr(driver, "submit_to_conductor", lambda text: calls.append(("submit", text)))
     monkeypatch.setattr(driver, "write_tool_calls", lambda *args: calls.append(("tool-calls", "")))
@@ -755,7 +769,10 @@ def _run_main(monkeypatch, stages: list[str]) -> list[tuple[str, str]]:
 
     assert driver.main() == 0
 
-    return [(kind, value) for kind, value in calls if kind != "submit"]
+    return (
+        [(kind, value) for kind, value in calls if kind not in ("submit", "stage")],
+        [value for kind, value in calls if kind == "stage"],
+    )
 
 
 def test_the_diagnosis_history_is_exported_before_the_mitigation_turn(monkeypatch):
@@ -766,7 +783,7 @@ def test_the_diagnosis_history_is_exported_before_the_mitigation_turn(monkeypatc
     119 of the 121 histories archived from run-20260921-1250 are that run, and
     the diagnosis run they were meant to record is gone.
     """
-    calls = _run_main(monkeypatch, ["diagnosis", "mitigation", "done"])
+    calls, _ = _run_main(monkeypatch, ["diagnosis", "mitigation", "done"])
 
     assert calls == [
         ("turn", "diagnosis"),
@@ -784,7 +801,44 @@ def test_a_diagnosis_only_attempt_exports_one_history(monkeypatch):
     A second copy would duplicate several MB per attempt and record nothing
     the unsuffixed file does not already hold.
     """
-    calls = _run_main(monkeypatch, ["diagnosis", "done"])
+    calls, _ = _run_main(monkeypatch, ["diagnosis", "done"])
+
+    assert calls == [
+        ("turn", "diagnosis"),
+        ("confirm", "uuid-1"),
+        ("tool-calls", ""),
+        ("history", ""),
+    ]
+
+
+def test_a_diagnosis_only_attempt_returns_while_the_conductor_tears_down(monkeypatch):
+    """The conductor never says mitigation on a diagnosis-only tasklist.
+
+    It goes from diagnosis to tearing_down, runs the Helm uninstall and the
+    namespace-deletion wait, and only then says done. The wait after the
+    diagnosis submit has to accept tearing_down, or every attempt sits
+    through the whole teardown and a slow one ends in an unhandled timeout.
+    """
+    calls, consumed = _run_main(monkeypatch, ["diagnosis", "tearing_down", "done"])
+
+    assert calls == [
+        ("turn", "diagnosis"),
+        ("confirm", "uuid-1"),
+        ("tool-calls", ""),
+        ("history", ""),
+    ]
+    # Returned on tearing_down itself. Waiting on for done would mean sitting
+    # through the whole teardown, up to the wait's own deadline, per attempt.
+    assert consumed == ["diagnosis", "tearing_down"]
+
+
+def test_a_teardown_that_outlasts_the_wait_still_ends_the_attempt_cleanly(monkeypatch):
+    """A conductor that never leaves the diagnosis stage within the wait.
+
+    The answer is already submitted and confirmed, so nothing is lost; the
+    attempt must return 0 and still export, not die with a traceback.
+    """
+    calls, _ = _run_main(monkeypatch, ["diagnosis"])
 
     assert calls == [
         ("turn", "diagnosis"),
