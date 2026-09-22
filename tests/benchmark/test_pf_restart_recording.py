@@ -400,9 +400,9 @@ def _curl(healthz_code: str, connect_exit: int) -> str:
     """A fake curl for both probes, told apart by the URL each one requests.
 
     mcp_probe_code asks for /healthz and is read for its printed status code.
-    pf_port_accepts asks for / and is read for its exit status alone, where 7
-    is curl's "failed to connect" and anything else means the handshake
-    completed.
+    pf_port_accepts asks for / and is read for its exit status alone: 0 and
+    28 mean the forward carries a stream, anything else (7 refused, 52 empty
+    reply, 56 reset) means it cannot.
     """
     return (
         "curl() {\n"

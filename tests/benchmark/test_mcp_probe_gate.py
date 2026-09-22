@@ -229,9 +229,36 @@ def _predicate(snippet: str, port: int) -> bool:
 
 
 def test_a_port_nothing_listens_on_does_not_accept():
-    """Connection refused, curl exit 7. This is the one case that proves the
-    forward is gone, and the only one the supervisor may restart on."""
+    """Connection refused, curl exit 7: nothing is bound, the forward is gone."""
     assert _predicate("pf_port_accepts", _free_port()) is False
+
+
+def test_a_port_that_accepts_and_closes_does_not_accept():
+    """A listener that accepts and closes at once, curl exit 52 or 56.
+
+    This is `kubectl port-forward` with its process still up and the pod
+    behind it unable to take the stream: every connect succeeds and every
+    request then fails. The process check alone would call it alive, and
+    the supervisor would then never restart a forward on which every tool
+    call fails. It has to read as not accepting so the restart branch is
+    reached.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def accept_and_close():
+        conn, _ = listener.accept()
+        conn.close()
+
+    threading.Thread(target=accept_and_close, daemon=True).start()
+    try:
+        accepts = _predicate("pf_port_accepts", port)
+    finally:
+        listener.close()
+
+    assert accepts is False
 
 
 def test_a_port_that_accepts_and_never_answers_still_accepts():
@@ -245,8 +272,8 @@ def test_a_port_that_accepts_and_never_answers_still_accepts():
 
     The accepted socket is held for the whole call. Dropping it would let
     CPython close it and turn this into curl exit 52 rather than the timeout
-    this case is about, which pf_port_accepts also reads as accepted, so the
-    test would pass without exercising anything.
+    this case is about, and 52 reads as not accepting, so the test would fail
+    for the wrong reason.
     """
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

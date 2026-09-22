@@ -215,16 +215,22 @@ mcp_probe_answered() {
   [ -n "$1" ] && [ "$1" != "000" ]
 }
 
-# Whether the forwarded local port still completes a TCP handshake.
+# Whether the forwarded local port can still carry a stream.
 #
-# This asks one question and reads one answer: did connect() succeed? curl
-# exit 7 is "failed to connect", which on loopback means nothing is bound,
-# so `kubectl port-forward` is no longer listening. Every other exit means
-# the handshake completed and the forward is still carrying bytes: 0 when
-# the app replied, 28 when it accepted and then said nothing inside the
-# budget. 28 is the case this function exists for, and it must read as
-# alive, because a busy server and a dead forward look identical to the
-# /healthz probe and only differ here.
+# Read from curl's exit status alone. Two exits mean the forward is fine:
+# 0, the app replied with some status, and 28, the connect completed and
+# then nothing came back inside the budget. 28 is the case this function
+# exists for and it must read as alive: a server whose event loop is blocked
+# accepts the handshake and says nothing, which is exactly what a dead
+# forward looks like to the /healthz probe, and only differs here.
+#
+# Every other exit means the forward cannot carry a stream. 7 is "failed to
+# connect": nothing is bound, `kubectl port-forward` is no longer listening.
+# 52 (empty reply) and 56 (recv failure) are a listener that accepted and
+# then closed or reset: that is what kubectl does when its process is still
+# up but the pod behind it cannot take the stream, and every real call on
+# that forward fails the same way. Treating those as alive would leave the
+# slot on a forward nothing can recover.
 #
 # The path is "/" rather than /healthz on purpose: the reply is discarded
 # either way, and routing is not what is being measured.
@@ -242,7 +248,7 @@ pf_port_accepts() {
     --max-time "$PF_CONNECT_TIMEOUT_SECONDS" \
     "http://127.0.0.1:$MCP_SERVER_PORT/" 2>/dev/null
   rc=$?
-  [ "$rc" -ne 7 ]
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 28 ]
 }
 
 # Whether the forward is worth keeping. Alive means both halves hold: the
@@ -627,9 +633,11 @@ run_slot() {
           # dying kubectl could release the port first, and it cost a live
           # tool call a "connection refused" every time it ran. It is no
           # longer needed: the branch is only reached once pf_forward_alive
-          # has said the process is gone or the port refuses a connection, so
-          # there is no listener left to release and nothing for the new
-          # kubectl to race.
+          # has said the process is gone or the port cannot carry a stream.
+          # In the first two cases there is no listener left to release; in
+          # the accept-and-close case the old process is killed just above
+          # and its socket was already dropping connections, so the new
+          # kubectl has nothing to race.
           nohup kubectl port-forward svc/mcp-server "$MCP_SERVER_PORT:9954" \
             -n sregym --address 0.0.0.0 >>"/var/log/sregym-pf-$slot.log" 2>&1 &
           new_pid="$!"
