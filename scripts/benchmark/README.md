@@ -413,6 +413,71 @@ diagnosis-only run are comparable with earlier runs; the run total and
 time-to-done are not, and `score_run.py` refuses to report a mitigation or
 E2E figure when the stage did not run.
 
+## Which arm a run is
+
+`SREGYM_ARM`, set from a scenario's `arm` tfvars value. Two values, and the
+default is what every archived run is.
+
+`mcp` seeds four CUSTOM_MCP connections at SREGym's own MCP endpoints and
+nothing else, so brain-go reaches the cluster only through them. Its native
+connectors, its entity graph, change events and the knowledge path never run.
+
+`native` seeds brain-go's own Kubernetes, Prometheus, Loki and Jaeger
+connections against the same in-cluster backends, and installs the edge agent
+into the slot's kind cluster so the entity graph populates and change events
+are produced. Concretely, per slot:
+
+- The kind cluster is created with its API server on the host's private
+  address instead of loopback, because brain-go dials it from inside a
+  container. kind puts that address in the API server certificate's SANs.
+- A read-only ServiceAccount is created with get/list on exactly the objects
+  brain-go's Kubernetes client reaches (core configmaps, events, namespaces,
+  nodes, persistentvolumeclaims, pods, services; apps controllerrevisions,
+  daemonsets, deployments, replicasets, statefulsets; batch jobs) and nothing
+  on chaos-mesh's CRDs, and its token goes into the connection as a
+  kubeconfig. The grant is derived from `git grep 'clientset\.' --
+  internal/clients/kubernetes` in brain-go, not hand-picked; `native_arm.sh`
+  carries the derivation and how to redo it. `batch/jobs` is the one whose
+  absence is not survivable: `ListWorkloads` returns an error for the whole
+  call if listing Jobs is refused, so `k8s_list_workloads` would fail every
+  time.
+- Host port-forwards are kept alive to `prometheus-server`, `loki` and
+  `jaeger-out` in the `observe` namespace. They are supervised rather than
+  started once, because those services belong to the application and the
+  conductor deploys it per problem.
+- The edge agent is installed from the `nofire-edge` chart, publishing to
+  `http://<private ip>:8000/api/edge` every 30s under a key of type `edge`
+  minted through `POST /api/account/api-keys`. Causal analysis, network
+  observability and Sentry are off. The image and the chart are fetched once
+  per box and handed to each slot, since slots run concurrently and would
+  otherwise race on one download path.
+- brain-go's api service is published on the host's private address as well as
+  loopback, through a `docker-compose.override.yml` the setup script writes
+  into the brain-go checkout. Only that service: `BIND_ADDR` is one value for
+  all eight services in that compose file, so using it would publish postgres,
+  localstack and temporal too.
+- `SREGYM_BASELINE_SYNC_SECONDS` is 150, the window the conductor already
+  sleeps before injecting a fault.
+
+At the end of that window, and before the fault, the attempt is gated: the
+three telemetry backends must answer and brain-go must hold at least one
+entity. An attempt that fails either is aborted rather than scored, because an
+attempt with an empty graph is the MCP arm's information set under this arm's
+label.
+
+The manifest records `arm`, `edge_image` and `edge_chart_version`, and
+`seeded_connection_buckets`/`seeded_connection_signals` describe whichever
+set the run actually seeded. Per attempt, `arm-native.json` lands beside
+`fault-spec.json` with the entity counts by type and whether a change event
+exists on the mutated component. `archive_run.sh` already ships `*.json`, so
+it comes back with everything else.
+
+Smoke it on one problem before a paired run:
+
+```bash
+./scripts/benchmark/launch.sh smoke-native
+```
+
 ## Running your own branch
 
 `--sregym-ref`/`--brain-go-ref` (or `sregym_ref`/`brain_go_ref` directly in

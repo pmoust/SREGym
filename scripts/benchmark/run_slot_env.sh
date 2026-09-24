@@ -44,6 +44,13 @@
 #   MCP_SERVER_PORT    host side of the MCP port-forward. The in-cluster service
 #                      port stays 9954.
 #   K8S_PROXY_PORT     the conductor's filtering proxy, host-bound.
+#   SREGYM_PROMETHEUS_PORT, SREGYM_LOKI_PORT, SREGYM_JAEGER_PORT
+#                      host side of the native arm's port-forwards to the
+#                      three in-cluster telemetry backends. Emitted at every
+#                      slot in both arms: they isolate a slot the same way
+#                      the three above do, and the MCP arm reads none of
+#                      them, so gating them on the arm would put arm
+#                      knowledge in the one script whose job is ports.
 #
 # MCP_SERVER_URL is deliberately not set here: main.py derives it from the
 # resolved MCP_SERVER_PORT, so setting both invites them to disagree.
@@ -66,9 +73,9 @@ esac
 # Strip any leading zeros so "08" is 8 rather than an invalid octal literal.
 SLOT=$((10#$SLOT))
 
-# The three port families are 18000, 9954 and 16443. They stay disjoint well
-# past any workable slot count; the cap is here so a typo cannot silently
-# collide one family with the next.
+# The port families are 18000, 9954, 16443, 21000, 22000 and 23000. They stay
+# disjoint well past any workable slot count; the cap is here so a typo cannot
+# silently collide one family with the next.
 if [ "$SLOT" -gt 500 ]; then
     die "slot $SLOT is out of range (max 500): the port families would overlap"
 fi
@@ -86,4 +93,7 @@ export SREGYM_CACHE_DIR="${SLOT_DIR}/cache"
 export API_PORT="$((18000 + SLOT))"
 export MCP_SERVER_PORT="$((9954 + SLOT))"
 export K8S_PROXY_PORT="$((16443 + SLOT))"
+export SREGYM_PROMETHEUS_PORT="$((21000 + SLOT))"
+export SREGYM_LOKI_PORT="$((22000 + SLOT))"
+export SREGYM_JAEGER_PORT="$((23000 + SLOT))"
 EOF

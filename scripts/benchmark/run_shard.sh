@@ -143,6 +143,76 @@ unset SREGYM_WAIT_FAULT_EVENT SREGYM_WAIT_EDGE_SYNC SREGYM_STELLARIZE \
       SREGYM_STABILIZE_PODS SREGYM_GATE_SKIP SREGYM_BASELINE_SYNC_SECONDS \
       SREGYM_SKIP_JUDGE_PREFLIGHT
 
+# --- arm --------------------------------------------------------------------
+# Which arm this shard runs. Resolved by arm.py, which is the one place that
+# knows the accepted values, so an unrecognised SREGYM_ARM ends the run here
+# rather than silently producing the default arm under another arm's label.
+#
+# Exported, because it is read in four more places: setup_brain_go.sh (already
+# run by the bootstrap above), seed_slot.sh, the conductor's pre-fault gate and
+# main.py's per-attempt evidence.
+SREGYM_ARM=$(uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/arm.py") || {
+  terminate "SREGYM_ARM is not a recognised arm, see the error above"
+  exit 1
+}
+export SREGYM_ARM
+echo "[bootstrap] arm $SREGYM_ARM"
+
+if [ "$SREGYM_ARM" = "native" ]; then
+  # The pre-fault window. The conductor sleeps this long after deploying the
+  # application and before injecting the fault, which is the hook
+  # SREGYM_BASELINE_SYNC_SECONDS was added for and never used.
+  #
+  # 150s, which is five of the edge agent's 30s intervals (see
+  # native_arm.sh). The window has to contain the agent noticing a
+  # just-deployed application (one resync), publishing it (one graph post) and
+  # brain-go ingesting it, and 150s absorbs one missed cycle of each without
+  # being a large share of an attempt.
+  #
+  # The number is not what makes this correct. The gate that runs at the end
+  # of the wait fails the attempt when the graph is still empty, so a window
+  # that turns out to be too short is loud rather than a run of attempts that
+  # quietly measured nothing.
+  export SREGYM_BASELINE_SYNC_SECONDS="${SREGYM_BASELINE_SYNC_SECONDS:-150}"
+  echo "[bootstrap] pre-fault window ${SREGYM_BASELINE_SYNC_SECONDS}s"
+
+  # The address the in-cluster edge agent reaches brain-go's api service on,
+  # and the address the native telemetry connections are registered against.
+  # Resolved through native_arm.sh so this, setup_brain_go.sh and the
+  # validation all read one implementation, and exported so seed_slot.sh
+  # takes the same answer.
+  SREGYM_PRIVATE_IP=$("$WORKDIR/scripts/benchmark/native_arm.sh" private-ip) || {
+    terminate "could not determine a private IPv4 address; the edge agent would have nowhere to publish"
+    exit 1
+  }
+  export SREGYM_PRIVATE_IP
+  EDGE_GRAPH_URL="http://${SREGYM_PRIVATE_IP}:8000/api/edge"
+  echo "[bootstrap] edge graph endpoint $EDGE_GRAPH_URL"
+
+  # Pulled once per box and loaded into each slot's node below, the same shape
+  # as the MCP image. Pulling per slot instead would put N anonymous Docker
+  # Hub pulls of the same image on every box in the fleet, which is how a run
+  # meets a rate limit it has no credential to raise.
+  EDGE_IMAGE=$("$WORKDIR/scripts/benchmark/native_arm.sh" edge-versions | cut -f1)
+  if ! docker pull "$EDGE_IMAGE" >/dev/null; then
+    terminate "could not pull the edge agent image $EDGE_IMAGE"
+    exit 1
+  fi
+  echo "[bootstrap] edge agent image $EDGE_IMAGE"
+
+  # The chart, once per box and for the same reason. Slots run concurrently in
+  # background subshells, so a per-slot download to one shared path lets one
+  # slot hand helm a file another is still writing, and the install fails
+  # non-deterministically. Fetched here, before any slot starts, and passed
+  # down by path.
+  SREGYM_EDGE_CHART=$("$WORKDIR/scripts/benchmark/native_arm.sh" fetch-chart) || {
+    terminate "could not fetch the edge agent chart"
+    exit 1
+  }
+  export SREGYM_EDGE_CHART
+  echo "[bootstrap] edge agent chart $SREGYM_EDGE_CHART"
+fi
+
 # Sync after every problem rather than at the end, so an interruption costs one
 # problem. The watcher is cheap and independent of the run's own exit path.
 #
@@ -333,6 +403,20 @@ run_slot() {
     export SREGYM_SHARD_INDEX="$SHARD_INDEX"
     export SREGYM_SLOT="$slot"
 
+    # The native arm binds the cluster's API server to the host's private
+    # address instead of loopback, because brain-go's Kubernetes connector
+    # dials it from inside a container. kind puts that address in the API
+    # server certificate's SANs, so the slot's own kubeconfig stays usable and
+    # TLS still verifies. The MCP arm gets the committed config untouched.
+    if [ "$SREGYM_ARM" = "native" ]; then
+      KIND_CONFIG=$(SREGYM_KIND_CONFIG_OUT="$slot_dir/kind-config.yaml" \
+        "$WORKDIR/scripts/benchmark/native_arm.sh" kind-config x86 "$SREGYM_PRIVATE_IP") || {
+        echo "[slot $slot] could not write the native arm's kind config, slot aborted"
+        return 1
+      }
+      export KIND_CONFIG
+    fi
+
     # Each slot needs its own kind cluster. Nothing else creates it: main.py
     # exits with "Missing kubeconfig. Please set up a cluster." if it is absent,
     # and the bootstrap installs kind without ever calling it.
@@ -351,6 +435,17 @@ run_slot() {
     if ! kind load docker-image "$SREGYM_MCP_IMAGE" --name "$KIND_CLUSTER_NAME"; then
       echo "[slot $slot] loading the MCP image into $KIND_CLUSTER_NAME failed, slot aborted"
       return 1
+    fi
+
+    # Same reasoning for the edge agent's image, pulled once per box above.
+    # The Helm release sets imagePullPolicy: IfNotPresent, so the node uses
+    # this copy rather than reaching Docker Hub once per slot.
+    if [ "$SREGYM_ARM" = "native" ]; then
+      echo "[slot $slot] loading $EDGE_IMAGE into $KIND_CLUSTER_NAME"
+      if ! kind load docker-image "$EDGE_IMAGE" --name "$KIND_CLUSTER_NAME"; then
+        echo "[slot $slot] loading the edge image into $KIND_CLUSTER_NAME failed, slot aborted"
+        return 1
+      fi
     fi
 
     # Put an MCP server in the cluster before seeding. The conductor deploys one
@@ -693,7 +788,42 @@ run_slot() {
       for pid in $(lsof -ti "tcp:$MCP_SERVER_PORT" 2>/dev/null); do
         kill "$pid" 2>/dev/null || true
       done
+
+      # The native arm's telemetry keeper and the three forwards it owns.
+      # Keeper first, for the same reason the MCP supervisor goes first: it
+      # would otherwise replace a forward after the kill. Then by port,
+      # because the keeper forks kubectl and records its pid as two
+      # statements and a kill landing between them leaves an orphan
+      # reparented to init.
+      if [ -n "${TELEMETRY_KEEPER_PID:-}" ]; then
+        kill "$TELEMETRY_KEEPER_PID" 2>/dev/null || true
+        for port in "$SREGYM_PROMETHEUS_PORT" "$SREGYM_LOKI_PORT" "$SREGYM_JAEGER_PORT"; do
+          for pid in $(lsof -ti "tcp:$port" 2>/dev/null); do
+            kill "$pid" 2>/dev/null || true
+          done
+        done
+      fi
     }
+
+    # The native arm's two prerequisites for seeding, in the order the seed
+    # needs them: the credential brain-go's Kubernetes connection
+    # authenticates as, then the host forwards its three telemetry
+    # connections are registered against.
+    if [ "$SREGYM_ARM" = "native" ]; then
+      echo "[slot $slot] creating the read-only ServiceAccount and kubeconfig"
+      SREGYM_NATIVE_KUBECONFIG="$slot_dir/brain-readonly.kubeconfig"
+      if ! "$WORKDIR/scripts/benchmark/native_arm.sh" kubeconfig nofire-edge "$SREGYM_NATIVE_KUBECONFIG"; then
+        echo "[slot $slot] could not build the read-only kubeconfig, slot aborted"
+        stop_pf
+        return 1
+      fi
+      export SREGYM_NATIVE_KUBECONFIG
+
+      echo "[slot $slot] keeping telemetry forwards on $SREGYM_PROMETHEUS_PORT/$SREGYM_LOKI_PORT/$SREGYM_JAEGER_PORT"
+      TELEMETRY_KEEPER_PID=$("$WORKDIR/scripts/benchmark/native_arm.sh" forwards \
+        "$SREGYM_PROMETHEUS_PORT" "$SREGYM_LOKI_PORT" "$SREGYM_JAEGER_PORT" \
+        "/var/log/sregym-telemetry-pf-$slot.log")
+    fi
 
     # Every slot seeds its own tenant, slot 0 included. It used to be special,
     # seeded by setup_brain_go.sh while that script brought the shared stack up,
@@ -715,6 +845,19 @@ run_slot() {
       echo "[slot $slot] tenant seeding failed, slot aborted"
       stop_pf
       return 1
+    fi
+
+    # Last, because it needs the edge API key seed_slot.sh only mints once the
+    # tenant exists. --wait inside, so a slot whose agent cannot start fails
+    # here rather than at the first attempt's entity-count gate.
+    if [ "$SREGYM_ARM" = "native" ]; then
+      echo "[slot $slot] installing the edge agent into $KIND_CLUSTER_NAME"
+      if ! "$WORKDIR/scripts/benchmark/native_arm.sh" install-edge \
+             "$KIND_CLUSTER_NAME" "$EDGE_GRAPH_URL" "$BRAIN_EDGE_API_KEY" nofire-edge; then
+        echo "[slot $slot] edge agent install failed, slot aborted"
+        stop_pf
+        return 1
+      fi
     fi
 
     cd "$slot_dir" || { stop_pf; return 1; }

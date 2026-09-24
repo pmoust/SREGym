@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Which benchmark arm a run is: SREGYM_ARM.
+
+Two values, and the default reproduces every run archived so far.
+
+    mcp     brain-go reaches the cluster through SREGym's four CUSTOM_MCP
+            endpoints and nothing else. The default, and the anchor every
+            other arm is compared against, so it must stay byte-identical.
+
+    native  brain-go reaches the same four backends through its own
+            connectors (kubernetes, prometheus, loki, jaeger) and the edge
+            agent runs in the slot's cluster, so the entity graph and change
+            events exist during the attempt.
+
+An unrecognised value is a hard stop, not a fallback to mcp. A typo that
+silently selected the default would produce a run that reads as arm B in the
+launch command and is arm A in every artifact, which is the one outcome an
+arm comparison cannot survive. Same reasoning as SREGYM_STAGES in
+write_tasklist.py.
+
+Run as a script it prints the resolved arm and exits 0, or prints the reason
+and exits 2, so a shell can both validate and read the value in one call:
+
+    ARM=$(uv run python scripts/benchmark/arm.py) || terminate ...
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# The MCP arm. Also the value an unset SREGYM_ARM resolves to.
+ARM_MCP = "mcp"
+# The native-connector and edge-agent arm.
+ARM_NATIVE = "native"
+
+ARMS = (ARM_MCP, ARM_NATIVE)
+
+
+def resolve_arm(value: str | None) -> str:
+    """Return the arm named by value, defaulting to mcp on an absent one.
+
+    Raises ValueError on anything else. Whitespace is stripped because the
+    value travels through terraform and a shell variable before it gets here,
+    and a trailing newline is not a different arm.
+    """
+    spec = (value or "").strip()
+    if not spec:
+        return ARM_MCP
+
+    if spec not in ARMS:
+        raise ValueError(f"SREGYM_ARM must be one of {sorted(ARMS)}, got: {spec!r}")
+
+    return spec
+
+
+def current_arm(env: dict[str, str] | None = None) -> str:
+    """The arm this process runs under, read from the environment."""
+    source = os.environ if env is None else env
+
+    return resolve_arm(source.get("SREGYM_ARM"))
+
+
+def is_native(env: dict[str, str] | None = None) -> bool:
+    """Whether this process runs under the native arm."""
+    return current_arm(env) == ARM_NATIVE
+
+
+def main() -> int:
+    try:
+        print(current_arm())
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

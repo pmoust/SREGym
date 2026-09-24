@@ -29,6 +29,7 @@ from rich.progress import (
 
 from clients.harness.problem_id import HARNESS_ARTIFACT_ID_ENV, HARNESS_PROBLEM_ID_ENV
 from logger import console, init_logger
+from scripts.benchmark import brain_graph
 from sregym.agent_launcher import AgentLauncher
 from sregym.agent_registry import get_agent, list_agents
 from sregym.conductor.conductor import Conductor, ConductorConfig
@@ -282,6 +283,59 @@ def _write_fault_spec(run_dir: Path, conductor, problem_id: str, attempt: int) -
         path.write_text(json.dumps(spec, indent=2, sort_keys=True, default=str) + "\n")
     except OSError as exc:
         logger.warning("Could not write %s: %s", path, exc)
+
+
+def _write_native_arm_evidence(run_dir: Path, conductor) -> None:
+    """Record what made this attempt the native arm, beside its other artifacts.
+
+    Two halves, gathered at the two moments each is knowable. The entity
+    counts by type come from the conductor's pre-fault gate, which is the only
+    point at which "the graph was populated before the fault" can be observed
+    at all. The change events come from here, after the agent has run, because
+    a change event on the mutated object cannot exist until the edge agent has
+    published at least once since the injection.
+
+    Written as JSON into the published directory, where archive_run.sh's
+    existing *.json include already ships it, so no new plumbing carries it
+    off the box.
+
+    A no-op under the MCP arm, and non-fatal under either. The gate has
+    already failed the attempt if the graph was empty; everything here is
+    reporting, and a run's numbers must not be lost to a failed read of the
+    evidence behind them.
+    """
+    evidence = dict(getattr(conductor, "native_arm_evidence", None) or {})
+    if evidence.get("arm") != "native":
+        return
+
+    spec_path = run_dir / "fault-spec.json"
+    try:
+        spec = json.loads(spec_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        spec = {}
+        evidence["fault_spec_error"] = f"{type(exc).__name__}: {exc}"
+
+    cluster = evidence.get("cluster") or os.environ.get("KIND_CLUSTER_NAME", "")
+    session = os.environ.get("BRAIN_SESSION", "")
+    base = os.environ.get("BRAIN_ADMIN_API_URL", "").rstrip("/")
+
+    if spec and cluster and session and base:
+        try:
+            evidence["change_events"] = brain_graph.change_events(
+                base,
+                session,
+                cluster,
+                spec.get("component", ""),
+                spec.get("namespace", ""),
+                brain_graph.parse_injected_at(spec.get("injected_at")),
+            )
+        except Exception as exc:  # noqa: BLE001 - evidence must never fail an attempt
+            evidence["change_events"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        (run_dir / "arm-native.json").write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", run_dir / "arm-native.json", exc)
 
 
 def _token_snapshot(out: Path) -> None:
@@ -865,6 +919,9 @@ def driver_loop(
 
                 if published_run_dir is not None:
                     _write_fault_spec(published_run_dir, conductor, pid, attempt)
+                    # After the fault spec, which names the component this
+                    # reads change events for.
+                    _write_native_arm_evidence(published_run_dir, conductor)
                     _publish_archive(run, published_run_dir)
 
                 all_results_for_agent.append(snapshot)

@@ -17,6 +17,14 @@
 # cluster/kubeconfig/cache dir and the MCP/proxy/conductor host ports each
 # slot's harness process needs; this script only owns the brain-go side.
 #
+# SREGYM_ARM selects what gets registered. Under "mcp" (the default) that is
+# the four CUSTOM_MCP endpoints and nothing else, byte for byte what every
+# archived run seeded. Under "native" it is brain-go's own Kubernetes,
+# Prometheus, Loki and Jaeger connections against the same backends, plus the
+# edge API key the in-cluster agent publishes the entity graph with. The two
+# are exclusive: seeding both would give every node two servers for the same
+# signal and the comparison would measure neither arm.
+#
 # Usage:
 #   scripts/benchmark/seed_slot.sh <customer> <mcp-port> [brain-api-url]
 #
@@ -26,6 +34,9 @@
 #   BRAIN_API_KEY        the CLI token, for /cli/chat on the chat service
 #   BRAIN_SESSION        the owner session cookie, for the api service
 #   BRAIN_ADMIN_API_URL  the api service base
+#
+# The native arm prints a fourth, BRAIN_EDGE_API_KEY, which the caller hands
+# to the edge agent's Helm release.
 #
 # The last two exist because a CLI API key carries no permissions at all
 # (authz.go's APIServicePermissions returns nil for APIKeyTypeCLI), so anything
@@ -106,41 +117,104 @@ docker compose --env-file deploy/.env run --rm -T --no-deps \
   seed seed dev-stack --customer "$CUSTOMER" 1>&2 \
   || die "brainctl seed dev-stack failed for $CUSTOMER"
 
-# --- register the MCP connections --------------------------------------------
-# /kubectl/sse is a Server-Sent Events endpoint: it holds the connection open
-# to stream rather than answering and closing. setup_brain_go.sh's version of
-# this check (`curl -s -o /dev/null --max-time 3 ...` in an until loop) can
-# never succeed once the server is actually up: curl reads the 200 status line
-# promptly, then blocks on the body, which never ends, so --max-time always
-# fires and curl's own exit code is always 28 (timeout) -- confirmed directly,
-# five consecutive attempts against a server already proven reachable by a
-# plain manual curl all returned http_code=200 and exit 28. The fix is to read
-# the status curl captured rather than trust its exit code: a 200 means the
-# endpoint answered, whether or not the (infinite) stream ever finished.
-log "waiting for the SREGym MCP server at $MCP_BASE"
-deadline=$(( $(date +%s) + READY_TIMEOUT ))
-until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${MCP_BASE}/kubectl/sse" 2>/dev/null)" = "200" ]; do
-  [ "$(date +%s)" -lt "$deadline" ] || die "SREGym MCP server not reachable at $MCP_BASE"
-  sleep 5
-done
-
-log "registering four CUSTOM_MCP connections"
-# --project, not a bare `uv run`: this script cd'd into $BRAIN_GO_DIR (a Go
-# repo, no pyproject.toml) and never returns to the sregym checkout, so a
-# plain `uv run` resolves its project from the wrong directory and silently
-# falls back to a Python with none of this repo's dependencies installed --
+# --- where this script's siblings live ---------------------------------------
+# Resolved before the arm branch, because both arms call a script beside this
+# one and this script has already cd'd into $BRAIN_GO_DIR. --project, not a
+# bare `uv run`: that directory is a Go repo with no pyproject.toml, so a
+# plain `uv run` resolves its project from the wrong tree and silently falls
+# back to a Python with none of this repo's dependencies installed --
 # confirmed directly (ModuleNotFoundError: requests, a real, declared
 # dependency that uv sync had already installed).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SREGYM_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \
-  --brain-url "$BRAIN_API_URL" \
-  --mcp-base "$MCP_BASE" \
-  --session "$DEV_SESSION" \
-  --session-id "sregym-${CUSTOMER}" \
-  1>&2
+
+# --- seed_mcp: the four CUSTOM_MCP connections -------------------------------
+# Unchanged from before the arm flag existed, and it must stay that way: this
+# is the arm every other arm is compared against.
+seed_mcp() {
+  # /kubectl/sse is a Server-Sent Events endpoint: it holds the connection open
+  # to stream rather than answering and closing. setup_brain_go.sh's version of
+  # this check (`curl -s -o /dev/null --max-time 3 ...` in an until loop) can
+  # never succeed once the server is actually up: curl reads the 200 status line
+  # promptly, then blocks on the body, which never ends, so --max-time always
+  # fires and curl's own exit code is always 28 (timeout) -- confirmed directly,
+  # five consecutive attempts against a server already proven reachable by a
+  # plain manual curl all returned http_code=200 and exit 28. The fix is to read
+  # the status curl captured rather than trust its exit code: a 200 means the
+  # endpoint answered, whether or not the (infinite) stream ever finished.
+  log "waiting for the SREGym MCP server at $MCP_BASE"
+  local deadline
+  deadline=$(( $(date +%s) + READY_TIMEOUT ))
+  until [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${MCP_BASE}/kubectl/sse" 2>/dev/null)" = "200" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || die "SREGym MCP server not reachable at $MCP_BASE"
+    sleep 5
+  done
+
+  log "registering four CUSTOM_MCP connections"
+  uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_connections.py" \
+    --brain-url "$BRAIN_API_URL" \
+    --mcp-base "$MCP_BASE" \
+    --session "$DEV_SESSION" \
+    --session-id "sregym-${CUSTOMER}" \
+    1>&2
+}
+
+# --- seed_native: brain-go's own connectors, plus the edge key ---------------
+# The three telemetry URLs are the host side of the port-forwards run_shard.sh
+# keeps alive to prometheus-server, loki and jaeger-out in the observe
+# namespace: the same three backends the MCP endpoints proxy to, reached
+# directly instead of through them.
+#
+# The forwards are not waited on here. Those services belong to the
+# application, which the conductor deploys per problem, so at slot-seed time
+# they do not exist yet and will not until the first problem starts. What
+# proves they are reachable is the per-attempt gate in the pre-fault window,
+# which is also the only point at which the answer matters.
+seed_native() {
+  [ -n "${SREGYM_PROMETHEUS_PORT:-}" ] && [ -n "${SREGYM_LOKI_PORT:-}" ] && [ -n "${SREGYM_JAEGER_PORT:-}" ] \
+    || die "the native arm needs SREGYM_PROMETHEUS_PORT, SREGYM_LOKI_PORT and SREGYM_JAEGER_PORT from run_slot_env.sh"
+  [ -n "${SREGYM_NATIVE_KUBECONFIG:-}" ] \
+    || die "the native arm needs SREGYM_NATIVE_KUBECONFIG, the read-only kubeconfig native_arm.sh wrote"
+  [ -f "$SREGYM_NATIVE_KUBECONFIG" ] \
+    || die "no read-only kubeconfig at $SREGYM_NATIVE_KUBECONFIG"
+
+  log "registering four native connections"
+  uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
+    --brain-url "$BRAIN_API_URL" \
+    --session "$DEV_SESSION" \
+    --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
+    --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
+    --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
+    --kubeconfig-file "$SREGYM_NATIVE_KUBECONFIG" \
+    1>&2 \
+    || die "native connection seeding failed"
+
+  log "minting this slot's edge API key"
+  EDGE_API_KEY="$(uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/mint_edge_key.py" \
+    --brain-url "$BRAIN_API_URL" \
+    --session "$DEV_SESSION" \
+    --name "sregym-edge-${CUSTOMER}")" \
+    || die "could not mint the edge API key"
+  [ -n "$EDGE_API_KEY" ] || die "the minted edge API key is empty"
+}
+
+# --- which arm this slot seeds -----------------------------------------------
+# Resolved by arm.py rather than read here, so a typo is a hard stop in one
+# place instead of a silent fallback in several.
+ARM="$(uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/arm.py")" \
+  || die "SREGYM_ARM is not a recognised arm; see the message above"
+log "arm: $ARM"
+
+if [ "$ARM" = "native" ]; then
+  seed_native
+else
+  seed_mcp
+fi
 
 log "ready"
 printf 'export BRAIN_API_KEY=%q\n' "$DEV_API_KEY"
 printf 'export BRAIN_SESSION=%q\n' "$DEV_SESSION"
 printf 'export BRAIN_ADMIN_API_URL=%q\n' "$BRAIN_API_URL"
+if [ -n "${EDGE_API_KEY:-}" ]; then
+  printf 'export BRAIN_EDGE_API_KEY=%q\n' "$EDGE_API_KEY"
+fi

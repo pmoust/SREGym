@@ -117,6 +117,32 @@ variable "n_attempts" {
   default     = 1
 }
 
+variable "arm" {
+  description = <<-EOT
+    Which benchmark arm the run is.
+
+    "mcp" is the default and what every archived run is: brain-go reaches the
+    cluster through SREGym's four CUSTOM_MCP endpoints and nothing else. It is
+    the anchor an arm comparison is measured against, so it must stay
+    reproducible.
+
+    "native" registers brain-go's own Kubernetes, Prometheus, Loki and Jaeger
+    connections against the same in-cluster backends and installs the edge
+    agent into each slot's cluster, so the entity graph and change events
+    exist during an attempt.
+
+    Validated here as well as in the harness, because a plan-time failure
+    costs nothing and a boot-time one costs an instance.
+  EOT
+  type        = string
+  default     = "mcp"
+
+  validation {
+    condition     = contains(["mcp", "native"], var.arm)
+    error_message = "arm must be mcp or native."
+  }
+}
+
 variable "noise" {
   description = "Enable Chaos Mesh noise injection. The paper reports with and without."
   type        = bool

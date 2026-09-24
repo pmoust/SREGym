@@ -122,6 +122,7 @@ resource "aws_instance" "bench" {
     problems              = join(" ", var.problems)
     n_attempts            = var.n_attempts
     noise                 = var.noise
+    arm                   = var.arm
     agent_model           = var.agent_model
     judge_model           = var.judge_model
     agent_timeout_seconds = var.agent_timeout_seconds

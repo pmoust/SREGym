@@ -11,6 +11,12 @@
 #   KUBECONFIG         where kind writes the cluster's context. Point each
 #                      concurrent run at its own file so the current-context
 #                      every later kubectl resolves is unambiguous.
+#   KIND_CONFIG        cluster config to create from, instead of the one this
+#                      script picks by arch. The native benchmark arm passes a
+#                      copy that binds the API server to the host's private
+#                      address, which brain-go's Kubernetes connector needs and
+#                      which nothing else does; unset, every caller gets the
+#                      committed config byte for byte.
 #
 # Requirements:
 #   - kind
@@ -22,7 +28,7 @@ CALICO_VERSION="v3.27.0"
 ARCH="${1:-x86}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-kind}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KIND_CONFIG="${SCRIPT_DIR}/kind-config-${ARCH}.yaml"
+KIND_CONFIG="${KIND_CONFIG:-${SCRIPT_DIR}/kind-config-${ARCH}.yaml}"
 
 if [[ ! -f "${KIND_CONFIG}" ]]; then
     echo "❌ Config file not found: ${KIND_CONFIG}"

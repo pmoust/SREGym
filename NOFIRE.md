@@ -22,10 +22,13 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   Claude Code CLI (`claude_cli/<model>` judge model id or
   `JUDGE_PROVIDER=claude_cli`).
 - `sregym/conductor/conductor.py` — env-gated baseline-sync wait before fault
-  injection (`SREGYM_BASELINE_SYNC_SECONDS`). Candidate for upstreaming.
+  injection (`SREGYM_BASELINE_SYNC_SECONDS`), and the native arm's gate at the
+  end of that wait. The wait is a candidate for upstreaming; the gate is not,
+  since it reads brain-go.
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
-- `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, and it sets `API_PORT`,
+- `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, the per-attempt `arm-native.json`
+  written beside `fault-spec.json` under the native arm, and it sets `API_PORT`,
   `MCP_SERVER_PORT` and friends as defaults rather than overrides so several
   runs can share a host. Candidate for upstreaming.
 - `sregym/run_artifacts.py` (`stabilize_run_csv_headers`, called once at the
@@ -75,8 +78,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   sharing a host do not share a per-cluster baseline snapshot. Candidate for
   upstreaming.
 - `kind/setup_kind_cluster.sh` — `KIND_CLUSTER_NAME`, so a second cluster on the
-  same host does not collide with the default name `kind`. Candidate for
-  upstreaming.
+  same host does not collide with the default name `kind`, and `KIND_CONFIG`,
+  so the native benchmark arm can pass a copy of the committed config with the
+  API server on the host's private address. Both candidates for upstreaming;
+  with neither set the behaviour is unchanged.
 
 NOFire-only directories, which add no merge drift because upstream has no such
 path:
@@ -88,6 +93,14 @@ path:
   environment that lets runs share a host (`run_slot_env.sh`), and deploys the
   MCP server once per instance before any slot starts (`deploy_mcp.py`), which
   is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
+  It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
+  resolves the flag, `seed_native_connections.py` registers brain-go's own
+  Kubernetes, Prometheus, Loki and Jaeger connections in place of the four
+  CUSTOM_MCP ones, `mint_edge_key.py` mints the edge-type key the in-cluster
+  agent publishes with, `native_arm.sh` does the cluster-side work (API server
+  address, read-only ServiceAccount, telemetry forwards, the Helm install),
+  and `native_gate.py` plus `brain_graph.py` gate and record the entity graph.
+  With `SREGYM_ARM` unset none of them runs.
   `build_mcp_image.sh` builds that server's image from the checkout and names
   it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it
   into each slot's kind node, and `write_run_manifest.sh` records the same name
@@ -110,14 +123,17 @@ rediscover:
 - **Deploy a real in-cluster edge agent.** The Python run deployed
   `NOFireAI/edge` (`make helm-local` / `make docker-kind`) into the
   `monitoring` namespace, so the entity graph fed to brain came from the same
-  live cluster the fault was injected into, not a fixture. brain-go's
-  benchmark setup should do the same rather than seed the graph by hand.
+  live cluster the fault was injected into, not a fixture. Carried out under
+  `SREGYM_ARM=native`, which installs the published `nofire-edge` chart into
+  each slot's cluster in the `nofire-edge` namespace.
 - **RBAC exclusion for chaos-mesh is a correctness rule, not hygiene.** If the
   edge agent's ServiceAccount can read chaos-mesh CRDs
   (`podchaos.chaos-mesh.org` etc.), the injected fault shows up verbatim in
   the entity graph and the benchmark leaks its own ground truth to the agent
-  under test. Verify with `kubectl auth can-i list podchaos.chaos-mesh.org -A
-  --as system:serviceaccount:monitoring:nofire-edge` — it must print `no`.
+  under test. `native_arm.sh` runs `kubectl auth can-i list
+  podchaos.chaos-mesh.org -A --as system:serviceaccount:<ns>:<sa>` against both
+  the edge agent's ServiceAccount and the read-only one brain-go's Kubernetes
+  connection uses, and aborts the slot on a `yes`.
 - **MCP tool access already existed in the Python run — it is not new to
   brain-go.** `seed_connections.py` creates `Connection` rows with
   `kind=ConnectionKind.CUSTOM_MCP`, `service=DataSourceService.MCP`, pointing

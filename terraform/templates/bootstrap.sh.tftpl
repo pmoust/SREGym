@@ -434,6 +434,20 @@ ${brain_env}
 SREGYM_BRAIN_ENV
 )
 
+# Which arm this run is. Exported before setup_brain_go.sh because that
+# script's one arm-dependent choice (binding brain-go's services beyond
+# loopback so the in-cluster edge agent can post to /api/edge) has to be made
+# before the stack starts. Validated here too, though terraform already
+# validates it at plan: a box that boots into an arm nobody named would
+# produce a full run under the wrong label.
+SREGYM_ARM="${arm}"
+case "$SREGYM_ARM" in
+  mcp|native) ;;
+  *) terminate "SREGYM_ARM is '$SREGYM_ARM', which is not an arm"; exit 1 ;;
+esac
+export SREGYM_ARM
+echo "[bootstrap] arm $SREGYM_ARM"
+
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
 SREGYM_MCP_PORT="9954" \
 AGENT_MODEL_ID="${agent_model}" \

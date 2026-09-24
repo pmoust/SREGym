@@ -63,6 +63,11 @@ set_env_key() {
   printf '%s=%s\n' "$key" "$value" >>deploy/.env
 }
 
+# Resolved before the cd below, while $0 is still relative to the caller's
+# working directory. After the cd a relative $0 would resolve inside the
+# brain-go checkout, which has no scripts/benchmark.
+SREGYM_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 [ -d "$BRAIN_GO_DIR" ] || die "brain-go checkout not found at $BRAIN_GO_DIR"
 cd "$BRAIN_GO_DIR"
 
@@ -112,6 +117,72 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 # env_file: .env.
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
+
+# --- the native arm's one stack-level change ---------------------------------
+# The edge agent runs inside the slot's kind cluster and POSTs its resource
+# graph to brain-go's /api/edge, so the api service has to be reachable from a
+# container that is not on this host's loopback. Nothing else in the stack
+# does, and nothing at all needs it under the MCP arm, where brain-go dials
+# out to the harness and nothing dials in.
+#
+# Done with a compose override rather than BIND_ADDR. That variable is a
+# single value read by eight services in deploy/docker-compose.yml (postgres
+# 5432, localstack 4566, api 8000, chat 8001/9091, edge 8002/50051, mcp 8080,
+# temporal 7233, temporal-ui 8233), so setting it to 0.0.0.0 to reach one of
+# them publishes the database and the rest as well. No inbound rule reaches
+# those (terraform/network.tf has none at all), but the blast radius is free
+# to avoid, so it is avoided.
+#
+# The override publishes the api container's 8000 a second time, on the
+# private address, and leaves every other service on loopback. `make up` runs
+# `docker compose --env-file deploy/.env` with no -f, so compose discovers
+# docker-compose.yml here and auto-loads this override beside it; the api
+# service reaches the model through that file's `include:` of
+# deploy/docker-compose.yml, and an override still merges onto an included
+# service. Verified by rendering `docker compose config` against this exact
+# arrangement: the api service comes out with both host_ip entries, the
+# duplicate loopback line is collapsed to one, and postgres keeps 127.0.0.1.
+#
+# The loopback entry is repeated here on purpose. The harness reaches the api
+# service at 127.0.0.1:8000 (run_shard.sh passes that URL to seed_slot.sh), so
+# an override naming only the private address would break the harness's own
+# access if compose ever replaced the list rather than merging it.
+#
+# The address is written in literally rather than left as a compose variable.
+# An unset variable renders as an empty host_ip, which binds every interface,
+# which is the outcome this whole section exists to avoid; and every later
+# `docker compose` call in the run (seed_slot.sh's `run seed`) would inherit
+# it. A literal cannot be unset.
+#
+# Untracked in the brain-go checkout, which is a throwaway on an ephemeral
+# box that this script already writes deploy/.env into.
+#
+# Written before `make up`, because compose resolves the ports block when the
+# container is created, not when it starts.
+if [ "${SREGYM_ARM:-mcp}" = "native" ]; then
+  PRIVATE_IP=$("${SREGYM_SCRIPT_DIR}/native_arm.sh" private-ip) \
+    || die "the native arm needs a private IPv4 address for the edge agent to publish to"
+
+  cat >docker-compose.override.yml <<COMPOSE_OVERRIDE
+# Written by sregym's scripts/benchmark/setup_brain_go.sh for the native
+# benchmark arm. Publishes the api service where the in-cluster edge agent can
+# reach it, and nothing else. Safe to delete.
+services:
+  api:
+    ports:
+      - "127.0.0.1:\${API_PORT:-8000}:8000"
+      - "${PRIVATE_IP}:\${API_PORT:-8000}:8000"
+COMPOSE_OVERRIDE
+
+  log "native arm: api also published on ${PRIVATE_IP}:8000 for the in-cluster edge agent; every other service stays on loopback"
+else
+  # Removed rather than left behind. On the fleet this is a fresh checkout
+  # every time and there is nothing to remove, but this script is also the
+  # documented way to stand brain-go up on a developer box, where a previous
+  # native run would otherwise leave the api service published on whatever
+  # address that box had at the time.
+  rm -f docker-compose.override.yml
+fi
 
 # --- run-configured knobs ----------------------------------------------------
 # BRAIN_ENV_EXTRA carries KEY=VALUE lines from the run's terraform config

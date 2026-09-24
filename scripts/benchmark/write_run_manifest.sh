@@ -109,9 +109,11 @@ if want:
 print(' '.join(ids))
 " 2>/dev/null) || PROBLEMS_RESOLVED=""
 
-# What each seeded connection was tagged with, read straight from
-# seed_connections.py's ENDPOINTS rather than copied here, so this cannot drift
-# from what actually got seeded. This is the harness's own side of the toolset
+# What each seeded connection was tagged with, read straight from the table
+# the seeding script actually uses rather than copied here, so this cannot
+# drift from what got seeded. Which table depends on the arm:
+# seed_connections.py's ENDPOINTS under mcp, seed_native_connections.py's
+# NATIVE_CONNECTIONS under native. This is the harness's own side of the toolset
 # a run had: which MCP endpoint became which CUSTOM_MCP connection, and which
 # investigation bucket(s) it was registered under.
 #
@@ -125,21 +127,35 @@ print(' '.join(ids))
 # reading those three functions at the run's brain_go_sha and checking
 # tool-calls.json, the way this field's own reasoning was worked out.
 SEEDED_CONNECTION_BUCKETS=$(uv run python -c "
+from scripts.benchmark.arm import is_native
 from scripts.benchmark.seed_connections import ENDPOINTS
 
-print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
+if is_native():
+    from scripts.benchmark.seed_native_connections import BUCKET, NATIVE_CONNECTIONS
+
+    print(','.join(f'{service}:{\"+\".join(BUCKET)}' for _, _, service in NATIVE_CONNECTIONS))
+else:
+    print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_BUCKETS=""
 
 # The signal each seeded connection declared, same source and same caveat as
 # the buckets above. A connection with no entry is written as "-": it reaches
 # every node in its bucket, which is what every run before signals existed
-# had. Recorded because it is the difference between a run whose metrics,
-# logs and traces agents held one server each and a run where they held the
-# same three.
+# had. Every native connection is written that way, and not because the value
+# was lost: `signals` scopes CUSTOM_MCP and CUSTOM_TOOL tools only, and a
+# native family is already partitioned by service. Recorded because it is the
+# difference between a run whose metrics, logs and traces agents held one
+# server each and a run where they held the same three.
 SEEDED_CONNECTION_SIGNALS=$(uv run python -c "
+from scripts.benchmark.arm import is_native
 from scripts.benchmark.seed_connections import ENDPOINTS, SIGNALS
 
-print(','.join(f'{path}:{\"+\".join(SIGNALS.get(path) or [\"-\"])}' for _, path, _, _ in ENDPOINTS))
+if is_native():
+    from scripts.benchmark.seed_native_connections import NATIVE_CONNECTIONS
+
+    print(','.join(f'{service}:-' for _, _, service in NATIVE_CONNECTIONS))
+else:
+    print(','.join(f'{path}:{\"+\".join(SIGNALS.get(path) or [\"-\"])}' for _, path, _, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_SIGNALS=""
 
 # The image the MCP pod is meant to run. Asked of the script that builds it
@@ -152,6 +168,26 @@ print(','.join(f'{path}:{\"+\".join(SIGNALS.get(path) or [\"-\"])}' for _, path,
 # this one ran ghcr.io/sregym/sregym-mcp:latest, upstream's 2026-09-06 build,
 # and no artifact said so.
 MCP_IMAGE=$("$(dirname "$0")/build_mcp_image.sh" --print-name 2>/dev/null) || MCP_IMAGE=""
+
+# Which arm produced these numbers. Recorded before anything else about the
+# seeding, because every other line describing a connection means something
+# different depending on it. Empty means SREGYM_ARM named an arm that does
+# not exist, which run_shard.sh hard-stops the run over.
+ARM=$(uv run python "$(dirname "$0")/arm.py" 2>/dev/null) || ARM=""
+
+# The edge agent behind the entity graph, asked of the script that installs it
+# rather than restated here. Both are empty under the MCP arm, which runs no
+# edge agent: the keys are always present so a reader parses one shape.
+#
+# Recorded because the graph is the native arm's whole claim, and two runs
+# whose graphs came from different agent builds are not the same run.
+EDGE_IMAGE=""
+EDGE_CHART_VERSION=""
+if [ "$ARM" = "native" ]; then
+  EDGE_VERSIONS=$("$(dirname "$0")/native_arm.sh" edge-versions 2>/dev/null) || EDGE_VERSIONS=""
+  EDGE_IMAGE=$(printf '%s' "$EDGE_VERSIONS" | cut -f1)
+  EDGE_CHART_VERSION=$(printf '%s' "$EDGE_VERSIONS" | cut -f2)
+fi
 
 {
   echo "run_id=${RUN_ID:-}"
@@ -183,9 +219,16 @@ MCP_IMAGE=$("$(dirname "$0")/build_mcp_image.sh" --print-name 2>/dev/null) || MC
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"
   echo "brain_go_sha=${BRAIN_GO_SHA:-}"
+  # mcp or native. Every line below that describes a connection means
+  # something different depending on it.
+  echo "arm=$ARM"
   # sregym-mcp:<sregym sha>, built on the box and loaded into each slot's kind
   # node. See the comment above for what it does and does not promise.
   echo "mcp_image=$MCP_IMAGE"
+  # nofireai/edge:<tag> and the nofire-edge chart version, both empty under
+  # the MCP arm. See the comment above for why they are recorded at all.
+  echo "edge_image=$EDGE_IMAGE"
+  echo "edge_chart_version=$EDGE_CHART_VERSION"
   # kind:bucket[+bucket](,kind:bucket...) for each CUSTOM_MCP connection this
   # run seeded. See the comment above SEEDED_CONNECTION_BUCKETS for what this
   # does and does not tell a reader about a node's actual bound toolset.

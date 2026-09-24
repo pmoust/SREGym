@@ -100,6 +100,9 @@ class Conductor:
         # spec names the faulty component, so it must never be reachable from
         # the agent's own working directory while the agent is running.
         self.fault_spec: dict | None = None
+        # What the native arm's pre-fault gate found, or {"arm": "mcp"}. Read
+        # by main.py, which writes it beside the attempt's other artifacts.
+        self.native_arm_evidence: dict = {}
 
     @property
     def current_problem(self):
@@ -189,6 +192,7 @@ class Conductor:
         # the previous attempt's timestamp or spec.
         self.fault_injected_at = None
         self.fault_spec = None
+        self.native_arm_evidence = {}
 
         if not self.tasklist:
             self.logger.warning("Empty tasklist; no stages configured for this problem.")
@@ -245,6 +249,26 @@ class Conductor:
         if baseline_wait > 0:
             self.logger.info(f"[ENV] Baseline-sync wait {baseline_wait}s before fault injection")
             time.sleep(baseline_wait)
+
+        # The native benchmark arm's gate, and the only point at which it can
+        # run: after the wait above and before the cluster is mutated. It
+        # returns immediately under any other arm, so the MCP arm reaches
+        # inject_fault() having done nothing but the wait it already did.
+        #
+        # A failure here aborts the attempt rather than logging. The arm's
+        # whole claim is that brain-go investigated with native connections
+        # and a populated entity graph; an attempt that had neither is the
+        # MCP arm's information set wearing this arm's label, and it is not
+        # distinguishable from a real result once it is a row in a CSV.
+        # Imported here rather than at module scope: the conductor is upstream
+        # code and scripts/benchmark is NOFire's, so a top-level import would
+        # make the whole conductor unimportable in any tree that carries one
+        # and not the other.
+        from scripts.benchmark.native_gate import check as native_arm_check
+
+        self.native_arm_evidence = native_arm_check()
+        if self.native_arm_evidence.get("arm") == "native":
+            self.logger.info(f"[ENV] Native arm ready: {self.native_arm_evidence}")
 
         # Snapshot the healthy cluster before breaking it. The oracle is built
         # in Problem.__init__, which runs before deploy_app(), so this is the

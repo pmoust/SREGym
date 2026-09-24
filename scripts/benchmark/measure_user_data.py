@@ -51,6 +51,8 @@ FIXED = {
     "problem_set": "sregym-lite",
     "n_attempts": "8",
     "noise": "false",
+    # Both arms interpolate to a fixed short string; "native" is the longer.
+    "arm": "native",
     "agent_timeout_seconds": "1800",
     "runs_per_instance": "3",
     "instance_type": "m8i.8xlarge",
