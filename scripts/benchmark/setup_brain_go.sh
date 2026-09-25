@@ -165,12 +165,17 @@ if [ "${SREGYM_ARM:-mcp}" = "native" ]; then
 
   cat >docker-compose.override.yml <<COMPOSE_OVERRIDE
 # Written by sregym's scripts/benchmark/setup_brain_go.sh for the native
-# benchmark arm. Publishes the api service where the in-cluster edge agent can
-# reach it, and nothing else. Safe to delete.
+# benchmark arm. Adds one publish of the api service where the in-cluster edge
+# agent can reach it, and touches nothing else. Safe to delete.
+#
+# It names only the private address. Compose merges a service's ports list with
+# the base file's rather than replacing it, so the base's own loopback publish
+# survives and the harness keeps reaching the api at 127.0.0.1:8000. Naming
+# loopback here too binds it twice and the api container fails to start with
+# "address already in use".
 services:
   api:
     ports:
-      - "127.0.0.1:\${API_PORT:-8000}:8000"
       - "${PRIVATE_IP}:\${API_PORT:-8000}:8000"
 COMPOSE_OVERRIDE
 

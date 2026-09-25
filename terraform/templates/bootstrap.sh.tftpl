@@ -111,8 +111,13 @@ terminate() {
   # This applies to comments too, which is how the first version of this note
   # broke the plan a second time by quoting the construct it warns about. A
   # test scans the whole file, comments included.
-  local outcome="$2"
-  [ -n "$outcome" ] || outcome=failure
+  # Read through $# rather than by expanding $2 directly. Under set -u a bare
+  # $2 with no second argument aborts the shell, and all but one of this
+  # function's call sites pass only a reason, so every failure path died here
+  # instead of syncing its logs and shutting the box down. A default-value
+  # expansion is the obvious fix and is unavailable: see the note above.
+  local outcome=failure
+  [ "$#" -ge 2 ] && outcome="$2"
   echo "[bootstrap] terminating: $reason"
   sync_results || true
   sync_logs || true

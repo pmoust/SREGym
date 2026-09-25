@@ -526,3 +526,48 @@ def test_the_gate_returns_the_evidence_it_gathered(monkeypatch):
     assert evidence["arm"] == "native"
     assert evidence["cluster"] == "sregym-2"
     assert evidence["entities"]["total"] == 7
+
+
+def _terminate_body() -> str:
+    """The bootstrap's terminate function, read from the template itself."""
+    text = (ROOT / "terraform" / "templates" / "bootstrap.sh.tftpl").read_text()
+    start = text.index("terminate() {")
+
+    return text[start : text.index("\n}\n", start)]
+
+
+def _native_compose_override() -> str:
+    """The compose override heredoc setup_brain_go.sh writes in the native arm."""
+    text = (ROOT / "scripts" / "benchmark" / "setup_brain_go.sh").read_text()
+    start = text.index("cat >docker-compose.override.yml")
+
+    return text[start : text.index("COMPOSE_OVERRIDE\n", start + 40)]
+
+
+def test_terminate_survives_a_call_with_only_a_reason():
+    """Every failure path calls terminate with one argument.
+
+    Under `set -u` a bare `$2` aborts the shell, so the bootstrap died at the
+    top of its own cleanup: no logs synced, no shutdown, the box left running
+    until the runtime cap. A default-value expansion cannot be used here
+    because terraform's templatefile reads dollar-brace as interpolation, so
+    the arity is read from `$#` instead.
+    """
+    body = _terminate_body()
+
+    assert '"$#" -ge 2' in body, "terminate must read its arity, not expand $2 bare"
+    assert 'local outcome="$2"' not in body, "a bare $2 aborts under set -u"
+
+
+def test_the_native_override_publishes_the_api_once():
+    """Compose merges a service's ports with the base file's rather than
+    replacing them, so naming loopback in the override binds 127.0.0.1:8000
+    twice and the api container fails with "address already in use". The
+    override names the private address only; the base's loopback publish
+    survives and the harness keeps reaching the api there."""
+    block = _native_compose_override()
+
+    published = [line for line in block.splitlines() if line.strip().startswith('- "')]
+
+    assert len(published) == 1, f"the override must publish the api once: {published}"
+    assert "127.0.0.1" not in published[0], "loopback is the base file's job"
