@@ -54,7 +54,7 @@ instance_profile_name = "sregym-benchmark-instance-profile"
 # native smoke found: the api published twice on loopback, and terminate
 # aborting under set -u on every one-argument call.
 brain_go_ref = "a891128ad3496b8cdf5f677e1f0c88aeaefccbe5"
-sregym_ref   = "4d590992ef9a4503d5cb50bd3c14d30466495d73"
+sregym_ref   = "82514706b4ae24bb2396097462f6275f56cfd6d4"
 
 # The results bucket already exists and is owned by the default workspace, so
 # a scenario that does not name it tries to create it and fails with
