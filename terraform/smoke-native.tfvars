@@ -50,9 +50,11 @@ instance_profile_name = "sregym-benchmark-instance-profile"
 # after NOFireAI/brain-go#3557, which lets a Kubernetes connection opt in to a
 # private API server; without it the native Kubernetes connection cannot reach
 # the slot's kind cluster and the slot stops at seeding. sregym 6cf347d2 is
-# main after #118, the arm itself.
+# main after #118 (the arm) and #119, which fixed the two bugs the first
+# native smoke found: the api published twice on loopback, and terminate
+# aborting under set -u on every one-argument call.
 brain_go_ref = "a891128ad3496b8cdf5f677e1f0c88aeaefccbe5"
-sregym_ref   = "6cf347d26404a113eb88dd370b2b2a597a1b728e"
+sregym_ref   = "4d590992ef9a4503d5cb50bd3c14d30466495d73"
 
 # The results bucket already exists and is owned by the default workspace, so
 # a scenario that does not name it tries to create it and fails with
