@@ -44,3 +44,12 @@ use_spot              = false # a reclaim mid-smoke reads like a harness failure
 # than the profile, and is named -instance-role; passing that gets
 # "Invalid IAM Instance Profile name" part way through an apply.
 instance_profile_name = "sregym-benchmark-instance-profile"
+
+# Pinned rather than floated on main, so a merge during the smoke cannot make
+# this a different run than the one that gets read. brain-go a891128ad is main
+# after NOFireAI/brain-go#3557, which lets a Kubernetes connection opt in to a
+# private API server; without it the native Kubernetes connection cannot reach
+# the slot's kind cluster and the slot stops at seeding. sregym 6cf347d2 is
+# main after #118, the arm itself.
+brain_go_ref = "a891128ad3496b8cdf5f677e1f0c88aeaefccbe5"
+sregym_ref   = "6cf347d26404a113eb88dd370b2b2a597a1b728e"
