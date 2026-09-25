@@ -205,7 +205,12 @@ if [ "$SREGYM_ARM" = "native" ]; then
   # slot hand helm a file another is still writing, and the install fails
   # non-deterministically. Fetched here, before any slot starts, and passed
   # down by path.
-  SREGYM_EDGE_CHART=$("$WORKDIR/scripts/benchmark/native_arm.sh" fetch-chart) || {
+  # GH_TOKEN passed on the command rather than exported. The bootstrap sets it
+  # as a plain assignment, so a script it executes as a child does not inherit
+  # it, and the chart repo is private. This is how the bootstrap already hands
+  # the same token to setup_brain_go.sh, and it keeps the token off every other
+  # child process in this shard.
+  SREGYM_EDGE_CHART=$(GH_TOKEN="${GH_TOKEN:-}" "$WORKDIR/scripts/benchmark/native_arm.sh" fetch-chart) || {
     terminate "could not fetch the edge agent chart"
     exit 1
   }

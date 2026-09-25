@@ -564,3 +564,16 @@ def test_the_native_arm_writes_no_compose_override():
     setup = (ROOT / "scripts" / "benchmark" / "setup_brain_go.sh").read_text()
 
     assert "cat >docker-compose.override.yml" not in setup
+
+
+def test_the_chart_fetch_is_handed_the_clone_token():
+    """The bootstrap sets GH_TOKEN as a plain assignment, so a script it runs
+    as a child does not inherit it. native_arm.sh fetch-chart needs it because
+    the chart repo is private, and without it the shard terminates before any
+    slot starts. Passed on the command, the way the bootstrap already hands the
+    same token to setup_brain_go.sh, rather than exported to every child.
+    """
+    shard = (ROOT / "scripts" / "benchmark" / "run_shard.sh").read_text()
+    call = next(line for line in shard.splitlines() if "fetch-chart" in line)
+
+    assert "GH_TOKEN=" in call, f"fetch-chart must be handed the token: {call}"
