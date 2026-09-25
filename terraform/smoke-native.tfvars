@@ -53,3 +53,9 @@ instance_profile_name = "sregym-benchmark-instance-profile"
 # main after #118, the arm itself.
 brain_go_ref = "a891128ad3496b8cdf5f677e1f0c88aeaefccbe5"
 sregym_ref   = "6cf347d26404a113eb88dd370b2b2a597a1b728e"
+
+# The results bucket already exists and is owned by the default workspace, so
+# a scenario that does not name it tries to create it and fails with
+# BucketAlreadyOwnedByYou. smoke-pin.tfvars carries the same line for the same
+# reason.
+results_bucket = "sregym-bench-results-819709950457"
