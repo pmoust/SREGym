@@ -577,3 +577,24 @@ def test_the_chart_fetch_is_handed_the_clone_token():
     call = next(line for line in shard.splitlines() if "fetch-chart" in line)
 
     assert "GH_TOKEN=" in call, f"fetch-chart must be handed the token: {call}"
+
+
+def test_the_edge_image_is_loaded_from_an_archive():
+    """`kind load docker-image` runs `ctr images import --all-platforms`, and a
+    pulled multi-architecture image holds only the blobs of the platform docker
+    selected, so the import asks for a digest that was never fetched and fails
+    with "content digest ... not found". That aborted the slot in
+    run-20260925-0933. Saving the image and loading the archive imports what is
+    actually in the local store.
+
+    The MCP image keeps the docker-image path: it is built on the box, so every
+    blob it references is present.
+    """
+    shard = (ROOT / "scripts" / "benchmark" / "run_shard.sh").read_text()
+    loads = [line.strip() for line in shard.splitlines() if "kind load" in line and "if !" in line]
+
+    edge = [line for line in loads if "EDGE" in line]
+    mcp = [line for line in loads if "MCP" in line]
+
+    assert len(edge) == 1 and "image-archive" in edge[0], f"edge must load an archive: {edge}"
+    assert len(mcp) == 1 and "docker-image" in mcp[0], f"the MCP image is built here: {mcp}"

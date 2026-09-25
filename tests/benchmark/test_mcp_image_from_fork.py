@@ -129,6 +129,19 @@ def test_the_manifest_records_the_image_the_build_script_names(tmp_path):
     assert fields["mcp_image"] == f"sregym-mcp:{_head_sha()}"
 
 
+def _mcp_load_offset(text: str) -> int:
+    """Where run_shard.sh actually loads the MCP image.
+
+    Matched on the command as it is run, not on any mention of it: a comment
+    naming `kind load docker-image` sits earlier in the file and would make
+    both ordering assertions below read the wrong position.
+    """
+    needle = 'kind load docker-image "$SREGYM_MCP_IMAGE"'
+    assert needle in text, "run_shard.sh no longer loads the MCP image this way"
+
+    return text.index(needle)
+
+
 def test_the_build_runs_once_per_box_and_the_load_runs_per_slot():
     """Two different frequencies, and putting either at the other's place is
     silently wrong rather than an error.
@@ -142,7 +155,7 @@ def test_the_build_runs_once_per_box_and_the_load_runs_per_slot():
 
     build = text.index("build_mcp_image.sh")
     run_slot = text.index("run_slot() {")
-    load = text.index("kind load docker-image")
+    load = _mcp_load_offset(text)
 
     assert build < run_slot, "the build is inside run_slot, so it would run once per slot"
     assert load > run_slot, "the load is outside run_slot, so it would reach one cluster only"
@@ -155,7 +168,7 @@ def test_the_load_happens_after_the_cluster_exists_and_before_the_deploy():
     text = _run_shard_body()
 
     create = text.index("setup_kind_cluster.sh")
-    load = text.index("kind load docker-image")
+    load = _mcp_load_offset(text)
     deploy = text.index(DEPLOY_CALL)
 
     assert create < load < deploy

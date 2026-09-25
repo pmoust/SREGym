@@ -198,7 +198,23 @@ if [ "$SREGYM_ARM" = "native" ]; then
     terminate "could not pull the edge agent image $EDGE_IMAGE"
     exit 1
   fi
-  echo "[bootstrap] edge agent image $EDGE_IMAGE"
+
+  # Saved to an archive here, and each slot loads the archive rather than the
+  # image. `kind load docker-image` runs `ctr images import --all-platforms`,
+  # and a pulled multi-architecture image has only the blobs of the platform
+  # docker selected, so the import asks the node for a digest that was never
+  # fetched and fails with "content digest ... not found". That is what
+  # aborted the slot in run-20260925-0933. `docker save` writes what is in the
+  # local store, one platform and no attestation manifests, which imports
+  # clean. The MCP image does not need this because it is built here, so every
+  # blob it references is present.
+  EDGE_IMAGE_ARCHIVE="$WORKDIR/edge-image.tar"
+  if ! docker save "$EDGE_IMAGE" -o "$EDGE_IMAGE_ARCHIVE"; then
+    terminate "could not save the edge agent image $EDGE_IMAGE"
+    exit 1
+  fi
+  export EDGE_IMAGE_ARCHIVE
+  echo "[bootstrap] edge agent image $EDGE_IMAGE saved to $EDGE_IMAGE_ARCHIVE"
 
   # The chart, once per box and for the same reason. Slots run concurrently in
   # background subshells, so a per-slot download to one shared path lets one
@@ -447,7 +463,7 @@ run_slot() {
     # this copy rather than reaching Docker Hub once per slot.
     if [ "$SREGYM_ARM" = "native" ]; then
       echo "[slot $slot] loading $EDGE_IMAGE into $KIND_CLUSTER_NAME"
-      if ! kind load docker-image "$EDGE_IMAGE" --name "$KIND_CLUSTER_NAME"; then
+      if ! kind load image-archive "$EDGE_IMAGE_ARCHIVE" --name "$KIND_CLUSTER_NAME"; then
         echo "[slot $slot] loading the edge image into $KIND_CLUSTER_NAME failed, slot aborted"
         return 1
       fi
