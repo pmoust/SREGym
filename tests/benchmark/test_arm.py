@@ -536,14 +536,6 @@ def _terminate_body() -> str:
     return text[start : text.index("\n}\n", start)]
 
 
-def _native_compose_override() -> str:
-    """The compose override heredoc setup_brain_go.sh writes in the native arm."""
-    text = (ROOT / "scripts" / "benchmark" / "setup_brain_go.sh").read_text()
-    start = text.index("cat >docker-compose.override.yml")
-
-    return text[start : text.index("COMPOSE_OVERRIDE\n", start + 40)]
-
-
 def test_terminate_survives_a_call_with_only_a_reason():
     """Every failure path calls terminate with one argument.
 
@@ -559,15 +551,16 @@ def test_terminate_survives_a_call_with_only_a_reason():
     assert 'local outcome="$2"' not in body, "a bare $2 aborts under set -u"
 
 
-def test_the_native_override_publishes_the_api_once():
-    """Compose merges a service's ports with the base file's rather than
-    replacing them, so naming loopback in the override binds 127.0.0.1:8000
-    twice and the api container fails with "address already in use". The
-    override names the private address only; the base's loopback publish
-    survives and the harness keeps reaching the api there."""
-    block = _native_compose_override()
+def test_the_native_arm_writes_no_compose_override():
+    """brain-go's own dev-env.sh writes BIND_ADDR=0.0.0.0 whenever it creates
+    deploy/.env, so every service is already published on every interface and
+    the in-cluster edge agent reaches the api with no help from here.
 
-    published = [line for line in block.splitlines() if line.strip().startswith('- "')]
+    An override publishing the api a second time binds the same port twice,
+    because compose merges a service's ports with the base file's rather than
+    replacing them, and the api container then fails to start with "address
+    already in use". That stopped the first two native smokes.
+    """
+    setup = (ROOT / "scripts" / "benchmark" / "setup_brain_go.sh").read_text()
 
-    assert len(published) == 1, f"the override must publish the api once: {published}"
-    assert "127.0.0.1" not in published[0], "loopback is the base file's job"
+    assert "cat >docker-compose.override.yml" not in setup

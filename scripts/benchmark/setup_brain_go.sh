@@ -118,76 +118,30 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 
-# --- the native arm's one stack-level change ---------------------------------
-# The edge agent runs inside the slot's kind cluster and POSTs its resource
-# graph to brain-go's /api/edge, so the api service has to be reachable from a
-# container that is not on this host's loopback. Nothing else in the stack
-# does, and nothing at all needs it under the MCP arm, where brain-go dials
-# out to the harness and nothing dials in.
+# --- reaching the api from inside a slot's kind cluster ----------------------
+# The native arm's edge agent runs inside the slot's kind cluster and POSTs its
+# resource graph to brain-go's /api/edge, so the api service has to be
+# reachable from a container that is not on this host's loopback. It already
+# is, on every box and in both arms: brain-go's own scripts/dev-env.sh writes
+# BIND_ADDR=0.0.0.0 into deploy/.env whenever it creates that file, and the
+# compose stack publishes every service on that address. Nothing here needs to
+# arrange it.
 #
-# Done with a compose override rather than BIND_ADDR. That variable is a
-# single value read by eight services in deploy/docker-compose.yml (postgres
-# 5432, localstack 4566, api 8000, chat 8001/9091, edge 8002/50051, mcp 8080,
-# temporal 7233, temporal-ui 8233), so setting it to 0.0.0.0 to reach one of
-# them publishes the database and the rest as well. No inbound rule reaches
-# those (terraform/network.tf has none at all), but the blast radius is free
-# to avoid, so it is avoided.
+# An earlier version of this script published the api a second time on the
+# private address, through a compose override, on the theory that BIND_ADDR
+# was still the sample's 127.0.0.1 and that widening it would expose postgres
+# and localstack as well. Both halves were wrong. dev-env.sh had already set
+# 0.0.0.0, so the stack was open either way and the override only added a
+# duplicate binding: compose merges a service's ports with the base file's
+# rather than replacing them, and the api container then failed to start with
+# "address already in use". That is what stopped the first two native smokes,
+# run-20260925-0705 and run-20260925-0803.
 #
-# The override publishes the api container's 8000 a second time, on the
-# private address, and leaves every other service on loopback. `make up` runs
-# `docker compose --env-file deploy/.env` with no -f, so compose discovers
-# docker-compose.yml here and auto-loads this override beside it; the api
-# service reaches the model through that file's `include:` of
-# deploy/docker-compose.yml, and an override still merges onto an included
-# service. Verified by rendering `docker compose config` against this exact
-# arrangement: the api service comes out with both host_ip entries, the
-# duplicate loopback line is collapsed to one, and postgres keeps 127.0.0.1.
-#
-# The loopback entry is repeated here on purpose. The harness reaches the api
-# service at 127.0.0.1:8000 (run_shard.sh passes that URL to seed_slot.sh), so
-# an override naming only the private address would break the harness's own
-# access if compose ever replaced the list rather than merging it.
-#
-# The address is written in literally rather than left as a compose variable.
-# An unset variable renders as an empty host_ip, which binds every interface,
-# which is the outcome this whole section exists to avoid; and every later
-# `docker compose` call in the run (seed_slot.sh's `run seed`) would inherit
-# it. A literal cannot be unset.
-#
-# Untracked in the brain-go checkout, which is a throwaway on an ephemeral
-# box that this script already writes deploy/.env into.
-#
-# Written before `make up`, because compose resolves the ports block when the
-# container is created, not when it starts.
-if [ "${SREGYM_ARM:-mcp}" = "native" ]; then
-  PRIVATE_IP=$("${SREGYM_SCRIPT_DIR}/native_arm.sh" private-ip) \
-    || die "the native arm needs a private IPv4 address for the edge agent to publish to"
-
-  cat >docker-compose.override.yml <<COMPOSE_OVERRIDE
-# Written by sregym's scripts/benchmark/setup_brain_go.sh for the native
-# benchmark arm. Adds one publish of the api service where the in-cluster edge
-# agent can reach it, and touches nothing else. Safe to delete.
-#
-# It names only the private address. Compose merges a service's ports list with
-# the base file's rather than replacing it, so the base's own loopback publish
-# survives and the harness keeps reaching the api at 127.0.0.1:8000. Naming
-# loopback here too binds it twice and the api container fails to start with
-# "address already in use".
-services:
-  api:
-    ports:
-      - "${PRIVATE_IP}:\${API_PORT:-8000}:8000"
-COMPOSE_OVERRIDE
-
-  log "native arm: api also published on ${PRIVATE_IP}:8000 for the in-cluster edge agent; every other service stays on loopback"
-else
-  # Removed rather than left behind. On the fleet this is a fresh checkout
-  # every time and there is nothing to remove, but this script is also the
-  # documented way to stand brain-go up on a developer box, where a previous
-  # native run would otherwise leave the api service published on whatever
-  # address that box had at the time.
-  rm -f docker-compose.override.yml
-fi
+# The blast radius the override was avoiding is real and belongs to brain-go,
+# not to this arm: dev-env.sh opens the whole stack, including the database,
+# on every benchmark box today. terraform/network.tf has no inbound rule at
+# all, so nothing outside the instance reaches those ports. Narrowing it is a
+# change to brain-go's dev tooling, not something to work around here.
 
 # --- run-configured knobs ----------------------------------------------------
 # BRAIN_ENV_EXTRA carries KEY=VALUE lines from the run's terraform config

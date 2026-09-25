@@ -451,11 +451,15 @@ are produced. Concretely, per slot:
   observability and Sentry are off. The image and the chart are fetched once
   per box and handed to each slot, since slots run concurrently and would
   otherwise race on one download path.
-- brain-go's api service is published on the host's private address as well as
-  loopback, through a `docker-compose.override.yml` the setup script writes
-  into the brain-go checkout. Only that service: `BIND_ADDR` is one value for
-  all eight services in that compose file, so using it would publish postgres,
-  localstack and temporal too.
+- The edge agent reaches brain-go's api at the host's private address without
+  the harness arranging anything. brain-go's own `scripts/dev-env.sh` writes
+  `BIND_ADDR=0.0.0.0` when it creates `deploy/.env`, so the whole stack is
+  published on every interface on every box, in both arms. An earlier version
+  of the setup script published the api a second time through a compose
+  override; compose merges a service's ports rather than replacing them, so
+  that bound the port twice and the api container would not start. Nothing
+  outside the instance reaches those ports: `terraform/network.tf` has no
+  inbound rule.
 - `SREGYM_BASELINE_SYNC_SECONDS` is 150, the window the conductor already
   sleeps before injecting a fault.
 
