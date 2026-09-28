@@ -110,7 +110,11 @@ path:
   16384 bytes and `measure_user_data.py --check` is what keeps it under.
   Each slot loads its environment from `run_slot_env.sh` and its tenant from
   `seed_slot.sh` through `eval_exports`, which evals their `export` lines only
-  when the script exited 0 and otherwise aborts the slot (sregym#125).
+  when the script exited 0 and otherwise aborts the slot (sregym#125). The
+  bootstrap starts its ssh-agent the same way, capturing `ssh-agent -s` before
+  the eval so a failure reaches `terminate` (sregym#128).
+  `tests/benchmark/test_eval_exports.py` fails on any `eval` of a command
+  substitution in `scripts/benchmark/*.sh` or `terraform/templates/*.tftpl`.
   `launch.sh` runs a named scenario from `terraform/<name>.tfvars` with both
   refs pinned to current `origin/main`.
 - `terraform/` — the ephemeral spot fleet the suite runs on.

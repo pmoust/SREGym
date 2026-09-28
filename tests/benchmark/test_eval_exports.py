@@ -11,6 +11,10 @@ BRAIN_EDGE_API_KEY.
 eval_exports() is extracted from run_shard.sh and run as shell, the technique
 test_mcp_probe_gate.py uses: run_shard.sh is sourced by the bootstrap rather
 than executed, so it cannot be run whole here.
+
+The bootstrap template had the same flaw on its ssh-agent start. Its two
+lines are extracted and run the same way, and a static guard scans every
+benchmark script and terraform template for the idiom.
 """
 
 import re
@@ -98,11 +102,117 @@ def test_real_run_slot_env_success_sets_the_slot(tmp_path):
     assert r.stdout == "sregym-2 9956\n"
 
 
-def test_run_shard_has_no_eval_of_a_command_substitution():
-    """A new `eval "$(...)"` or `eval $(...)` would reintroduce the bug."""
-    offenders = [
+# `eval "$(cmd)"`, `eval $(cmd)`, `eval -- "$(cmd)"` and the backtick forms all
+# return eval's status, never cmd's.
+EVAL_OF_SUBSTITUTION = re.compile(r'\beval\s+(?:--\s+)?"?(?:\$\(|`)')
+
+# NOFire's shell: the benchmark scripts and the terraform bootstrap template.
+# Upstream test tooling under tests/e2e-testing-scripts is out of scope.
+GUARDED_SHELL = sorted((ROOT / "scripts" / "benchmark").glob("*.sh")) + sorted(
+    (ROOT / "terraform" / "templates").glob("*.tftpl")
+)
+BOOTSTRAP = ROOT / "terraform" / "templates" / "bootstrap.sh.tftpl"
+
+
+def _eval_offenders(text: str) -> list[str]:
+    # Drops comment lines and trailing comments, so documentation of the bug
+    # does not count as the bug.
+    return [
         f"{n}: {line.strip()}"
-        for n, line in enumerate(RUN_SHARD.read_text().splitlines(), 1)
-        if not line.lstrip().startswith("#") and re.search(r'\beval\s+"?\$\(', line)
+        for n, line in enumerate(text.splitlines(), 1)
+        if EVAL_OF_SUBSTITUTION.search(re.sub(r"(^|\s)#.*", "", line))
     ]
-    assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'eval "$(cmd)"',
+        "eval $(cmd)",
+        'eval -- "$(cmd)"',
+        "eval -- $(cmd)",
+        "eval `cmd`",
+        'eval "`cmd`"',
+        'x=1; eval "$(ssh-agent -s)" >/dev/null || exit 1',
+        '  if ! eval "$(cmd)"; then',
+    ],
+)
+def test_guard_catches_every_form(line):
+    assert _eval_offenders(line) != []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '# eval "$(cmd)" would hide the status',
+        '    #   eval "$(scripts/benchmark/seed_slot.sh s 9955)"',
+        'eval "$out"  # not eval "$(cmd)"',
+        'eval "$eval_exports_out"',
+        'eval "pid=\\$$var"',
+        'eval_exports "$(cmd)"',
+        "retrieval $(cmd)",
+    ],
+)
+def test_guard_ignores_comments_and_evals_of_a_variable(line):
+    assert _eval_offenders(line) == []
+
+
+def test_guard_covers_the_bootstrap_and_run_shard():
+    assert BOOTSTRAP in GUARDED_SHELL
+    assert RUN_SHARD in GUARDED_SHELL
+
+
+@pytest.mark.parametrize("path", GUARDED_SHELL, ids=lambda p: p.name)
+def test_no_eval_of_a_command_substitution(path):
+    """A new `eval "$(...)"` or one of its variants would reintroduce the bug."""
+    assert _eval_offenders(path.read_text()) == []
+
+
+def _bootstrap_ssh_agent_lines() -> str:
+    lines = [line for line in BOOTSTRAP.read_text().splitlines() if "SSH_AGENT_ENV" in line]
+    assert len(lines) == 2, lines
+    return "\n".join(lines) + "\n"
+
+
+# Stand-ins for the bootstrap's own terminate() and for ssh-agent.
+FAKE_BOOTSTRAP = """
+terminate() { echo "terminated: $1"; }
+"""
+
+
+def test_bootstrap_ssh_agent_failure_reaches_terminate():
+    r = subprocess.run(
+        [
+            "bash",
+            "-c",
+            BOOTSTRAP_OPTS
+            + FAKE_BOOTSTRAP
+            + 'ssh-agent() { echo "fake: no agent" >&2; return 2; }\n'
+            + _bootstrap_ssh_agent_lines()
+            + "echo reached",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.stdout == "terminated: could not start an ssh-agent\n"
+    assert r.returncode == 1
+
+
+def test_bootstrap_ssh_agent_success_sets_the_socket():
+    r = subprocess.run(
+        [
+            "bash",
+            "-c",
+            BOOTSTRAP_OPTS
+            + FAKE_BOOTSTRAP
+            + "ssh-agent() { echo 'SSH_AUTH_SOCK=/tmp/fake.sock; export SSH_AUTH_SOCK;'; echo 'echo Agent pid 7;'; }\n"
+            + _bootstrap_ssh_agent_lines()
+            + "bash -c 'echo \"sock=$SSH_AUTH_SOCK\"'",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "sock=/tmp/fake.sock\n"

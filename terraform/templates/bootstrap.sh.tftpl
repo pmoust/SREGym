@@ -411,7 +411,9 @@ fi
 #    already fetched above for the clones, which has read access to the module.
 #    Deliberately not named GITHUB_TOKEN: that name is repo-scoped in most
 #    tooling and would 403 against nofireai/nofire-code-miner.
-eval "$(ssh-agent -s)" >/dev/null || { terminate "could not start an ssh-agent"; exit 1; }
+# Captured first: `eval "$(cmd)"` returns eval's status, not ssh-agent's.
+SSH_AGENT_ENV=$(ssh-agent -s) || { terminate "could not start an ssh-agent"; exit 1; }
+eval "$SSH_AGENT_ENV" >/dev/null
 
 # BRAIN_GO_CUSTOMER is deliberately not set, so setup_brain_go.sh keeps its own
 # default and `make up` seeds a tenant no slot will ever ask for.
