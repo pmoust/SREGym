@@ -189,32 +189,28 @@ if [ "$SREGYM_ARM" = "native" ]; then
   EDGE_GRAPH_URL="http://${SREGYM_PRIVATE_IP}:8000/api/edge"
   echo "[bootstrap] edge graph endpoint $EDGE_GRAPH_URL"
 
-  # Pulled once per box and loaded into each slot's node below, the same shape
-  # as the MCP image. Pulling per slot instead would put N anonymous Docker
-  # Hub pulls of the same image on every box in the fleet, which is how a run
-  # meets a rate limit it has no credential to raise.
+  # Not pre-pulled and not loaded into the node. Each kind node pulls the
+  # image itself, and the Helm release leaves the chart's own
+  # imagePullPolicy: Always in place.
+  #
+  # Two attempts to pre-load it failed the same way. kind runs
+  # `ctr images import --all-platforms` for both `kind load docker-image` and
+  # `kind load image-archive`, and nofireai/edge:latest is a manifest list:
+  # docker fetches one platform's blobs, `docker save` keeps the whole list,
+  # and the import then asks the node for a digest nobody ever downloaded:
+  #
+  #   ctr: content digest sha256:62d20cf4... not found
+  #
+  # That aborted the slot in run-20260925-0933 and again, with the archive, in
+  # run-20260928-0703. The MCP image does not hit it because it is built on
+  # this box, so every blob it references is present.
+  #
+  # What the pre-pull was for was Docker Hub's anonymous rate limit: one pull
+  # per box rather than one per slot. A full run is four boxes of three slots,
+  # so twelve pulls of one public image, which is not near the limit. Paying
+  # that is cheaper than carrying a platform-selection workaround for it.
   EDGE_IMAGE=$("$WORKDIR/scripts/benchmark/native_arm.sh" edge-versions | cut -f1)
-  if ! docker pull "$EDGE_IMAGE" >/dev/null; then
-    terminate "could not pull the edge agent image $EDGE_IMAGE"
-    exit 1
-  fi
-
-  # Saved to an archive here, and each slot loads the archive rather than the
-  # image. `kind load docker-image` runs `ctr images import --all-platforms`,
-  # and a pulled multi-architecture image has only the blobs of the platform
-  # docker selected, so the import asks the node for a digest that was never
-  # fetched and fails with "content digest ... not found". That is what
-  # aborted the slot in run-20260925-0933. `docker save` writes what is in the
-  # local store, one platform and no attestation manifests, which imports
-  # clean. The MCP image does not need this because it is built here, so every
-  # blob it references is present.
-  EDGE_IMAGE_ARCHIVE="$WORKDIR/edge-image.tar"
-  if ! docker save "$EDGE_IMAGE" -o "$EDGE_IMAGE_ARCHIVE"; then
-    terminate "could not save the edge agent image $EDGE_IMAGE"
-    exit 1
-  fi
-  export EDGE_IMAGE_ARCHIVE
-  echo "[bootstrap] edge agent image $EDGE_IMAGE saved to $EDGE_IMAGE_ARCHIVE"
+  echo "[bootstrap] edge agent image $EDGE_IMAGE, pulled by each kind node"
 
   # The chart, once per box and for the same reason. Slots run concurrently in
   # background subshells, so a per-slot download to one shared path lets one
@@ -456,17 +452,6 @@ run_slot() {
     if ! kind load docker-image "$SREGYM_MCP_IMAGE" --name "$KIND_CLUSTER_NAME"; then
       echo "[slot $slot] loading the MCP image into $KIND_CLUSTER_NAME failed, slot aborted"
       return 1
-    fi
-
-    # Same reasoning for the edge agent's image, pulled once per box above.
-    # The Helm release sets imagePullPolicy: IfNotPresent, so the node uses
-    # this copy rather than reaching Docker Hub once per slot.
-    if [ "$SREGYM_ARM" = "native" ]; then
-      echo "[slot $slot] loading $EDGE_IMAGE into $KIND_CLUSTER_NAME"
-      if ! kind load image-archive "$EDGE_IMAGE_ARCHIVE" --name "$KIND_CLUSTER_NAME"; then
-        echo "[slot $slot] loading the edge image into $KIND_CLUSTER_NAME failed, slot aborted"
-        return 1
-      fi
     fi
 
     # Put an MCP server in the cluster before seeding. The conductor deploys one

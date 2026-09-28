@@ -448,9 +448,11 @@ are produced. Concretely, per slot:
 - The edge agent is installed from the `nofire-edge` chart, publishing to
   `http://<private ip>:8000/api/edge` every 30s under a key of type `edge`
   minted through `POST /api/account/api-keys`. Causal analysis, network
-  observability and Sentry are off. The image and the chart are fetched once
-  per box and handed to each slot, since slots run concurrently and would
-  otherwise race on one download path.
+  observability and Sentry are off. The chart is fetched once per box and
+  handed to each slot, since slots run concurrently and would otherwise race
+  on one download path. The image is not: each kind node pulls it, because
+  kind imports all platforms of a manifest list and a pulled image holds only
+  one platform's blobs, so neither of kind's load paths can take it.
 - The edge agent reaches brain-go's api at the host's private address without
   the harness arranging anything. brain-go's own `scripts/dev-env.sh` writes
   `BIND_ADDR=0.0.0.0` when it creates `deploy/.env`, so the whole stack is

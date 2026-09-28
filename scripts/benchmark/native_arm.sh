@@ -388,7 +388,6 @@ cmd_install_edge() {
     --namespace "$ns" \
     --set "image.repository=${EDGE_IMAGE%:*}" \
     --set "image.tag=${EDGE_IMAGE##*:}" \
-    --set image.pullPolicy=IfNotPresent \
     --set "config.kube.clusterName=$cluster" \
     --set "config.kube.resyncInterval=$EDGE_RESYNC_INTERVAL" \
     --set "config.publisher.graph.url=$graph_url" \

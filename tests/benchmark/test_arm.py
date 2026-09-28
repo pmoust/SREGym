@@ -579,22 +579,30 @@ def test_the_chart_fetch_is_handed_the_clone_token():
     assert "GH_TOKEN=" in call, f"fetch-chart must be handed the token: {call}"
 
 
-def test_the_edge_image_is_loaded_from_an_archive():
-    """`kind load docker-image` runs `ctr images import --all-platforms`, and a
-    pulled multi-architecture image holds only the blobs of the platform docker
-    selected, so the import asks for a digest that was never fetched and fails
-    with "content digest ... not found". That aborted the slot in
-    run-20260925-0933. Saving the image and loading the archive imports what is
-    actually in the local store.
+def test_the_edge_image_is_not_preloaded_into_the_node():
+    """kind runs `ctr images import --all-platforms` for both of its load
+    paths, and nofireai/edge:latest is a manifest list. docker fetches one
+    platform's blobs, `docker save` keeps the whole list, and the import then
+    asks the node for a digest nobody downloaded. Two runs died that way,
+    run-20260925-0933 on the docker store and run-20260928-0703 on the
+    archive.
 
-    The MCP image keeps the docker-image path: it is built on the box, so every
-    blob it references is present.
+    Each node pulls the image itself now, so nothing here loads it and the
+    chart's own imagePullPolicy: Always is left in place. The MCP image keeps
+    its load: it is built on the box, so every blob it references is present.
     """
     shard = (ROOT / "scripts" / "benchmark" / "run_shard.sh").read_text()
-    loads = [line.strip() for line in shard.splitlines() if "kind load" in line and "if !" in line]
+    native = (ROOT / "scripts" / "benchmark" / "native_arm.sh").read_text()
 
-    edge = [line for line in loads if "EDGE" in line]
-    mcp = [line for line in loads if "MCP" in line]
+    # Comment lines dropped before matching: the comment explaining this
+    # names both commands it forbids, and matching the whole file would read
+    # the explanation as the thing it warns about.
+    code = [line for line in shard.splitlines() if not line.strip().startswith("#")]
+    loads = [line.strip() for line in code if "kind load" in line and "if !" in line]
 
-    assert len(edge) == 1 and "image-archive" in edge[0], f"edge must load an archive: {edge}"
-    assert len(mcp) == 1 and "docker-image" in mcp[0], f"the MCP image is built here: {mcp}"
+    assert len(loads) == 1, f"only the MCP image is loaded: {loads}"
+    assert "SREGYM_MCP_IMAGE" in loads[0], f"the one load must be the MCP image: {loads[0]}"
+    assert not [line for line in code if "docker save" in line], "saving it was the second failed attempt"
+    assert not [line for line in native.splitlines() if "pullPolicy" in line and not line.strip().startswith("#")], (
+        "the chart's own Always policy is what pulls it"
+    )
