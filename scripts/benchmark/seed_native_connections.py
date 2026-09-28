@@ -32,11 +32,13 @@ observation bucket, which is what the MCP arm needs because bucket alone maps
 its three telemetry endpoints onto one bucket. Native families are already
 partitioned by service, so the key would be read by nothing.
 
-`allow_private_networks` is set on the three HTTP connections. brain-go's
-outbound SSRF guard refuses a non-public address unless the connection opts
-in, and every URL here is the host's own RFC1918 address. The Kubernetes
-connection has no such key: buildKubernetes passes no options to the client,
-so its guard cannot be lifted from config today. See --kubeconfig-file below.
+`allow_private_networks` is set on all four connections. brain-go's outbound
+SSRF guard refuses a non-public address unless the connection opts in, and
+every address here is the host's own RFC1918 address. That includes the
+Kubernetes API server kind exposes, which the kubeconfig names. buildKubernetes
+reads the flag and passes it to the client, whose guard sits on the REST config
+the clientset is built from, so it also covers the dial brain-go makes when it
+validates the connection. Without the flag that validation is refused.
 """
 
 from __future__ import annotations
@@ -93,7 +95,7 @@ def build_config(service: str, url: str, kubeconfig: str) -> dict[str, Any]:
         #
         # The credential inside it is a read-only ServiceAccount token, not
         # kind's cluster-admin client certificate. native_arm.sh builds it.
-        return {"kubeconfig": kubeconfig}
+        return {"kubeconfig": kubeconfig, "allow_private_networks": True}
 
     return {"url": url, "allow_private_networks": True}
 

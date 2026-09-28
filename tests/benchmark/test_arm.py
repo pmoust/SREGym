@@ -112,11 +112,20 @@ def test_the_telemetry_connections_opt_into_private_addresses():
         assert config == {"url": "http://10.0.1.5:21000", "allow_private_networks": True}
 
 
-def test_the_kubernetes_connection_carries_a_kubeconfig_and_nothing_else():
+def test_the_kubernetes_connection_carries_a_kubeconfig_and_the_private_network_opt_in():
+    """kind's API server is on the host's RFC1918 address too, and brain-go's
+    guard on the Kubernetes client refuses it unless the connection opts in."""
     config = build_config("kubernetes", "", "apiVersion: v1\nkind: Config\n")
 
-    assert set(config) == {"kubeconfig"}
-    assert config["kubeconfig"].startswith("apiVersion: v1")
+    assert config == {"kubeconfig": "apiVersion: v1\nkind: Config\n", "allow_private_networks": True}
+
+
+def test_every_native_connection_opts_into_private_addresses():
+    """All four backends are on the host's own RFC1918 address, so a service
+    added to NATIVE_CONNECTIONS without the opt-in fails here."""
+    for _, _, service in NATIVE_CONNECTIONS:
+        config = build_config(service, "http://10.0.1.5:21000", "apiVersion: v1\n")
+        assert config.get("allow_private_networks") is True, service
 
 
 # --- the seeding request bodies, against a stub brain-go --------------------
@@ -200,6 +209,9 @@ def test_seeding_the_native_arm_posts_four_native_connections(stub_brain, tmp_pa
     # native family is partitioned by service, so writing it would be writing
     # a key nothing reads.
     assert not any("signals" in c["config"] for c in creates)
+    # Every backend, the Kubernetes API server included, is on the host's
+    # RFC1918 address, which brain-go's outbound guard refuses without this.
+    assert all(c["config"]["allow_private_networks"] is True for c in creates)
     # Only Kubernetes is probed at seed time: the three telemetry backends
     # belong to the application, which does not exist yet.
     assert [path for path, _ in posts if path.endswith("/validate")] == ["/api/connections/u-1/validate"]
