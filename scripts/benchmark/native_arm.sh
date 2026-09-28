@@ -80,12 +80,18 @@ cmd_private_ip() {
   ip="${SREGYM_PRIVATE_IP:-$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)}"
   [ -n "$ip" ] || die "could not determine a private IPv4 address; set SREGYM_PRIVATE_IP"
 
-  # RFC1918 checked, not assumed: brain-go's allow_private_networks covers
-  # exactly these ranges plus ULA, so a public or link-local address here
-  # would be refused by the connection rather than by this script.
+  # RFC1918 checked, not assumed. brain-go's guard is not the reason:
+  # allow_private_networks lifts its whole non-public address check, so
+  # loopback, link-local (169.254.169.254 included), CGNAT and ULA would all
+  # be dialable, and a public address needs no opt-in at all. The check exists
+  # only because this arm expects the host's RFC1918 address. Loopback is the
+  # one class with a concrete failure: brain-go dials from inside a container,
+  # where loopback is the container's own (see kind-config). The value is also
+  # exported to seed_slot.sh, which applies the same RFC1918 check, so failing
+  # here reports it before any cluster is built.
   case "$ip" in
     10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
-    *) die "resolved '$ip', which is not RFC1918; allow_private_networks would not cover it" ;;
+    *) die "resolved '$ip', which is not RFC1918; this arm expects the host's RFC1918 address" ;;
   esac
 
   echo "$ip"
