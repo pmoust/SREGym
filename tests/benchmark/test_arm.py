@@ -375,8 +375,9 @@ def test_installing_the_edge_agent_refuses_a_chart_it_was_not_given():
 
 
 def test_the_private_address_helper_refuses_a_public_one():
-    """Every address this arm builds comes from here, and brain-go's
-    allow_private_networks covers RFC1918 and ULA only."""
+    """Every address this arm builds comes from here, and the arm expects the
+    host's RFC1918 address. brain-go's allow_private_networks is not what
+    refuses a public one: it lifts the whole non-public address check."""
     ok = subprocess.run(
         ["bash", str(NATIVE_ARM), "private-ip"],
         capture_output=True,
