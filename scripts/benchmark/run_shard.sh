@@ -383,6 +383,27 @@ MCP_IMAGE=$("$WORKDIR/scripts/benchmark/build_mcp_image.sh") || {
 export SREGYM_MCP_IMAGE="$MCP_IMAGE"
 echo "[bootstrap] MCP server image $MCP_IMAGE"
 
+# --- slot environment -------------------------------------------------------
+# Run a command that prints `export` lines on stdout, and eval them only if the
+# command exited 0. Returns the command's status when it failed.
+#
+# `eval "$(cmd)"` cannot do this. eval returns the status of the string it
+# evaluates, not the status of the substitution that produced it, and both
+# callers below (run_slot_env.sh and seed_slot.sh) write their errors to stderr
+# and nothing to stdout when they fail. A failed run therefore evals an empty
+# string and returns 0, so `if ! eval "$(cmd)"` never takes its failure branch.
+# That is how a failed tenant seeding in run-20260928-0801-f50f50db carried on
+# into the edge install and died there on an unbound BRAIN_EDGE_API_KEY.
+#
+# `local` is on its own line because `local x=$(cmd)` returns local's status,
+# which is 0, and hides cmd's the same way eval does. Pass environment
+# assignments through `env`, e.g. `eval_exports env FOO=bar script args`.
+eval_exports() {
+  local eval_exports_out
+  eval_exports_out=$("$@") || return $?
+  eval "$eval_exports_out"
+}
+
 # --- slot workers -----------------------------------------------------------
 # Each slot is one concurrent SREGym run on this instance, and needs four
 # things kept to itself. run_slot_env.sh supplies the first three (its own kind
@@ -408,8 +429,15 @@ run_slot() {
   {
     echo "[slot $slot] starting with $(echo $problems | wc -w) problems"
 
-    # Ports, cluster name, kubeconfig and cache dir for this slot.
-    eval "$(SREGYM_SLOT_ROOT="$WORKDIR/slot-state" "$WORKDIR/scripts/benchmark/run_slot_env.sh" "$slot")"
+    # Ports, cluster name, kubeconfig and cache dir for this slot. Nothing has
+    # started yet, so a failure here has nothing to stop. Without the check a
+    # bad slot index or a failed mkdir left every one of these unset and the
+    # slot failed later on whichever variable it read first.
+    if ! eval_exports env SREGYM_SLOT_ROOT="$WORKDIR/slot-state" \
+           "$WORKDIR/scripts/benchmark/run_slot_env.sh" "$slot"; then
+      echo "[slot $slot] could not compute the slot environment, slot aborted"
+      return 1
+    fi
 
     # Which run, shard and slot produced a row. The driver stamps these onto
     # each investigation it opens, so a result can be traced back to the sweep
@@ -845,9 +873,10 @@ run_slot() {
     # rather than at the wrong port:
     #   no CSRF-TOKEN cookie in the /health response (200)
     echo "[slot $slot] seeding its own brain-go tenant"
-    if ! eval "$(BRAIN_GO_DIR="$BRAIN_GO_DIR" "$WORKDIR/scripts/benchmark/seed_slot.sh" \
+    if ! eval_exports env BRAIN_GO_DIR="$BRAIN_GO_DIR" \
+           "$WORKDIR/scripts/benchmark/seed_slot.sh" \
            "sregym-shard-$SHARD_INDEX-slot-$slot" "$MCP_SERVER_PORT" \
-           "http://127.0.0.1:8000")"; then
+           "http://127.0.0.1:8000"; then
       echo "[slot $slot] tenant seeding failed, slot aborted"
       stop_pf
       return 1
@@ -857,6 +886,14 @@ run_slot() {
     # tenant exists. --wait inside, so a slot whose agent cannot start fails
     # here rather than at the first attempt's entity-count gate.
     if [ "$SREGYM_ARM" = "native" ]; then
+      # seed_slot.sh prints BRAIN_EDGE_API_KEY only when it minted one. Checked
+      # here so a seeding that exits 0 without it aborts with this message
+      # rather than with `set -u` killing the slot on the read below.
+      if [ -z "${BRAIN_EDGE_API_KEY:-}" ]; then
+        echo "[slot $slot] seeding printed no BRAIN_EDGE_API_KEY, slot aborted"
+        stop_pf
+        return 1
+      fi
       echo "[slot $slot] installing the edge agent into $KIND_CLUSTER_NAME"
       if ! "$WORKDIR/scripts/benchmark/native_arm.sh" install-edge \
              "$KIND_CLUSTER_NAME" "$EDGE_GRAPH_URL" "$BRAIN_EDGE_API_KEY" nofire-edge; then
