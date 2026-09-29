@@ -118,6 +118,27 @@ log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-
 set_env_key FEATURE_FORCE_RCI_FOR_CLI_ENABLED "${BRAIN_FORCE_RCI:-true}"
 log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 
+# Run the api and edge services at debug. brain-go writes its edge ingest
+# success line, "ingested edge resource graph" with the account, connection,
+# cluster, node and edge counts, whether the graph changed and whether the
+# post created the connection, at DEBUG. At info the archived
+# sregym-brain-go.log has no edge line at all, and a run cannot tell "no
+# publish arrived" from "a publish arrived and was dropped" without reading
+# the store code. At debug every edge publish that landed is in that log.
+#
+# This is the benchmark box only. brain-go's default and production level is
+# info, and nothing here changes that. Do not lower this back to info to match
+# production: the line it exists for would disappear.
+#
+# LOG_LEVEL is read by cmd/brain's process logger, which api and edge log
+# through; chat, mcp and tworker build their own and ignore it. A brain-go
+# checkout older than the LOG_LEVEL setting ignores the key and logs at info.
+# No ordering constraint against dev-env.sh: it only needs to be in
+# deploy/.env before `make up`. Written before BRAIN_ENV_EXTRA so a run can
+# still override it.
+set_env_key LOG_LEVEL debug
+log "brain-go process log level: debug"
+
 # --- reaching the api from inside a slot's kind cluster ----------------------
 # The native arm's edge agent runs inside the slot's kind cluster and POSTs its
 # resource graph to brain-go's /api/edge, so the api service has to be
