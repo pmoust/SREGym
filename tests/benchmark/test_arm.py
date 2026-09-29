@@ -374,6 +374,179 @@ def test_installing_the_edge_agent_refuses_a_chart_it_was_not_given():
     assert "SREGYM_EDGE_CHART" in done.stderr
 
 
+def _go_duration_seconds(value: str) -> float:
+    """Seconds in a Go duration string of h/m/s parts, e.g. "60s" or "1m30s"."""
+    parts = re.findall(r"(\d+(?:\.\d+)?)(h|m|s)", value)
+    assert parts and "".join(n + u for n, u in parts) == value, f"not a duration this test reads: {value!r}"
+
+    return sum(float(n) * {"h": 3600, "m": 60, "s": 1}[u] for n, u in parts)
+
+
+def test_the_graph_publish_interval_is_not_below_the_agents_floor():
+    """The edge agent exits at startup when its publish interval is under one
+    minute. At 30s it crash-looped for a whole run, Helm's wait passed anyway,
+    and every attempt failed the empty-graph gate."""
+    src = NATIVE_ARM.read_text()
+    default = re.search(r'^EDGE_GRAPH_INTERVAL="\$\{SREGYM_EDGE_GRAPH_INTERVAL:-([^}]*)\}"$', src, re.M)
+    assert default, "EDGE_GRAPH_INTERVAL default not found in native_arm.sh"
+    assert _go_duration_seconds(default.group(1)) >= 60
+
+    # The value checked above is the one handed to the chart.
+    assert '--set "config.publisher.graph.interval=$EDGE_GRAPH_INTERVAL"' in src
+
+
+# --- install-edge's own check that the agent runs and publishes -------------
+#
+# kubectl, helm and uv are fakes on PATH; brain-go is a stub HTTP server, so
+# the real brain_graph.py reads a real response. The fake uv runs this test's
+# interpreter on whatever follows "python", which is how native_arm.sh calls it.
+
+FAKE_KUBECTL = """#!/bin/sh
+echo "$*" >>"$FAKE_KUBECTL_LOG"
+case "$*" in
+  *"create namespace"*|*"create secret"*) echo "apiVersion: v1" ;;
+  *"apply -f -"*) cat >/dev/null ;;
+  *"get deploy nofire-edge"*) printf nofire-edge ;;
+  *"auth can-i"*) echo no ;;
+  *"get pods -l"*) printf '%s\\n' "$FAKE_PODS" ;;
+  *"get pods -o wide"*) echo FAKE-PODS-WIDE ;;
+  *"get events"*) echo FAKE-EVENTS ;;
+  *"logs deploy/nofire-edge"*) echo FAKE-AGENT-LOG ;;
+esac
+exit 0
+"""
+
+FAKE_UV = """#!/bin/sh
+while [ "$#" -gt 0 ] && [ "$1" != python ]; do shift; done
+shift
+exec "$FAKE_PYTHON" "$@"
+"""
+
+
+class _Graph(BaseHTTPRequestHandler):
+    """brain-go's entity search. Answers with no entities for the first
+    `empty_replies` requests and one entity after that."""
+
+    empty_replies = 0
+    seen: list = []
+
+    def log_message(self, *args):  # noqa: A002
+        pass
+
+    def do_GET(self):  # noqa: N802
+        type(self).seen.append((self.path, self.headers.get("Cookie", "")))
+        populated = len(type(self).seen) > type(self).empty_replies
+        body = {"entities": [{"entity_type": "Pod"}] if populated else []}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+
+@pytest.fixture
+def install_edge(tmp_path):
+    """Run install-edge against fakes. Returns a runner taking the pod line
+    kubectl reports and how many empty graph reads brain-go serves first."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("kubectl", FAKE_KUBECTL), ("uv", FAKE_UV), ("helm", "#!/bin/sh\nexit 0\n")):
+        (bindir / name).write_text(body)
+        (bindir / name).chmod(0o755)
+
+    chart = tmp_path / "nofire-edge-0.5.2.tgz"
+    chart.write_bytes(b"chart")
+    kubectl_log = tmp_path / "kubectl.log"
+
+    server = HTTPServer(("127.0.0.1", 0), _Graph)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def run(pods: str, empty_replies: int):
+        _Graph.empty_replies = empty_replies
+        _Graph.seen = []
+        env = {
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "FAKE_PYTHON": sys.executable,
+            "FAKE_KUBECTL_LOG": str(kubectl_log),
+            "FAKE_PODS": pods,
+            "SREGYM_EDGE_CHART": str(chart),
+            "BRAIN_ADMIN_API_URL": f"http://127.0.0.1:{server.server_port}",
+            "BRAIN_SESSION": "session_x",
+            "SREGYM_EDGE_READY_SECONDS": "3",
+            "SREGYM_EDGE_PUBLISH_SECONDS": "3",
+            "SREGYM_EDGE_POLL_SECONDS": "1",
+        }
+        done = subprocess.run(
+            [
+                "bash",
+                str(NATIVE_ARM),
+                "install-edge",
+                "sregym-0",
+                "http://10.0.1.5:8000/api/edge",
+                "key",
+                "nofire-edge",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=env,
+            timeout=60,
+        )
+        return done, list(_Graph.seen)
+
+    yield run
+    server.shutdown()
+
+
+def _assert_diagnostics_dumped(stderr: str) -> None:
+    for marker in ("FAKE-PODS-WIDE", "FAKE-EVENTS", "FAKE-AGENT-LOG"):
+        assert marker in stderr, f"{marker} missing from the slot log dump"
+
+
+def test_install_edge_succeeds_once_the_agent_has_published(install_edge):
+    done, seen = install_edge("nofire-edge-abc true 0", empty_replies=1)
+
+    assert done.returncode == 0, done.stderr
+    assert "the edge agent has published" in done.stderr
+    assert "FAKE-AGENT-LOG" not in done.stderr
+    # Polled past the first empty read, under the slot's session.
+    assert len(seen) == 2
+    assert all(path.startswith("/api/entities/search") for path, _ in seen)
+    assert all("session=session_x" in cookie for _, cookie in seen)
+
+
+def test_install_edge_aborts_the_slot_when_nothing_is_published(install_edge):
+    """The smoke-run failure: a pod Helm accepted and a graph that never
+    filled. The slot stops here with the agent's logs, not three attempts
+    later with none."""
+    done, seen = install_edge("nofire-edge-abc true 0", empty_replies=10_000)
+
+    assert done.returncode != 0
+    assert "held no entities" in done.stderr
+    assert len(seen) >= 2
+    _assert_diagnostics_dumped(done.stderr)
+
+
+def test_install_edge_aborts_at_once_when_the_agent_restarts(install_edge):
+    """A startup fault exits on every start, so a restart is not waited out."""
+    done, seen = install_edge("nofire-edge-abc false 2", empty_replies=0)
+
+    assert done.returncode != 0
+    assert "restarted" in done.stderr
+    assert seen == []
+    _assert_diagnostics_dumped(done.stderr)
+
+
+def test_install_edge_aborts_when_the_pod_never_becomes_ready(install_edge):
+    done, seen = install_edge("nofire-edge-abc false 0", empty_replies=0)
+
+    assert done.returncode != 0
+    assert "was not Ready within" in done.stderr
+    assert seen == []
+    _assert_diagnostics_dumped(done.stderr)
+
+
 def test_the_private_address_helper_refuses_a_public_one():
     """Every address this arm builds comes from here, and the arm expects the
     host's RFC1918 address. brain-go's allow_private_networks is not what

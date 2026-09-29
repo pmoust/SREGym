@@ -100,6 +100,14 @@ path:
   agent publishes with, `native_arm.sh` does the cluster-side work (API server
   address, read-only ServiceAccount, telemetry forwards, the Helm install),
   and `native_gate.py` plus `brain_graph.py` gate and record the entity graph.
+  `install-edge` does not trust `helm --wait`: chart 0.5.2 runs one replica
+  with `maxUnavailable: 1`, so Helm 3 counts it ready with zero ready pods.
+  After the release it waits for the agent's pod to be Ready with no restarts
+  (180s) and for brain-go to hold at least one entity for the slot's account
+  (150s, read through `brain_graph.py`). On a timeout or a restart it writes
+  the namespace's pods, its last 30 events and the agent's logs to the slot
+  log and aborts the slot. The agent publishes every 60s, which is its floor:
+  it exits at startup on a shorter interval (sregym#133).
   With `SREGYM_ARM` unset none of them runs.
   `build_mcp_image.sh` builds that server's image from the checkout and names
   it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it
@@ -132,7 +140,8 @@ rediscover:
   `monitoring` namespace, so the entity graph fed to brain came from the same
   live cluster the fault was injected into, not a fixture. Carried out under
   `SREGYM_ARM=native`, which installs the published `nofire-edge` chart into
-  each slot's cluster in the `nofire-edge` namespace.
+  each slot's cluster in the `nofire-edge` namespace and checks that the agent
+  has published before the slot's first problem.
 - **RBAC exclusion for chaos-mesh is a correctness rule, not hygiene.** If the
   edge agent's ServiceAccount can read chaos-mesh CRDs
   (`podchaos.chaos-mesh.org` etc.), the injected fault shows up verbatim in

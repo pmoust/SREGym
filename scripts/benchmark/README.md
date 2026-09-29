@@ -446,13 +446,20 @@ are produced. Concretely, per slot:
   started once, because those services belong to the application and the
   conductor deploys it per problem.
 - The edge agent is installed from the `nofire-edge` chart, publishing to
-  `http://<private ip>:8000/api/edge` every 30s under a key of type `edge`
-  minted through `POST /api/account/api-keys`. Causal analysis, network
+  `http://<private ip>:8000/api/edge` every 60s under a key of type `edge`
+  minted through `POST /api/account/api-keys`. 60s is the agent's floor: it
+  exits at startup on a shorter publish interval. Causal analysis, network
   observability and Sentry are off. The chart is fetched once per box and
   handed to each slot, since slots run concurrently and would otherwise race
   on one download path. The image is not: each kind node pulls it, because
   kind imports all platforms of a manifest list and a pulled image holds only
   one platform's blobs, so neither of kind's load paths can take it.
+- `helm --wait` is not the install's check. Chart 0.5.2 runs one replica with
+  `maxUnavailable: 1`, and Helm 3 counts that ready with zero ready pods, so
+  a crash-looping agent passes it. `install-edge` then waits for the pod to
+  be Ready with no restarts (180s) and for brain-go to hold an entity for the
+  slot's account (150s). On failure it writes the pods, the last 30 events
+  and the agent's logs to the slot log and aborts the slot.
 - The edge agent reaches brain-go's api at the host's private address without
   the harness arranging anything. brain-go's own `scripts/dev-env.sh` writes
   `BIND_ADDR=0.0.0.0` when it creates `deploy/.env`, so the whole stack is
