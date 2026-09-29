@@ -28,8 +28,14 @@
 # Usage:
 #   scripts/benchmark/seed_slot.sh <customer> <mcp-port> [brain-api-url]
 #
-# On success, prints three `export` lines to stdout so a caller can:
-#   eval "$(scripts/benchmark/seed_slot.sh sregym-shard-0-slot-1 9955)"
+# On success, prints three `export` lines to stdout. Capture them and check
+# the status before the eval, the way run_shard.sh's eval_exports does, because
+# eval of a substitution returns eval's status and hides a failure:
+#   if out=$(scripts/benchmark/seed_slot.sh sregym-shard-0-slot-1 9955); then
+#     eval "$out"
+#   else
+#     echo "seeding failed"
+#   fi
 #
 #   BRAIN_API_KEY        the CLI token, for /cli/chat on the chat service
 #   BRAIN_SESSION        the owner session cookie, for the api service
@@ -78,9 +84,13 @@ cd "$BRAIN_GO_DIR"
 # container's own loopback, so the host's private address is required.
 PRIVATE_IP="${SREGYM_PRIVATE_IP:-$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)}"
 [ -n "$PRIVATE_IP" ] || die "could not determine a private IPv4 address; set SREGYM_PRIVATE_IP"
+# RFC1918 checked because every connection this script seeds, in either arm,
+# is built on the host's RFC1918 address. brain-go's guard is not the reason
+# for rejecting a public address: it does not refuse one. Under the private
+# allowance it still refuses loopback, link-local and CGNAT.
 case "$PRIVATE_IP" in
   10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
-  *) die "resolved '$PRIVATE_IP', which is not RFC1918; allow_private_endpoint would not cover it" ;;
+  *) die "resolved '$PRIVATE_IP', which is not RFC1918; every seeded connection expects the host's RFC1918 address" ;;
 esac
 MCP_BASE="http://${PRIVATE_IP}:${MCP_PORT}"
 log "private address $PRIVATE_IP, MCP base $MCP_BASE"
@@ -104,9 +114,9 @@ DEV_SESSION="session_$(hex 16)_$(hex 15)"
 # --customer ...), which already established this is safe to run repeatedly
 # against an already-running stack. -T disables pseudo-TTY allocation, which
 # this needs for unattended/scripted use.
-# 1>&2 is not tidiness: this script's stdout is a contract. The caller runs
-# `eval "$(seed_slot.sh ...)"`, so anything on stdout other than the export
-# line at the end is executed as shell. brainctl's summary went to stdout and
+# 1>&2 is not tidiness: this script's stdout is a contract. The caller evals
+# it, so anything on stdout other than the export lines at the end is executed
+# as shell. brainctl's summary went to stdout and
 # eval choked on its parenthesis:
 #   eval: syntax error near unexpected token `('
 #   eval: `Dev stack ready: account 3 (created), ... 4 automation(s) seeded.'
