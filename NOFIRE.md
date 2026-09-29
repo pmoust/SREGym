@@ -113,8 +113,12 @@ path:
   when the script exited 0 and otherwise aborts the slot (sregym#125). The
   bootstrap starts its ssh-agent the same way, capturing `ssh-agent -s` before
   the eval so a failure reaches `terminate` (sregym#128).
-  `tests/benchmark/test_eval_exports.py` fails on any `eval` of a command
-  substitution in `scripts/benchmark/*.sh` or `terraform/templates/*.tftpl`.
+  `tests/benchmark/test_eval_exports.py` fails on an `eval` in command position
+  whose arguments hold a command substitution, `$(...)` or backticks, on one
+  logical line of `scripts/benchmark/*.sh` or `terraform/templates/*.tftpl`.
+  It skips comments, single-quoted text and escaped `\$(`, and joins
+  backslash continuations. It does not follow a quoted string across lines or
+  tell a heredoc body from code.
   `launch.sh` runs a named scenario from `terraform/<name>.tfvars` with both
   refs pinned to current `origin/main`.
 - `terraform/` — the ephemeral spot fleet the suite runs on.

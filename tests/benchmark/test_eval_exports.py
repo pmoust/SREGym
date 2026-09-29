@@ -102,9 +102,14 @@ def test_real_run_slot_env_success_sets_the_slot(tmp_path):
     assert r.stdout == "sregym-2 9956\n"
 
 
-# `eval "$(cmd)"`, `eval $(cmd)`, `eval -- "$(cmd)"` and the backtick forms all
-# return eval's status, never cmd's.
-EVAL_OF_SUBSTITUTION = re.compile(r'\beval\s+(?:--\s+)?"?(?:\$\(|`)')
+# `eval "$(cmd)"`, `eval $(cmd)`, `eval -- "$(cmd)"`, the backtick forms and a
+# substitution anywhere in eval's arguments (`eval "export X=$(cmd)"`, which
+# returns export's 0) all return eval's status, never cmd's. It is matched
+# against the output of _code_lines, where eval must be in command position
+# and `$((` arithmetic is not a substitution.
+EVAL_OF_SUBSTITUTION = re.compile(
+    r"(?:(?:^|[;&|(!{])\s*|\b(?:if|then|else|elif|do|while|until)\s+)eval\s+[^;&|]*?(?:\$\((?!\()|`)"
+)
 
 # NOFire's shell: the benchmark scripts and the terraform bootstrap template.
 # Upstream test tooling under tests/e2e-testing-scripts is out of scope.
@@ -113,15 +118,63 @@ GUARDED_SHELL = sorted((ROOT / "scripts" / "benchmark").glob("*.sh")) + sorted(
 )
 BOOTSTRAP = ROOT / "terraform" / "templates" / "bootstrap.sh.tftpl"
 
+# Characters that end a word, so a `#` after one of them starts a comment.
+WORD_BREAKS = " \t;&|()<>"
+
+
+def _code_lines(text: str):
+    """Yield (first line number, code) for each logical line of shell.
+
+    A backslash-newline joins a line to the next. Comments are dropped, and a
+    `#` inside quotes is not a comment. Single-quoted text, escaped characters
+    and double-quoted text other than `$`, `(` and backticks become `_`, so an
+    eval or a separator inside a string is not read as code.
+
+    Quote state does not carry past the end of a logical line, and heredoc
+    bodies are scanned as code, so a quoted string spanning lines or a heredoc
+    body is misread. test_no_eval_of_a_command_substitution shows that yields
+    no false positive in any guarded file today.
+    """
+    buf: list[str] = []
+    start = 0
+    quote = ""
+    for n, line in enumerate(text.splitlines(), 1):
+        if not buf:
+            start = n
+        joined = False
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if quote == "'":
+                buf.append(c if c == "'" else "_")
+                quote = "" if c == "'" else quote
+            elif c == "\\":
+                if i + 1 == len(line):
+                    joined = True
+                    break
+                buf.append("__")
+                i += 1
+            elif quote == '"':
+                buf.append(c if c in '"$(`' else "_")
+                quote = "" if c == '"' else quote
+            elif c == "#" and (not buf or buf[-1] in WORD_BREAKS):
+                break
+            else:
+                quote = c if c in "'\"" else ""
+                buf.append(c)
+            i += 1
+        if joined:
+            buf.append(" ")
+            continue
+        yield start, "".join(buf)
+        buf, quote = [], ""
+    if buf:
+        yield start, "".join(buf)
+
 
 def _eval_offenders(text: str) -> list[str]:
-    # Drops comment lines and trailing comments, so documentation of the bug
-    # does not count as the bug.
-    return [
-        f"{n}: {line.strip()}"
-        for n, line in enumerate(text.splitlines(), 1)
-        if EVAL_OF_SUBSTITUTION.search(re.sub(r"(^|\s)#.*", "", line))
-    ]
+    lines = text.splitlines()
+    return [f"{n}: {lines[n - 1].strip()}" for n, code in _code_lines(text) if EVAL_OF_SUBSTITUTION.search(code)]
 
 
 @pytest.mark.parametrize(
@@ -135,6 +188,10 @@ def _eval_offenders(text: str) -> list[str]:
         'eval "`cmd`"',
         'x=1; eval "$(ssh-agent -s)" >/dev/null || exit 1',
         '  if ! eval "$(cmd)"; then',
+        'eval "export X=$(cmd)"',
+        'x="a #b"; eval "$(cmd)"',
+        'eval \\\n  "$(cmd)"',
+        'eval "x=1; y=$(cmd)"',
     ],
 )
 def test_guard_catches_every_form(line):
@@ -151,6 +208,11 @@ def test_guard_catches_every_form(line):
         'eval "pid=\\$$var"',
         'eval_exports "$(cmd)"',
         "retrieval $(cmd)",
+        'echo "do not eval $(cmd)"',
+        "eval 'x=1' # $(cmd)",
+        'eval "n=$((1 + 2))"',
+        '# a comment ending in a backslash \\\neval "$out"',
+        'eval "$out" \\\n  # not eval "$(cmd)"',
     ],
 )
 def test_guard_ignores_comments_and_evals_of_a_variable(line):
@@ -168,10 +230,27 @@ def test_no_eval_of_a_command_substitution(path):
     assert _eval_offenders(path.read_text()) == []
 
 
+SSH_AGENT_CAPTURE = "SSH_AGENT_ENV=$(ssh-agent -s) || "
+SSH_AGENT_EVAL = 'eval "$SSH_AGENT_ENV" >/dev/null'
+
+
 def _bootstrap_ssh_agent_lines() -> str:
-    lines = [line for line in BOOTSTRAP.read_text().splitlines() if "SSH_AGENT_ENV" in line]
-    assert len(lines) == 2, lines
-    return "\n".join(lines) + "\n"
+    """The capture line and the eval line right after it, both unindented.
+
+    Unindented stands in for top level: the template indents the body of
+    every if, loop and function, so a code line at column 0 is outside all of
+    them. Heredoc bodies also sit at column 0, which this does not tell apart.
+    That is a convention of the file, not a parse. The lines run as raw
+    template text, which equals the rendered text only while they hold no
+    `%{` or `$${`, so that is asserted too.
+    """
+    lines = BOOTSTRAP.read_text().splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith(SSH_AGENT_CAPTURE)]
+    assert len(starts) == 1, starts
+    pair = lines[starts[0] : starts[0] + 2]
+    assert pair[1] == SSH_AGENT_EVAL, pair
+    assert not any("%{" in line or "$${" in line for line in pair), pair
+    return "\n".join(pair) + "\n"
 
 
 # Stand-ins for the bootstrap's own terminate() and for ssh-agent.

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # run_slot_env.sh
 # Prints the environment that isolates one SREGym run from the others sharing a
-# host, as `export` lines. Usage:
+# host, as `export` lines. Usage, capturing before the eval the way
+# run_shard.sh's eval_exports does so a failure is not hidden:
 #
-#   eval "$(scripts/benchmark/run_slot_env.sh 0)"
+#   out=$(scripts/benchmark/run_slot_env.sh 0) || exit
+#   eval "$out"
 #   uv run python main.py ...
 #
 # Slot 0 reproduces the MCP and k8s-proxy defaults exactly (9954, 16443), so
