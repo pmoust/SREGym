@@ -95,7 +95,7 @@ path:
   MCP server once per instance before any slot starts (`deploy_mcp.py`), which
   is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
   `setup_brain_go.sh` writes `LOG_LEVEL=debug` into the box's `deploy/.env`,
-  so brain-go's api and edge services write the DEBUG edge ingest line
+  so brain-go's api service writes the DEBUG edge ingest line
   (`ingested edge resource graph`, one per accepted publish) and
   `dump_brain_go_logs.sh` carries it into the archived `sregym-brain-go.log`.
   At info that log has no edge line at all (sregym#135). This is the benchmark

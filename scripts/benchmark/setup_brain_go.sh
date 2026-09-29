@@ -133,9 +133,11 @@ log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 # LOG_LEVEL is read by cmd/brain's process logger, which api and edge log
 # through; chat, mcp and tworker build their own and ignore it. A brain-go
 # checkout older than the LOG_LEVEL setting ignores the key and logs at info.
-# No ordering constraint against dev-env.sh: it only needs to be in
-# deploy/.env before `make up`. Written before BRAIN_ENV_EXTRA so a run can
-# still override it.
+# Must come after the first `dev-env.sh ensure` above, which creates
+# deploy/.env from the sample; set_env_key appends, so running it first would
+# leave a one-line file that ensure then never fills. The second ensure inside
+# `make up` only fills empty keys and leaves this one alone. Written before
+# BRAIN_ENV_EXTRA so a run can still override it.
 set_env_key LOG_LEVEL debug
 log "brain-go process log level: debug"
 
