@@ -21,11 +21,6 @@
 #   install-edge <cluster-name> <graph-url> <api-key> <namespace>
 #       Install the edge agent into the slot's cluster.
 #
-#   edge-diagnostics <namespace>
-#       Print the agent's pods, recent events and logs to stderr. What
-#       install-edge dumps on failure, exposed for the conductor's post-fault
-#       wait so both failures leave the same evidence.
-#
 #   edge-versions
 #       Print "image<TAB>chart" for the manifest.
 #
@@ -71,7 +66,9 @@ EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
 # After the fault: the first publish lands within one tick (60s to 90s) of
 # injection. The conductor holds diagnosis until brain-go shows a publish from
 # after the fault, capped at 120s (one tick plus the publish timeout, with
-# margin; native_gate.wait_for_fault_publish).
+# margin; native_gate.wait_for_fault_publish). Reaching the cap does not fail
+# the attempt, because a fault that changes no watched object produces no
+# visible publish; arm-native.json records it as "cap".
 #
 # The resync interval has no validation in the agent (it goes straight to the
 # informer factory). A resync replays the informers' local cache to their
@@ -604,13 +601,8 @@ case "${1:-}" in
   kubeconfig)   shift; cmd_kubeconfig "$@" ;;
   forwards)     shift; cmd_forwards "$@" ;;
   install-edge) shift; cmd_install_edge "$@" ;;
-  edge-diagnostics)
-    shift
-    [ "$#" -ge 1 ] || die "usage: native_arm.sh edge-diagnostics <namespace>"
-    dump_edge_diagnostics "$1"
-    ;;
   edge-versions) cmd_edge_versions ;;
   private-ip)   cmd_private_ip ;;
   fetch-chart)  cmd_fetch_chart ;;
-  *) die "usage: native_arm.sh {kind-config|kubeconfig|forwards|install-edge|edge-diagnostics|edge-versions|private-ip|fetch-chart} ..." ;;
+  *) die "usage: native_arm.sh {kind-config|kubeconfig|forwards|install-edge|edge-versions|private-ip|fetch-chart} ..." ;;
 esac

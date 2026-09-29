@@ -487,9 +487,13 @@ anywhere in the slot's cluster, both timestamped at or after injection.
 brain-go stamps every change event from one ingest with that ingest's receive
 time, so the second means a publish landed after the fault. brain-go exposes
 no last-publish time, so a publish that changed nothing cannot be seen. If
-neither appears inside the cap, the agent's pods, events and logs go to the
-slot log and the attempt fails the way the empty-graph gate fails it: the
-deploy is retried, up to three times, and never scored.
+neither appears inside the cap, the attempt is not failed: diagnosis proceeds
+and `arm-native.json` records `ended_by: "cap"`. Some faults change no object
+the agent watches (chaos-mesh CPU or network stress touches no Kubernetes
+object, and chart 0.5.2's default resources exclude networkpolicies), so an
+empty read at the cap does not show the agent is broken, and `install-edge`
+has already proved it publishes. Failing there would spend all three deploy
+attempts on such a problem and record it as `deploy_failed`.
 
 ### Recorded differences between the arms
 
@@ -513,7 +517,9 @@ paired result with these in mind rather than gating on them.
    production the agent publishes every 5m and an investigation starts when an
    alert fires, minutes after the fault, so the wait is closer to the product.
    Like item 3 it gives arm B extra time for the fault to develop, which
-   favours arm B. `post_fault_wait` in `arm-native.json` records each wait.
+   favours arm B. The cap does not fail the attempt. `post_fault_wait` in
+   `arm-native.json` records each wait, and the attempts with
+   `ended_by: "cap"` count how often the graph showed nothing after a fault.
 
 The manifest records `arm`, `edge_image` and `edge_chart_version`, and
 `seeded_connection_buckets`/`seeded_connection_signals` describe whichever
@@ -521,7 +527,8 @@ set the run actually seeded. Per attempt, `arm-native.json` lands beside
 `fault-spec.json` with the entity counts by type, whether a change event
 exists on the mutated component, and `post_fault_wait`: how long the
 post-fault wait took (`waited_seconds`), injection to the poll that ended it
-(`lag_seconds`), and what ended it (`ended_by`, `change_event` or `publish`). `archive_run.sh` already ships `*.json`, so
+(`lag_seconds`, null at the cap), and what ended it (`ended_by`:
+`change_event`, `publish` or `cap`). `archive_run.sh` already ships `*.json`, so
 it comes back with everything else.
 
 Smoke it on one problem before a paired run:

@@ -757,7 +757,7 @@ def _change_events_reads(monkeypatch, answer):
 
 def test_the_post_fault_wait_ends_on_a_change_event_on_the_component(monkeypatch):
     calls = _change_events_reads(monkeypatch, lambda poll, name: 1 if name == "frontend" and poll >= 3 else 0)
-    monkeypatch.setattr(native_gate, "_dump_edge_diagnostics", lambda ns: pytest.fail("no dump on success"))
+    _no_subprocess(monkeypatch)
     clock = _Clock()
 
     evidence = native_gate.wait_for_fault_publish(
@@ -791,19 +791,27 @@ def test_the_post_fault_wait_ends_on_any_publish_after_the_fault(monkeypatch):
     assert clock.sleeps == []
 
 
-def test_the_post_fault_wait_fails_the_attempt_at_the_cap(monkeypatch):
-    """An attempt scored against the pre-fault graph is what the wait exists to
-    prevent, so running out of time fails it and leaves the agent's logs."""
+def _no_subprocess(monkeypatch):
+    """Fail if anything spawns a process, which is how diagnostics would run."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail(f"unexpected subprocess: {a}"))
+
+
+def test_the_post_fault_wait_proceeds_at_the_cap(monkeypatch):
+    """Some faults change no object the agent watches, so a graph that shows
+    nothing after the fault is a result to count, not a broken attempt."""
     _change_events_reads(monkeypatch, lambda poll, name: 0)
-    dumped = []
-    monkeypatch.setattr(native_gate, "_dump_edge_diagnostics", dumped.append)
+    _no_subprocess(monkeypatch)
     clock = _Clock()
 
-    with pytest.raises(native_gate.NativeArmNotReady, match="within 120s of the fault"):
-        native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, NATIVE_ENV, clock=clock, sleep=clock.sleep)
+    evidence = native_gate.wait_for_fault_publish(
+        INJECTED_AT, ROOT_CAUSE, None, NATIVE_ENV, clock=clock, sleep=clock.sleep
+    )
 
-    assert dumped == ["nofire-edge"]
-    assert clock.now == 120
+    assert evidence["ended_by"] == "cap"
+    assert evidence["waited_seconds"] == 120
+    assert evidence["lag_seconds"] is None
+    assert evidence["polls"] == 25
+    assert "last_error" not in evidence
     assert sum(clock.sleeps) == 120
 
 
@@ -812,14 +820,25 @@ def test_the_post_fault_cap_is_overridable_and_read_errors_do_not_end_it(monkeyp
         raise brain_graph.requests.ConnectionError("refused")
 
     monkeypatch.setattr(native_gate, "change_events", failing)
-    monkeypatch.setattr(native_gate, "_dump_edge_diagnostics", lambda ns: None)
+    _no_subprocess(monkeypatch)
     clock = _Clock()
     env = {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "30", "SREGYM_POST_FAULT_POLL_SECONDS": "10"}
 
-    with pytest.raises(native_gate.NativeArmNotReady, match="within 30s.*ConnectionError"):
-        native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+    evidence = native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
 
+    assert evidence["ended_by"] == "cap"
+    assert evidence["waited_seconds"] == 30
+    assert evidence["last_error"] == "ConnectionError"
     assert clock.sleeps == [10, 10, 10]
+
+
+@pytest.mark.parametrize("unset", ["BRAIN_SESSION", "KIND_CLUSTER_NAME"])
+def test_the_post_fault_wait_still_raises_when_it_cannot_read(monkeypatch, unset):
+    monkeypatch.setattr(native_gate, "change_events", lambda *a, **k: pytest.fail("nothing to read with"))
+    env = {k: v for k, v in NATIVE_ENV.items() if k != unset}
+
+    with pytest.raises(native_gate.NativeArmNotReady, match=unset):
+        native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env)
 
 
 def test_the_post_fault_wait_is_a_no_op_outside_the_native_arm(monkeypatch):
@@ -885,9 +904,23 @@ def test_the_conductor_records_the_post_fault_wait_under_the_native_arm(monkeypa
     assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 42.0}
 
 
+def test_the_conductor_proceeds_when_the_post_fault_wait_reaches_its_cap(monkeypatch):
+    """The real wait, with a zero cap and a graph that never changes."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
+    for key, value in {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "0"}.items():
+        monkeypatch.setenv(key, value)
+    _change_events_reads(monkeypatch, lambda poll, name: 0)
+    _no_subprocess(monkeypatch)
+
+    conductor._inject_fault(stub)
+
+    assert stub.fault_injected
+    assert stub.native_arm_evidence["post_fault_wait"]["ended_by"] == "cap"
+
+
 def test_the_conductor_fails_the_attempt_when_the_post_fault_wait_does(monkeypatch):
-    """Raised out of start_problem, which main.py's deploy loop retries, the
-    same path the empty-graph gate takes."""
+    """A precondition failure is raised out of start_problem, which main.py's
+    deploy loop retries, the same path the empty-graph gate takes."""
     conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
 
     def fake_wait(*a, **k):
@@ -909,24 +942,6 @@ def test_arm_native_json_carries_the_post_fault_wait(tmp_path, monkeypatch):
     main._write_native_arm_evidence(tmp_path, conductor)
 
     assert json.loads((tmp_path / "arm-native.json").read_text())["post_fault_wait"] == wait
-
-
-def test_edge_diagnostics_dumps_what_install_edge_dumps(tmp_path):
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    (bindir / "kubectl").write_text(FAKE_KUBECTL)
-    (bindir / "kubectl").chmod(0o755)
-
-    done = subprocess.run(
-        ["bash", str(NATIVE_ARM), "edge-diagnostics", "nofire-edge"],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        env={"PATH": f"{bindir}:/usr/bin:/bin", "FAKE_KUBECTL_LOG": str(tmp_path / "log"), "FAKE_PODS": ""},
-    )
-
-    assert done.returncode == 0, done.stderr
-    _assert_diagnostics_dumped(done.stderr)
 
 
 def _terminate_body() -> str:

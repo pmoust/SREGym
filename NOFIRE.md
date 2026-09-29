@@ -112,8 +112,9 @@ path:
   After the fault is injected the conductor waits, native arm only and capped
   at 120s, until brain-go holds a change event from after the fault, on the
   fault's component or anywhere in the cluster, so diagnosis does not open on
-  the pre-fault graph. Nothing inside the cap fails the attempt like the
-  empty-graph gate. The wait and what ended it are recorded as
+  the pre-fault graph. Reaching the cap does not fail the attempt, because a
+  fault that changes no watched object leaves no visible publish; diagnosis
+  proceeds and the wait records `ended_by: "cap"`. The wait is recorded as
   `post_fault_wait` in `arm-native.json`; `scripts/benchmark/README.md` lists
   it with the other recorded differences between the arms.
   With `SREGYM_ARM` unset none of them runs.

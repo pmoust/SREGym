@@ -32,11 +32,9 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from pathlib import Path
 
 import requests
 
@@ -172,25 +170,18 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
 #
 # The cap is 120s: one 60s tick plus the agent's 30s publish timeout, and 30s
 # of margin for ingest.
+#
+# Reaching the cap does not fail the attempt. Some faults change no object the
+# agent watches (chaos-mesh CPU or network stress touches no Kubernetes
+# object, and chart 0.5.2's default resource list has no networkpolicies), and
+# a publish that changed nothing is invisible, so an empty read at the cap
+# does not show the agent is broken. install-edge already proved the agent
+# publishes, and the pre-fault gate proved the graph is populated. Failing
+# here would spend all three deploy attempts on such a problem and record it
+# as deploy_failed. The attempt proceeds and arm-native.json says "cap", which
+# counts how often the graph showed nothing after a fault.
 POST_FAULT_WAIT_S = 120
 POST_FAULT_POLL_S = 5
-
-# Where run_shard.sh installs the agent.
-EDGE_NAMESPACE = "nofire-edge"
-
-NATIVE_ARM_SH = Path(__file__).resolve().parent / "native_arm.sh"
-
-
-def _dump_edge_diagnostics(namespace: str) -> None:
-    """The same pods, events and logs install-edge dumps, from the same code.
-
-    Inherits the conductor's stderr, which run_shard.sh sends to the slot log.
-    Best effort: a failed dump must not replace the failure it explains.
-    """
-    try:
-        subprocess.run(["bash", str(NATIVE_ARM_SH), "edge-diagnostics", namespace], timeout=120, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("could not dump the edge agent's diagnostics: %s", exc)
 
 
 def _int_env(source, name: str, default: int) -> int:
@@ -214,15 +205,16 @@ def wait_for_fault_publish(
     Returns None outside the native arm without reading anything. Otherwise
     returns what ended the wait, for arm-native.json:
 
-      {"ended_by": "change_event" | "publish", "waited_seconds": ...,
+      {"ended_by": "change_event" | "publish" | "cap", "waited_seconds": ...,
        "lag_seconds": ..., "polls": ..., "cap_seconds": ..., ...}
 
     lag_seconds is from injection to the poll that saw the evidence, so it is
-    an upper bound on the graph's lag, by at most one poll interval.
+    an upper bound on the graph's lag, by at most one poll interval. It is
+    None when the wait reached the cap, because the lag is then unknown.
 
-    Raises NativeArmNotReady when nothing lands inside the cap, after dumping
-    the agent's pods, events and logs. The conductor treats that like the
-    empty-graph gate: the attempt is not scored.
+    Reaching the cap returns rather than raises; see POST_FAULT_WAIT_S. Raises
+    NativeArmNotReady only when BRAIN_SESSION or KIND_CLUSTER_NAME is unset,
+    or a budget variable is not an integer, since then nothing can be read.
     """
     source = os.environ if env is None else env
     if not is_native(source):
@@ -279,13 +271,11 @@ def wait_for_fault_publish(
             return evidence
 
         if waited >= cap:
-            break
+            evidence.update(ended_by="cap", waited_seconds=round(waited, 1), lag_seconds=None, polls=polls)
+            if last_error:
+                evidence["last_error"] = last_error
+            logger.warning("no post-fault publish seen within %ss; diagnosis proceeds: %s", cap, evidence)
+
+            return evidence
 
         sleep(min(poll, max(cap - waited, 0)))
-
-    _dump_edge_diagnostics(EDGE_NAMESPACE)
-    reason = f" (last read failed: {last_error})" if last_error else ""
-    raise NativeArmNotReady(
-        f"no publish from the edge agent reached brain-go within {cap}s of the fault{reason}. "
-        "brain-go would investigate this attempt against the pre-fault graph."
-    )

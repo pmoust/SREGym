@@ -291,16 +291,16 @@ class Conductor:
 
         # The native arm only: hold the diagnosis stage until brain-go has a
         # publish from after the fault, so the investigation does not open on
-        # the pre-fault graph. Raises like the gate above when nothing lands
-        # inside its cap, so a stale-graph attempt is retried, not scored.
-        # The MCP arm does not reach the call.
+        # the pre-fault graph. At its cap the wait returns and diagnosis
+        # proceeds, recorded as "cap"; it raises only when the slot's session
+        # or cluster name is missing. The MCP arm does not reach the call.
         if self.native_arm_evidence.get("arm") == "native":
             self.native_arm_evidence["post_fault_wait"] = wait_for_fault_publish(
                 self.fault_injected_at,
                 getattr(problem, "root_cause", None),
                 getattr(problem, "namespace", None),
             )
-            self.logger.info(f"[ENV] Post-fault publish seen: {self.native_arm_evidence['post_fault_wait']}")
+            self.logger.info(f"[ENV] Post-fault wait: {self.native_arm_evidence['post_fault_wait']}")
 
         # Prepare diagnosis checkpoint if available, after fault injection but before agent stages
         if (
