@@ -483,10 +483,16 @@ until brain-go has a publish from after the fault, capped at 120s
 (`SREGYM_POST_FAULT_WAIT_SECONDS`, polled every
 `SREGYM_POST_FAULT_POLL_SECONDS`, default 5). The wait ends on the first poll
 that finds either a change event on the fault's component, or a change event
-anywhere in the slot's cluster, both timestamped at or after injection.
-brain-go stamps every change event from one ingest with that ingest's receive
-time, so the second means a publish landed after the fault. brain-go exposes
-no last-publish time, so a publish that changed nothing cannot be seen. If
+anywhere in the slot's cluster, both timestamped at least 5s after injection.
+brain-go stamps every change event from one ingest with one time, taken when
+it finishes the ingest (`emitChangeEvents` in
+`internal/features/entitygraph/derive/reconcile/reconcile.go`), so the second
+means an ingest finished after the fault. The 5s margin keeps out a publish
+that left the agent just before the fault and finished its ingest just after.
+brain-go exposes no last-publish time, so a publish that changed nothing
+cannot be seen. Each request's timeout is the budget left, so a hung brain-go
+cannot stretch the wait much past the cap, and a failed read is recorded with
+its HTTP status (`last_error`, for example `HTTPError 401`). If
 neither appears inside the cap, the attempt is not failed: diagnosis proceeds
 and `arm-native.json` records `ended_by: "cap"`. Some faults change no object
 the agent watches (chaos-mesh CPU or network stress touches no Kubernetes
@@ -511,11 +517,13 @@ paired result with these in mind rather than gating on them.
    that arm A does not. A flakier app at t=0 than at t=150 is a small
    confound in arm B's favour.
 4. Arm B waits up to 120s after the fault, until brain-go holds a publish from
-   after it, before diagnosis starts; arm A starts at once. Without it the
-   first 60s to 90s of every native investigation reads the pre-fault graph,
-   and this arm is graded on whether the graph and its change events help. In
-   production the agent publishes every 5m and an investigation starts when an
-   alert fires, minutes after the fault, so the wait is closer to the product.
+   after it, before diagnosis starts; arm A starts at once. The first publish
+   after the fault lands 0s to 90s after it, because injection falls at a
+   random point in the agent's cycle. Without the wait that much of every
+   native investigation reads the pre-fault graph, and this arm is graded on
+   whether the graph and its change events help. In production the agent
+   publishes every 5m and an investigation starts when an alert fires,
+   minutes after the fault, so the wait is closer to the product.
    Like item 3 it gives arm B extra time for the fault to develop, which
    favours arm B. The cap does not fail the attempt. `post_fault_wait` in
    `arm-native.json` records each wait, and the attempts with

@@ -48,12 +48,18 @@ class GraphEmpty(RuntimeError):
     """The entity graph held nothing, so this attempt is not the native arm."""
 
 
-def _get(brain_url: str, session_cookie: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
+def _get(
+    brain_url: str,
+    session_cookie: str,
+    path: str,
+    params: dict[str, Any],
+    timeout: float = REQUEST_TIMEOUT_S,
+) -> dict[str, Any]:
     resp = requests.get(
         urljoin(brain_url, path),
         params=params,
         cookies={"session": session_cookie},
-        timeout=REQUEST_TIMEOUT_S,
+        timeout=timeout,
     )
     resp.raise_for_status()
 
@@ -104,6 +110,7 @@ def change_events(
     entity_name: str,
     namespace: str = "",
     since: datetime | None = None,
+    timeout: float = REQUEST_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Read the change events recorded against one entity.
 
@@ -120,7 +127,7 @@ def change_events(
     if since is not None:
         params["from"] = since.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
-    body = _get(brain_url, session_cookie, "/api/change-events", params)
+    body = _get(brain_url, session_cookie, "/api/change-events", params, timeout)
     events = body.get("data") or []
 
     return {

@@ -40,6 +40,7 @@ import requests
 
 from scripts.benchmark.arm import is_native
 from scripts.benchmark.brain_graph import (
+    REQUEST_TIMEOUT_S,
     GraphEmpty,
     change_events,
     parse_structured_root_cause,
@@ -149,12 +150,13 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
 # --- after the fault ---------------------------------------------------------
 #
 # The brain_go driver starts diagnosis as soon as the conductor leaves
-# inject_fault, and the edge agent's first publish after the fault lands 60s
-# to 90s later (see native_arm.sh for the tick arithmetic). Without a wait the
-# first minute of every investigation reads the pre-fault graph, and this arm
-# is graded on whether the graph and its change events help. In production an
-# investigation starts when an alert fires, minutes after the fault, so
-# waiting for the graph is the closer match.
+# inject_fault, and the edge agent's first publish after the fault lands 0s to
+# 90s later: the agent has been ticking since install, so injection falls at a
+# random point in its cycle (see native_arm.sh for the tick arithmetic).
+# Without a wait the start of every investigation reads the pre-fault graph,
+# and this arm is graded on whether the graph and its change events help. In
+# production an investigation starts when an alert fires, minutes after the
+# fault, so waiting for the graph is the closer match.
 #
 # The wait ends on evidence, not on time. Two things count, checked in order
 # on every poll:
@@ -163,10 +165,17 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
 #                 or after injection.
 #   publish       a change event anywhere in the slot's cluster at or after
 #                 injection. brain-go stamps every change event from one
-#                 ingest with that ingest's receive time, so such an event
-#                 exists only if a publish arrived after the fault. brain-go
-#                 exposes no last-publish time, so this is the only way to see
-#                 one; a publish that changed nothing is invisible here.
+#                 ingest with one time taken when it finishes the ingest,
+#                 after the diff and the persist, inside the synchronous
+#                 POST /api/edge handler (derive/reconcile/reconcile.go,
+#                 emitChangeEvents). So such an event exists only if an
+#                 ingest finished after the fault. brain-go exposes no
+#                 last-publish time, so this is the only way to see one; a
+#                 publish that changed nothing is invisible here.
+#
+# Both reads start SINCE_MARGIN_S after injection, not at it. A publish that
+# left the agent just before the fault can finish its ingest just after it,
+# and its events, which describe the pre-fault cluster, would then count.
 #
 # The cap is 120s: one 60s tick plus the agent's 30s publish timeout, and 30s
 # of margin for ingest.
@@ -183,12 +192,36 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
 POST_FAULT_WAIT_S = 120
 POST_FAULT_POLL_S = 5
 
+# How far after injection the change-event reads start, for the reason above.
+# It has to exceed the time between a publish's arrival and the end of its
+# ingest; that time has not been measured here, and 5s is a guess sized for
+# a graph of a few hundred entities. The margin is not taken off the cap.
+SINCE_MARGIN_S = 5
+
+# The shortest request timeout a poll uses once the budget is nearly spent,
+# so the last poll can still get an answer.
+MIN_REQUEST_TIMEOUT_S = 1.0
+
 
 def _int_env(source, name: str, default: int) -> int:
     try:
-        return int(source.get(name, "") or default)
+        value = int(source.get(name, "") or default)
     except ValueError as exc:
         raise NativeArmNotReady(f"{name} is not an integer") from exc
+    if value < 0:
+        raise NativeArmNotReady(f"{name} is negative ({value}); it is a number of seconds")
+
+    return value
+
+
+def _error_label(exc: requests.RequestException) -> str:
+    """The error class, with the HTTP status when there was a response, so a
+    cap reached on a 401 reads differently from a cap on a quiet graph."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        return f"{type(exc).__name__} {response.status_code}"
+
+    return type(exc).__name__
 
 
 def wait_for_fault_publish(
@@ -212,16 +245,22 @@ def wait_for_fault_publish(
     an upper bound on the graph's lag, by at most one poll interval. It is
     None when the wait reached the cap, because the lag is then unknown.
 
+    Each request's timeout is the budget left, floored at
+    MIN_REQUEST_TIMEOUT_S, so a hung brain-go holds the wait near the cap
+    rather than two full request timeouts past it.
+
     Reaching the cap returns rather than raises; see POST_FAULT_WAIT_S. Raises
-    NativeArmNotReady only when BRAIN_SESSION or KIND_CLUSTER_NAME is unset,
-    or a budget variable is not an integer, since then nothing can be read.
+    NativeArmNotReady only when BRAIN_SESSION or KIND_CLUSTER_NAME is unset, or
+    a budget variable is not an integer or is negative, since then the wait
+    cannot run.
     """
     source = os.environ if env is None else env
     if not is_native(source):
         return None
 
     cap = _int_env(source, "SREGYM_POST_FAULT_WAIT_SECONDS", POST_FAULT_WAIT_S)
-    poll = _int_env(source, "SREGYM_POST_FAULT_POLL_SECONDS", POST_FAULT_POLL_S)
+    # A zero poll interval would spin; one second is the floor.
+    poll = max(_int_env(source, "SREGYM_POST_FAULT_POLL_SECONDS", POST_FAULT_POLL_S), 1)
 
     session = source.get("BRAIN_SESSION", "")
     cluster = source.get("KIND_CLUSTER_NAME", "")
@@ -232,7 +271,7 @@ def wait_for_fault_publish(
 
     component, namespace, _ = parse_structured_root_cause(root_cause)
     namespace = namespace or (fallback_namespace or "")
-    since = datetime.fromtimestamp(injected_at, UTC)
+    since = datetime.fromtimestamp(injected_at + SINCE_MARGIN_S, UTC)
     base = _brain_url(source)
 
     evidence: dict[str, object] = {
@@ -242,6 +281,12 @@ def wait_for_fault_publish(
     }
 
     start = clock()
+
+    def request_timeout() -> float:
+        remaining = cap - (clock() - start)
+
+        return max(min(float(REQUEST_TIMEOUT_S), remaining), MIN_REQUEST_TIMEOUT_S)
+
     polls = 0
     last_error = ""
     while True:
@@ -250,12 +295,17 @@ def wait_for_fault_publish(
         try:
             # An empty component means the problem carried no parseable label;
             # the cluster-wide read below is then the only evidence.
-            if component and change_events(base, session, cluster, component, namespace, since)["count"]:
+            if (
+                component
+                and change_events(base, session, cluster, component, namespace, since, timeout=request_timeout())[
+                    "count"
+                ]
+            ):
                 ended_by = "change_event"
-            elif change_events(base, session, cluster, "", "", since)["count"]:
+            elif change_events(base, session, cluster, "", "", since, timeout=request_timeout())["count"]:
                 ended_by = "publish"
         except requests.RequestException as exc:
-            last_error = type(exc).__name__
+            last_error = _error_label(exc)
 
         waited = clock() - start
         if ended_by:

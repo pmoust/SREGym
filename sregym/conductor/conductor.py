@@ -293,7 +293,8 @@ class Conductor:
         # publish from after the fault, so the investigation does not open on
         # the pre-fault graph. At its cap the wait returns and diagnosis
         # proceeds, recorded as "cap"; it raises only when the slot's session
-        # or cluster name is missing. The MCP arm does not reach the call.
+        # or cluster name is missing, or a wait budget variable is not an
+        # integer or is negative. The MCP arm does not reach the call.
         if self.native_arm_evidence.get("arm") == "native":
             self.native_arm_evidence["post_fault_wait"] = wait_for_fault_publish(
                 self.fault_injected_at,

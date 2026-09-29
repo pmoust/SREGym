@@ -63,8 +63,9 @@ EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
 # the window, and the last publish before injection is at most one tick old.
 # That publish is the before-state change detection diffs the fault against.
 #
-# After the fault: the first publish lands within one tick (60s to 90s) of
-# injection. The conductor holds diagnosis until brain-go shows a publish from
+# After the fault: the first publish lands 0s to 90s after injection. The
+# agent has ticked since install, so injection falls at a random point in its
+# cycle. The conductor holds diagnosis until brain-go shows a publish from
 # after the fault, capped at 120s (one tick plus the publish timeout, with
 # margin; native_gate.wait_for_fault_publish). Reaching the cap does not fail
 # the attempt, because a fault that changes no watched object produces no
@@ -530,24 +531,33 @@ verify_edge() {
   done
   log "edge agent pod Ready with no restarts"
 
-  local root counts
+  local root counts errfile last_err=""
   root="$(cd "$(dirname "$0")/../.." && pwd)"
+  errfile="$(mktemp)" || die "could not create a temporary file"
   deadline=$(( $(date +%s) + EDGE_PUBLISH_SECONDS ))
   while :; do
     # Exits 3 when the account holds no entities or the read failed, and
-    # prints the counts (or the read's error class) either way.
+    # prints the counts (or the read's error class) either way. Its stderr is
+    # kept, not discarded: a broken uv or Python would otherwise read as an
+    # agent that has not published. The session is passed as an argument and
+    # never written to stderr, so the line is safe to print.
     if counts="$(uv run --project "$root" python "$root/scripts/benchmark/brain_graph.py" \
-         --brain-url "$brain_url" --session "$session" --require-entities 2>/dev/null)"; then
+         --brain-url "$brain_url" --session "$session" --require-entities 2>"$errfile")"; then
       break
     fi
+    last_err="$(tail -n 1 "$errfile" 2>/dev/null)"
     if [ "$(date +%s)" -ge "$deadline" ]; then
       echo "[native-arm] --- last entity count from brain-go" >&2
       printf '%s\n' "$counts" >&2
+      echo "[native-arm] --- last stderr line from the entity count" >&2
+      printf '%s\n' "$last_err" >&2
+      rm -f "$errfile"
       dump_edge_diagnostics "$ns"
       die "brain-go held no entities for this account ${EDGE_PUBLISH_SECONDS}s after the edge agent was Ready; it has not published"
     fi
     sleep "$EDGE_POLL_SECONDS"
   done
+  rm -f "$errfile"
   log "brain-go holds entities for this account; the edge agent has published"
 }
 
