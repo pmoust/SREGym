@@ -46,6 +46,33 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
 
+      # ── Disk ──────────────────────────────────────────────────────────
+      # The job needs more disk than a hosted runner leaves free on /. Four
+      # kind nodes each keep their own copy of every image they pull, and
+      # both the node's containerd store and its /var/log/pods sit on / under
+      # Docker's data root. When / fills, the kind API server stops answering
+      # and then the runner itself dies writing its own log, so no
+      # diagnostics survive. On ubuntu-latest /mnt is a directory on the same
+      # disk as /, so moving Docker there gains nothing; this cleanup is what
+      # gives the job room. Measured on one run: 13G free on / before, 37G
+      # after, of which docker system prune freed 1.9G; the step took 118s.
+      - name: Reclaim disk on /
+        run: |
+          echo "=== before ==="
+          df -h / || true
+          # Toolchains this job never uses: nothing here builds Android,
+          # .NET or Haskell code or runs CodeQL. These are most of the 24G
+          # this step frees. The Python tool cache stays.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          echo "=== after ==="
+          df -h / || true
+
       - name: Pre-pull kind node image
         run: docker pull jacksonarthurclark/aiopslab-kind-x86:latest
 
@@ -77,6 +104,19 @@ jobs:
         run: uv run pytest tests/integration/smoke_test.py -v -s -m integration
 
       # ── Diagnostics on failure ────────────────────────────────────────
+      # First, and cheap, so it still runs when the disk is nearly full.
+      - name: Dump disk usage
+        if: failure()
+        run: |
+          echo "=== runner ==="
+          df -h || true
+          docker system df -v || true
+          echo "=== kind nodes ==="
+          for node in $(kind get nodes 2>/dev/null); do
+            echo "--- ${node} ---"
+            docker exec "${node}" df -h /var /var/lib/containerd || true
+          done
+
       - name: Dump cluster diagnostics
         if: failure()
         run: |
