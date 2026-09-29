@@ -82,6 +82,16 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   so the native benchmark arm can pass a copy of the committed config with the
   API server on the host's private address. Both candidates for upstreaming;
   with neither set the behaviour is unchanged.
+- `.github/workflows/smoke-test.yml`: before creating the kind cluster, the
+  Integration Smoke Test removes toolchains the job does not use (Android,
+  .NET, GHC, CodeQL), prunes Docker, and moves Docker's data root to the
+  runner's `/mnt` disk, printing `df -h` before and after. Each kind node's
+  `/var` is a Docker volume holding both the node's containerd image store and
+  `/var/log/pods`, and four nodes on `/` filled the runner's disk
+  ([NOFireAI/sregym#109](https://github.com/NOFireAI/sregym/issues/109)). On
+  failure it prints `df -h` and `docker system df` for the runner and each
+  node. The committed kind configs are unchanged. Candidate for upstreaming,
+  since upstream runs the same job.
 
 NOFire-only directories, which add no merge drift because upstream has no such
 path:

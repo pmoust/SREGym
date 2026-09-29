@@ -46,6 +46,56 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
 
+      # ── Disk ──────────────────────────────────────────────────────────
+      # The job needs more disk than a hosted runner leaves free on /. Four
+      # kind nodes each keep their own copy of every image they pull, and
+      # both the node's containerd store and its /var/log/pods sit in the
+      # node container's /var volume under Docker's data root. When / fills,
+      # the kind API server stops answering and then the runner itself dies
+      # writing its own log, so no diagnostics survive.
+      - name: Reclaim disk on /
+        run: |
+          echo "=== before ==="
+          df -h / /mnt || true
+          # Toolchains this job never uses: nothing here builds Android,
+          # .NET or Haskell code or runs CodeQL. The Python tool cache stays.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          echo "=== after ==="
+          df -h / /mnt || true
+
+      - name: Move Docker's data root to /mnt
+        run: |
+          # /mnt is the runner's second disk. Moving Docker's data root there
+          # moves the kind node volumes, and with them every image the nodes
+          # pull and every pod log, off /. The committed kind configs are
+          # unchanged, so benchmark hosts are unaffected.
+          root_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+          mnt_kb=$(df -Pk /mnt 2>/dev/null | awk 'NR==2 {print $4}')
+          if [ -z "${mnt_kb}" ] || [ "${mnt_kb}" -le "${root_kb}" ]; then
+            echo "::warning::/mnt has no more free space than /; Docker stays on /"
+            exit 0
+          fi
+          sudo systemctl stop docker.socket docker.service
+          sudo mkdir -p /mnt/docker
+          # Merge into the runner's own daemon.json, which sets the cgroup
+          # parent the job runs under, rather than replacing it.
+          if [ -s /etc/docker/daemon.json ]; then
+            conf=$(jq '. + {"data-root": "/mnt/docker"}' /etc/docker/daemon.json)
+          else
+            conf='{"data-root": "/mnt/docker"}'
+          fi
+          printf '%s\n' "${conf}" | sudo tee /etc/docker/daemon.json
+          sudo rm -rf /var/lib/docker
+          sudo systemctl start docker.service
+          docker info --format 'DockerRootDir={{.DockerRootDir}} Driver={{.Driver}}'
+          df -h / /mnt
+
       - name: Pre-pull kind node image
         run: docker pull jacksonarthurclark/aiopslab-kind-x86:latest
 
@@ -77,6 +127,19 @@ jobs:
         run: uv run pytest tests/integration/smoke_test.py -v -s -m integration
 
       # ── Diagnostics on failure ────────────────────────────────────────
+      # First, and cheap, so it still runs when the disk is nearly full.
+      - name: Dump disk usage
+        if: failure()
+        run: |
+          echo "=== runner ==="
+          df -h || true
+          docker system df -v || true
+          echo "=== kind nodes ==="
+          for node in $(kind get nodes 2>/dev/null); do
+            echo "--- ${node} ---"
+            docker exec "${node}" df -h /var /var/lib/containerd || true
+          done
+
       - name: Dump cluster diagnostics
         if: failure()
         run: |
