@@ -22,9 +22,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   Claude Code CLI (`claude_cli/<model>` judge model id or
   `JUDGE_PROVIDER=claude_cli`).
 - `sregym/conductor/conductor.py` — env-gated baseline-sync wait before fault
-  injection (`SREGYM_BASELINE_SYNC_SECONDS`), and the native arm's gate at the
-  end of that wait. The wait is a candidate for upstreaming; the gate is not,
-  since it reads brain-go.
+  injection (`SREGYM_BASELINE_SYNC_SECONDS`), the native arm's gate at the
+  end of that wait, and the native arm's post-fault wait right after
+  injection. The baseline wait is a candidate for upstreaming; the gate and
+  the post-fault wait are not, since they read brain-go.
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
 - `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, the per-attempt `arm-native.json`
@@ -108,6 +109,13 @@ path:
   the namespace's pods, its last 30 events and the agent's logs to the slot
   log and aborts the slot. The agent publishes every 60s, which is its floor:
   it exits at startup on a shorter interval (sregym#133).
+  After the fault is injected the conductor waits, native arm only and capped
+  at 120s, until brain-go holds a change event from after the fault, on the
+  fault's component or anywhere in the cluster, so diagnosis does not open on
+  the pre-fault graph. Nothing inside the cap fails the attempt like the
+  empty-graph gate. The wait and what ended it are recorded as
+  `post_fault_wait` in `arm-native.json`; `scripts/benchmark/README.md` lists
+  it with the other recorded differences between the arms.
   With `SREGYM_ARM` unset none of them runs.
   `build_mcp_image.sh` builds that server's image from the checkout and names
   it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it

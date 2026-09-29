@@ -478,11 +478,50 @@ entity. An attempt that fails either is aborted rather than scored, because an
 attempt with an empty graph is the MCP arm's information set under this arm's
 label.
 
+Right after the fault is injected, the conductor holds the diagnosis stage
+until brain-go has a publish from after the fault, capped at 120s
+(`SREGYM_POST_FAULT_WAIT_SECONDS`, polled every
+`SREGYM_POST_FAULT_POLL_SECONDS`, default 5). The wait ends on the first poll
+that finds either a change event on the fault's component, or a change event
+anywhere in the slot's cluster, both timestamped at or after injection.
+brain-go stamps every change event from one ingest with that ingest's receive
+time, so the second means a publish landed after the fault. brain-go exposes
+no last-publish time, so a publish that changed nothing cannot be seen. If
+neither appears inside the cap, the agent's pods, events and logs go to the
+slot log and the attempt fails the way the empty-graph gate fails it: the
+deploy is retried, up to three times, and never scored.
+
+### Recorded differences between the arms
+
+Carried from sregym#118's description, with the post-fault wait added. Read a
+paired result with these in mind rather than gating on them.
+
+1. Cluster access is not equal. The MCP arm's kubectl ClusterRole grants
+   secrets, `pods/exec`, `pods/log` and writes across most groups; the native
+   arm's ServiceAccount grants get and list on 13 resource types and no
+   secrets. Neither can read chaos-mesh.
+2. The native arm moves which brain-go agent inspects the cluster:
+   `signalSelectors` routes the Kubernetes tool family to the metrics node,
+   where the MCP arm's `sregym-kubectl` sits in the state bucket.
+3. Arm B gets 150s of settle before the fault (`SREGYM_BASELINE_SYNC_SECONDS`)
+   that arm A does not. A flakier app at t=0 than at t=150 is a small
+   confound in arm B's favour.
+4. Arm B waits up to 120s after the fault, until brain-go holds a publish from
+   after it, before diagnosis starts; arm A starts at once. Without it the
+   first 60s to 90s of every native investigation reads the pre-fault graph,
+   and this arm is graded on whether the graph and its change events help. In
+   production the agent publishes every 5m and an investigation starts when an
+   alert fires, minutes after the fault, so the wait is closer to the product.
+   Like item 3 it gives arm B extra time for the fault to develop, which
+   favours arm B. `post_fault_wait` in `arm-native.json` records each wait.
+
 The manifest records `arm`, `edge_image` and `edge_chart_version`, and
 `seeded_connection_buckets`/`seeded_connection_signals` describe whichever
 set the run actually seeded. Per attempt, `arm-native.json` lands beside
-`fault-spec.json` with the entity counts by type and whether a change event
-exists on the mutated component. `archive_run.sh` already ships `*.json`, so
+`fault-spec.json` with the entity counts by type, whether a change event
+exists on the mutated component, and `post_fault_wait`: how long the
+post-fault wait took (`waited_seconds`), injection to the poll that ended it
+(`lag_seconds`), and what ended it (`ended_by`, `change_event` or `publish`). `archive_run.sh` already ships `*.json`, so
 it comes back with everything else.
 
 Smoke it on one problem before a paired run:
