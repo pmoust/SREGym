@@ -104,6 +104,14 @@ path:
   environment that lets runs share a host (`run_slot_env.sh`), and deploys the
   MCP server once per instance before any slot starts (`deploy_mcp.py`), which
   is the caller `SREGYM_EXTERNAL_PORT_FORWARD` exists for.
+  `setup_brain_go.sh` writes `LOG_LEVEL=debug` into the box's `deploy/.env`,
+  so brain-go's api service writes the DEBUG edge ingest line
+  (`ingested edge resource graph`, one per accepted publish) and
+  `dump_brain_go_logs.sh` carries it into the archived `sregym-brain-go.log`.
+  At info that log has no edge line at all (sregym#135). This is the benchmark
+  box only; brain-go's default and production level is info, a
+  `BRAIN_ENV_EXTRA` entry can override it per run, and a brain-go ref older
+  than brain-go#3704 ignores the key.
   It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
   resolves the flag, `seed_native_connections.py` registers brain-go's own
   Kubernetes, Prometheus, Loki and Jaeger connections in place of the four
