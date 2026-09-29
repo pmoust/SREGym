@@ -4,9 +4,12 @@
 # host, as `export` lines. Usage, capturing before the eval the way
 # run_shard.sh's eval_exports does so a failure is not hidden:
 #
-#   out=$(scripts/benchmark/run_slot_env.sh 0) || exit
-#   eval "$out"
-#   uv run python main.py ...
+#   if out=$(scripts/benchmark/run_slot_env.sh 0); then
+#     eval "$out"
+#     uv run python main.py ...
+#   else
+#     echo "run_slot_env.sh failed"
+#   fi
 #
 # Slot 0 reproduces the MCP and k8s-proxy defaults exactly (9954, 16443), so
 # adopting this changes no port for an existing single-run host on those two.

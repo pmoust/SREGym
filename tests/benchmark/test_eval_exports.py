@@ -106,9 +106,13 @@ def test_real_run_slot_env_success_sets_the_slot(tmp_path):
 # substitution anywhere in eval's arguments (`eval "export X=$(cmd)"`, which
 # returns export's 0) all return eval's status, never cmd's. It is matched
 # against the output of _code_lines, where eval must be in command position
-# and `$((` arithmetic is not a substitution.
+# and `$((` arithmetic is not a substitution. Command position includes a case
+# arm after its `)`, and eval may follow assignment words and the `command`,
+# `builtin` and `time` prefixes.
 EVAL_OF_SUBSTITUTION = re.compile(
-    r"(?:(?:^|[;&|(!{])\s*|\b(?:if|then|else|elif|do|while|until)\s+)eval\s+[^;&|]*?(?:\$\((?!\()|`)"
+    r"(?:(?:^|[;&|()!{])\s*|\b(?:if|then|else|elif|do|while|until)\s+)"
+    r"(?:\w+=\S*\s+|(?:command|builtin|time)\s+)*"
+    r"eval\s+[^;&|]*?(?:\$\((?!\()|`)"
 )
 
 # NOFire's shell: the benchmark scripts and the terraform bootstrap template.
@@ -192,6 +196,13 @@ def _eval_offenders(text: str) -> list[str]:
         'x="a #b"; eval "$(cmd)"',
         'eval \\\n  "$(cmd)"',
         'eval "x=1; y=$(cmd)"',
+        'case x in y) eval "$(cmd)";; esac',
+        'X=1 eval "$(cmd)"',
+        'X="a b" Y= eval "$(cmd)"',
+        'command eval "$(cmd)"',
+        'builtin eval "$(cmd)"',
+        'time eval "$(cmd)"',
+        'if ! X=1 command eval "$(cmd)"; then',
     ],
 )
 def test_guard_catches_every_form(line):
