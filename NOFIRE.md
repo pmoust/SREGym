@@ -83,11 +83,11 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   API server on the host's private address. Both candidates for upstreaming;
   with neither set the behaviour is unchanged.
 - `.github/workflows/smoke-test.yml`: before creating the kind cluster, the
-  Integration Smoke Test removes toolchains the job does not use (Android,
-  .NET, GHC, CodeQL), prunes Docker, and moves Docker's data root to the
-  runner's `/mnt` disk, printing `df -h` before and after. Each kind node's
-  `/var` is a Docker volume holding both the node's containerd image store and
-  `/var/log/pods`, and four nodes on `/` filled the runner's disk
+  Integration Smoke Test reclaims about 24 GB on `/` by removing toolchains the
+  job does not use (Android, .NET, GHC, CodeQL) and pruning Docker, printing
+  `df -h /` before and after. One run went from 13 GB free to 37 GB in 118s.
+  Four kind nodes, each with its own image store and `/var/log/pods` on `/`,
+  had filled the runner's disk
   ([NOFireAI/sregym#109](https://github.com/NOFireAI/sregym/issues/109)). On
   failure it prints `df -h` and `docker system df` for the runner and each
   node. The committed kind configs are unchanged. Candidate for upstreaming,
