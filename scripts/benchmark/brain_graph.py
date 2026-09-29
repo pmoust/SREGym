@@ -48,12 +48,18 @@ class GraphEmpty(RuntimeError):
     """The entity graph held nothing, so this attempt is not the native arm."""
 
 
-def _get(brain_url: str, session_cookie: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
+def _get(
+    brain_url: str,
+    session_cookie: str,
+    path: str,
+    params: dict[str, Any],
+    timeout: float = REQUEST_TIMEOUT_S,
+) -> dict[str, Any]:
     resp = requests.get(
         urljoin(brain_url, path),
         params=params,
         cookies={"session": session_cookie},
-        timeout=REQUEST_TIMEOUT_S,
+        timeout=timeout,
     )
     resp.raise_for_status()
 
@@ -104,6 +110,7 @@ def change_events(
     entity_name: str,
     namespace: str = "",
     since: datetime | None = None,
+    timeout: float = REQUEST_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Read the change events recorded against one entity.
 
@@ -120,7 +127,7 @@ def change_events(
     if since is not None:
         params["from"] = since.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
-    body = _get(brain_url, session_cookie, "/api/change-events", params)
+    body = _get(brain_url, session_cookie, "/api/change-events", params, timeout)
     events = body.get("data") or []
 
     return {
@@ -131,6 +138,33 @@ def change_events(
         "change_types": sorted({str(e.get("change_type") or "") for e in events}),
         "has_more": bool((body.get("pagination") or {}).get("has_more")),
     }
+
+
+def parse_structured_root_cause(root_cause: str | None) -> tuple[str, str, str]:
+    """Split Problem.build_structured_root_cause output into its parts.
+
+    The format is ``[fault_spec] component=<c>; namespace=<n> || <description>``.
+    Returns empty strings for anything the text does not carry, so a problem
+    that wrote a free-form root cause still yields a usable description.
+    """
+    if not root_cause:
+        return "", "", ""
+
+    text = root_cause.strip()
+    description = text
+    meta = ""
+    if text.startswith("[fault_spec]"):
+        body = text[len("[fault_spec]") :].strip()
+        meta, _, description = body.partition("||")
+        meta, description = meta.strip(), description.strip()
+
+    fields = {}
+    for part in meta.split(";"):
+        key, _, value = part.partition("=")
+        if value:
+            fields[key.strip()] = value.strip()
+
+    return fields.get("component", ""), fields.get("namespace", ""), description
 
 
 def parse_injected_at(value: str | None) -> datetime | None:

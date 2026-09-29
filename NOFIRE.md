@@ -22,9 +22,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   Claude Code CLI (`claude_cli/<model>` judge model id or
   `JUDGE_PROVIDER=claude_cli`).
 - `sregym/conductor/conductor.py` — env-gated baseline-sync wait before fault
-  injection (`SREGYM_BASELINE_SYNC_SECONDS`), and the native arm's gate at the
-  end of that wait. The wait is a candidate for upstreaming; the gate is not,
-  since it reads brain-go.
+  injection (`SREGYM_BASELINE_SYNC_SECONDS`), the native arm's gate at the
+  end of that wait, and the native arm's post-fault wait right after
+  injection. The baseline wait is a candidate for upstreaming; the gate and
+  the post-fault wait are not, since they read brain-go.
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
 - `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, the per-attempt `arm-native.json`
@@ -100,6 +101,22 @@ path:
   agent publishes with, `native_arm.sh` does the cluster-side work (API server
   address, read-only ServiceAccount, telemetry forwards, the Helm install),
   and `native_gate.py` plus `brain_graph.py` gate and record the entity graph.
+  `install-edge` does not trust `helm --wait`: chart 0.5.2 runs one replica
+  with `maxUnavailable: 1`, so Helm 3 counts it ready with zero ready pods.
+  After the release it waits for the agent's pod to be Ready with no restarts
+  (180s) and for brain-go to hold at least one entity for the slot's account
+  (150s, read through `brain_graph.py`). On a timeout or a restart it writes
+  the namespace's pods, its last 30 events and the agent's logs to the slot
+  log and aborts the slot. The agent publishes every 60s, which is its floor:
+  it exits at startup on a shorter interval (sregym#133).
+  After the fault is injected the conductor waits, native arm only and capped
+  at 120s, until brain-go holds a change event from after the fault, on the
+  fault's component or anywhere in the cluster, so diagnosis does not open on
+  the pre-fault graph. Reaching the cap does not fail the attempt, because a
+  fault that changes no watched object leaves no visible publish; diagnosis
+  proceeds and the wait records `ended_by: "cap"`. The wait is recorded as
+  `post_fault_wait` in `arm-native.json`; `scripts/benchmark/README.md` lists
+  it with the other recorded differences between the arms.
   With `SREGYM_ARM` unset none of them runs.
   `build_mcp_image.sh` builds that server's image from the checkout and names
   it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it
@@ -132,7 +149,8 @@ rediscover:
   `monitoring` namespace, so the entity graph fed to brain came from the same
   live cluster the fault was injected into, not a fixture. Carried out under
   `SREGYM_ARM=native`, which installs the published `nofire-edge` chart into
-  each slot's cluster in the `nofire-edge` namespace.
+  each slot's cluster in the `nofire-edge` namespace and checks that the agent
+  has published before the slot's first problem.
 - **RBAC exclusion for chaos-mesh is a correctness rule, not hygiene.** If the
   edge agent's ServiceAccount can read chaos-mesh CRDs
   (`podchaos.chaos-mesh.org` etc.), the injected fault shows up verbatim in

@@ -265,6 +265,7 @@ class Conductor:
         # make the whole conductor unimportable in any tree that carries one
         # and not the other.
         from scripts.benchmark.native_gate import check as native_arm_check
+        from scripts.benchmark.native_gate import wait_for_fault_publish
 
         self.native_arm_evidence = native_arm_check()
         if self.native_arm_evidence.get("arm") == "native":
@@ -287,6 +288,20 @@ class Conductor:
         }
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
+
+        # The native arm only: hold the diagnosis stage until brain-go has a
+        # publish from after the fault, so the investigation does not open on
+        # the pre-fault graph. At its cap the wait returns and diagnosis
+        # proceeds, recorded as "cap"; it raises only when the slot's session
+        # or cluster name is missing, or a wait budget variable is not an
+        # integer or is negative. The MCP arm does not reach the call.
+        if self.native_arm_evidence.get("arm") == "native":
+            self.native_arm_evidence["post_fault_wait"] = wait_for_fault_publish(
+                self.fault_injected_at,
+                getattr(problem, "root_cause", None),
+                getattr(problem, "namespace", None),
+            )
+            self.logger.info(f"[ENV] Post-fault wait: {self.native_arm_evidence['post_fault_wait']}")
 
         # Prepare diagnosis checkpoint if available, after fault injection but before agent stages
         if (

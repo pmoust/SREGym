@@ -208,31 +208,9 @@ def _publish_archive(run, published_run_dir: Path) -> None:
         archive.rmdir()
 
 
-def _parse_structured_root_cause(root_cause: str | None) -> tuple[str, str, str]:
-    """Split Problem.build_structured_root_cause output into its parts.
-
-    The format is ``[fault_spec] component=<c>; namespace=<n> || <description>``.
-    Returns empty strings for anything the text does not carry, so a problem
-    that wrote a free-form root cause still yields a usable description.
-    """
-    if not root_cause:
-        return "", "", ""
-
-    text = root_cause.strip()
-    description = text
-    meta = ""
-    if text.startswith("[fault_spec]"):
-        body = text[len("[fault_spec]") :].strip()
-        meta, _, description = body.partition("||")
-        meta, description = meta.strip(), description.strip()
-
-    fields = {}
-    for part in meta.split(";"):
-        key, _, value = part.partition("=")
-        if value:
-            fields[key.strip()] = value.strip()
-
-    return fields.get("component", ""), fields.get("namespace", ""), description
+# Lives in brain_graph.py because the conductor's post-fault wait needs the
+# same component the fault spec records, and the conductor cannot import main.
+_parse_structured_root_cause = brain_graph.parse_structured_root_cause
 
 
 def _write_fault_spec(run_dir: Path, conductor, problem_id: str, attempt: int) -> None:

@@ -42,19 +42,55 @@ EDGE_IMAGE="${SREGYM_EDGE_IMAGE:-nofireai/edge:latest}"
 EDGE_CHART_REPO="${SREGYM_EDGE_CHART_REPO:-NOFireAI/edge-helm-chart}"
 EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
 
-# How often the agent re-lists the cluster and how often it publishes the
-# graph, both well under the chart's 5m defaults.
+# How often the agent's informers resync and how often it publishes the graph,
+# both under the chart's 5m defaults.
 #
-# 30s each. The pre-fault window has to contain the agent noticing a
-# just-deployed application (one resync) and publishing it (one graph post),
-# and at 5m a single publish need not land inside any window an attempt can
-# afford. 30s puts several publishes inside the wait below, so the graph is
-# populated and a second publish exists for change detection to diff against.
-# Not shorter: each cycle re-lists 15 resource kinds cluster-wide and posts a
-# whole resource graph, so 10s would be three times the API-server and ingest
-# load for no extra evidence.
+# The publish interval is 60s because that is the agent's floor, not a choice.
+# It exits at startup on anything shorter ("the interval to publish the graph
+# must be greater or equal to 1 minute", edge internal/edge/agent/agent.go).
+# run-20260928-1641-d4349432 set 30s: the agent crash-looped for the whole run
+# and every attempt failed the empty-graph gate.
+#
+# The publisher waits one interval, publishes if the graph changed, then waits
+# again. Ticks are therefore 60s plus one publish apart: about 60s, 120s, 180s
+# after the agent starts when a publish takes seconds, and never more than 90s
+# apart because a publish times out at 30s.
+#
+# Before the fault: run_shard.sh sets SREGYM_BASELINE_SYNC_SECONDS=150, which
+# the conductor sleeps after the application is deployed. A 150s span holds
+# at least two ticks when a publish takes under 15s (150 / 75), and at least
+# one at the 30s timeout (150 / 90). So the application is published inside
+# the window, and the last publish before injection is at most one tick old.
+# That publish is the before-state change detection diffs the fault against.
+#
+# After the fault: the first publish lands 0s to 90s after injection. The
+# agent has ticked since install, so injection falls at a random point in its
+# cycle. The conductor holds diagnosis until brain-go shows a publish from
+# after the fault, capped at 120s (one tick plus the publish timeout, with
+# margin; native_gate.wait_for_fault_publish). Reaching the cap does not fail
+# the attempt, because a fault that changes no watched object produces no
+# visible publish; arm-native.json records it as "cap".
+#
+# The resync interval has no validation in the agent (it goes straight to the
+# informer factory). A resync replays the informers' local cache to their
+# handlers and does not re-list from the API server; changes arrive through
+# the watch either way. 30s is kept so a missed watch event is replayed well
+# inside one publish interval.
 EDGE_RESYNC_INTERVAL="${SREGYM_EDGE_RESYNC_INTERVAL:-30s}"
-EDGE_GRAPH_INTERVAL="${SREGYM_EDGE_GRAPH_INTERVAL:-30s}"
+EDGE_GRAPH_INTERVAL="${SREGYM_EDGE_GRAPH_INTERVAL:-60s}"
+
+# How long install-edge waits for the agent to prove itself after Helm.
+#
+# Ready: 180s for the pod to be Ready with no restarts. Helm's wait can return
+# before the image is even pulled (see install-edge), and each kind node pulls
+# the image from Docker Hub itself.
+#
+# Publish: 150s for brain-go to hold at least one entity for the account. The
+# first two publishes land about 60s and 120s after the agent starts, and each
+# may take up to its own 30s timeout, so 150s covers both.
+EDGE_READY_SECONDS="${SREGYM_EDGE_READY_SECONDS:-180}"
+EDGE_PUBLISH_SECONDS="${SREGYM_EDGE_PUBLISH_SECONDS:-150}"
+EDGE_POLL_SECONDS="${SREGYM_EDGE_POLL_SECONDS:-5}"
 
 # The Secret the chart reads the API key from. Named by the chart's own
 # default (config.publisher.apiKeySecret.name).
@@ -388,8 +424,12 @@ cmd_install_edge() {
   #                         ephemeral clusters reporting into the product's
   #                         own Sentry project is noise in the wrong place.
   #
-  # --wait, so a slot that cannot start the agent fails here rather than at
-  # the entity-count gate one problem later.
+  # --wait catches a release Helm cannot apply at all, and nothing more on
+  # this chart. Chart 0.5.2 runs one replica with maxUnavailable: 1, and Helm
+  # 3's waiter (what the bootstrap installs) counts a Deployment ready at
+  # replicas - maxUnavailable = 1 - 1 = 0 ready pods (pkg/kube/ready.go). A
+  # crash-looping agent passes it, which is how run-20260928-1641-d4349432
+  # lost every attempt. verify_edge below is the check that means something.
   helm upgrade --install nofire-edge "$chart" \
     --namespace "$ns" \
     --set "image.repository=${EDGE_IMAGE%:*}" \
@@ -420,7 +460,105 @@ cmd_install_edge() {
     die "the edge ServiceAccount can list chaos-mesh CRDs; the injected fault would appear in the entity graph"
   fi
 
+  verify_edge "$ns"
+
   log "edge agent installed into $cluster ($EDGE_IMAGE, chart $EDGE_CHART_VERSION), publishing to $graph_url every $EDGE_GRAPH_INTERVAL"
+}
+
+# What the slot log needs to explain an agent that never published. Written
+# to stderr, which run_shard.sh sends to the slot log, which is archived to S3.
+# Each command is best effort: a failed dump must not hide the die after it.
+dump_edge_diagnostics() {
+  local ns="$1"
+
+  echo "[native-arm] --- kubectl -n $ns get pods -o wide" >&2
+  kubectl -n "$ns" get pods -o wide >&2 2>&1 || true
+  echo "[native-arm] --- kubectl -n $ns get events (last 30)" >&2
+  kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
+  echo "[native-arm] --- kubectl -n $ns logs deploy/nofire-edge --tail=100" >&2
+  kubectl -n "$ns" logs deploy/nofire-edge --tail=100 >&2 2>&1 || true
+  # A crash-looping container is often between starts, with no current log.
+  # The previous container's log is where its exit message is.
+  echo "[native-arm] --- kubectl -n $ns logs deploy/nofire-edge --previous --tail=100" >&2
+  kubectl -n "$ns" logs deploy/nofire-edge --previous --tail=100 >&2 2>&1 || true
+}
+
+# Prove the agent runs and has published, since Helm's wait proves neither
+# on this chart. The agent's /healthz returns 200 unconditionally, so pod
+# readiness only says the process is up; the entity count in brain-go is the
+# only evidence that a publish arrived.
+#
+# Two bounded polls. First the pod: Ready with restartCount 0. A restart is
+# failed on at once rather than waited out, because the agent's startup
+# faults (a bad config value, as in the run above) exit on every start.
+# Then the graph: brain_graph.py counts the account's entities under the
+# slot's session, the same reader the conductor's pre-fault gate uses.
+verify_edge() {
+  local ns="$1"
+  local selector="app.kubernetes.io/instance=nofire-edge,app.kubernetes.io/name=nofire-edge"
+
+  local brain_url="${BRAIN_ADMIN_API_URL:-}" session="${BRAIN_SESSION:-}"
+  [ -n "$brain_url" ] || die "BRAIN_ADMIN_API_URL is unset; seed_slot.sh exports it before install-edge runs"
+  [ -n "$session" ] || die "BRAIN_SESSION is unset; seed_slot.sh exports it before install-edge runs"
+
+  local pods deadline state=""
+  deadline=$(( $(date +%s) + EDGE_READY_SECONDS ))
+  while :; do
+    pods="$(kubectl -n "$ns" get pods -l "$selector" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{" "}{.status.containerStatuses[0].restartCount}{"\n"}{end}' 2>/dev/null)"
+    # Every pod Ready with no restarts, and at least one pod.
+    state="$(printf '%s\n' "$pods" | awk '
+      NF == 0 { next }
+      { n++ }
+      $3 != "" && $3 != "0" { restarted = 1 }
+      $2 != "true" { waiting = 1 }
+      END {
+        if (restarted) print "restarted"
+        else if (n == 0 || waiting) print "waiting"
+        else print "ready"
+      }
+    ')"
+    [ "$state" = "ready" ] && break
+    if [ "$state" = "restarted" ]; then
+      dump_edge_diagnostics "$ns"
+      die "the edge agent restarted after install; see its logs above"
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      dump_edge_diagnostics "$ns"
+      die "the edge agent pod was not Ready within ${EDGE_READY_SECONDS}s"
+    fi
+    sleep "$EDGE_POLL_SECONDS"
+  done
+  log "edge agent pod Ready with no restarts"
+
+  local root counts errfile last_err=""
+  root="$(cd "$(dirname "$0")/../.." && pwd)"
+  errfile="$(mktemp)" || die "could not create a temporary file"
+  deadline=$(( $(date +%s) + EDGE_PUBLISH_SECONDS ))
+  while :; do
+    # Exits 3 when the account holds no entities or the read failed, and
+    # prints the counts (or the read's error class) either way. Its stderr is
+    # kept, not discarded: a broken uv or Python would otherwise read as an
+    # agent that has not published. The session is passed as an argument and
+    # never written to stderr, so the line is safe to print.
+    if counts="$(uv run --project "$root" python "$root/scripts/benchmark/brain_graph.py" \
+         --brain-url "$brain_url" --session "$session" --require-entities 2>"$errfile")"; then
+      break
+    fi
+    last_err="$(tail -n 1 "$errfile" 2>/dev/null)"
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "[native-arm] --- last entity count from brain-go" >&2
+      printf '%s\n' "$counts" >&2
+      echo "[native-arm] --- last stderr line from the entity count" >&2
+      printf '%s\n' "$last_err" >&2
+      rm -f "$errfile"
+      dump_edge_diagnostics "$ns"
+      die "brain-go held no entities for this account ${EDGE_PUBLISH_SECONDS}s after the edge agent was Ready; it has not published"
+    fi
+    sleep "$EDGE_POLL_SECONDS"
+  done
+  rm -f "$errfile"
+  log "brain-go holds entities for this account; the edge agent has published"
 }
 
 # --- fetch-chart -------------------------------------------------------------

@@ -446,13 +446,20 @@ are produced. Concretely, per slot:
   started once, because those services belong to the application and the
   conductor deploys it per problem.
 - The edge agent is installed from the `nofire-edge` chart, publishing to
-  `http://<private ip>:8000/api/edge` every 30s under a key of type `edge`
-  minted through `POST /api/account/api-keys`. Causal analysis, network
+  `http://<private ip>:8000/api/edge` every 60s under a key of type `edge`
+  minted through `POST /api/account/api-keys`. 60s is the agent's floor: it
+  exits at startup on a shorter publish interval. Causal analysis, network
   observability and Sentry are off. The chart is fetched once per box and
   handed to each slot, since slots run concurrently and would otherwise race
   on one download path. The image is not: each kind node pulls it, because
   kind imports all platforms of a manifest list and a pulled image holds only
   one platform's blobs, so neither of kind's load paths can take it.
+- `helm --wait` is not the install's check. Chart 0.5.2 runs one replica with
+  `maxUnavailable: 1`, and Helm 3 counts that ready with zero ready pods, so
+  a crash-looping agent passes it. `install-edge` then waits for the pod to
+  be Ready with no restarts (180s) and for brain-go to hold an entity for the
+  slot's account (150s). On failure it writes the pods, the last 30 events
+  and the agent's logs to the slot log and aborts the slot.
 - The edge agent reaches brain-go's api at the host's private address without
   the harness arranging anything. brain-go's own `scripts/dev-env.sh` writes
   `BIND_ADDR=0.0.0.0` when it creates `deploy/.env`, so the whole stack is
@@ -471,11 +478,65 @@ entity. An attempt that fails either is aborted rather than scored, because an
 attempt with an empty graph is the MCP arm's information set under this arm's
 label.
 
+Right after the fault is injected, the conductor holds the diagnosis stage
+until brain-go has a publish from after the fault, capped at 120s
+(`SREGYM_POST_FAULT_WAIT_SECONDS`, polled every
+`SREGYM_POST_FAULT_POLL_SECONDS`, default 5). The wait ends on the first poll
+that finds either a change event on the fault's component, or a change event
+anywhere in the slot's cluster, both timestamped at least 5s after injection.
+brain-go stamps every change event from one ingest with one time, taken when
+it finishes the ingest (`emitChangeEvents` in
+`internal/features/entitygraph/derive/reconcile/reconcile.go`), so the second
+means an ingest finished after the fault. The 5s margin keeps out a publish
+that left the agent just before the fault and finished its ingest just after.
+brain-go exposes no last-publish time, so a publish that changed nothing
+cannot be seen. Each request's timeout is the budget left, so a hung brain-go
+cannot stretch the wait much past the cap, and a failed read is recorded with
+its HTTP status (`last_error`, for example `HTTPError 401`). If
+neither appears inside the cap, the attempt is not failed: diagnosis proceeds
+and `arm-native.json` records `ended_by: "cap"`. Some faults change no object
+the agent watches (chaos-mesh CPU or network stress touches no Kubernetes
+object, and chart 0.5.2's default resources exclude networkpolicies), so an
+empty read at the cap does not show the agent is broken, and `install-edge`
+has already proved it publishes. Failing there would spend all three deploy
+attempts on such a problem and record it as `deploy_failed`.
+
+### Recorded differences between the arms
+
+Carried from sregym#118's description, with the post-fault wait added. Read a
+paired result with these in mind rather than gating on them.
+
+1. Cluster access is not equal. The MCP arm's kubectl ClusterRole grants
+   secrets, `pods/exec`, `pods/log` and writes across most groups; the native
+   arm's ServiceAccount grants get and list on 13 resource types and no
+   secrets. Neither can read chaos-mesh.
+2. The native arm moves which brain-go agent inspects the cluster:
+   `signalSelectors` routes the Kubernetes tool family to the metrics node,
+   where the MCP arm's `sregym-kubectl` sits in the state bucket.
+3. Arm B gets 150s of settle before the fault (`SREGYM_BASELINE_SYNC_SECONDS`)
+   that arm A does not. A flakier app at t=0 than at t=150 is a small
+   confound in arm B's favour.
+4. Arm B waits up to 120s after the fault, until brain-go holds a publish from
+   after it, before diagnosis starts; arm A starts at once. The first publish
+   after the fault lands 0s to 90s after it, because injection falls at a
+   random point in the agent's cycle. Without the wait that much of every
+   native investigation reads the pre-fault graph, and this arm is graded on
+   whether the graph and its change events help. In production the agent
+   publishes every 5m and an investigation starts when an alert fires,
+   minutes after the fault, so the wait is closer to the product.
+   Like item 3 it gives arm B extra time for the fault to develop, which
+   favours arm B. The cap does not fail the attempt. `post_fault_wait` in
+   `arm-native.json` records each wait, and the attempts with
+   `ended_by: "cap"` count how often the graph showed nothing after a fault.
+
 The manifest records `arm`, `edge_image` and `edge_chart_version`, and
 `seeded_connection_buckets`/`seeded_connection_signals` describe whichever
 set the run actually seeded. Per attempt, `arm-native.json` lands beside
-`fault-spec.json` with the entity counts by type and whether a change event
-exists on the mutated component. `archive_run.sh` already ships `*.json`, so
+`fault-spec.json` with the entity counts by type, whether a change event
+exists on the mutated component, and `post_fault_wait`: how long the
+post-fault wait took (`waited_seconds`), injection to the poll that ended it
+(`lag_seconds`, null at the cap), and what ended it (`ended_by`:
+`change_event`, `publish` or `cap`). `archive_run.sh` already ships `*.json`, so
 it comes back with everything else.
 
 Smoke it on one problem before a paired run:

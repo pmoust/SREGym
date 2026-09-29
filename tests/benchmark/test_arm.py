@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -374,6 +375,200 @@ def test_installing_the_edge_agent_refuses_a_chart_it_was_not_given():
     assert "SREGYM_EDGE_CHART" in done.stderr
 
 
+def _go_duration_seconds(value: str) -> float:
+    """Seconds in a Go duration string of h/m/s parts, e.g. "60s" or "1m30s"."""
+    parts = re.findall(r"(\d+(?:\.\d+)?)(h|m|s)", value)
+    assert parts and "".join(n + u for n, u in parts) == value, f"not a duration this test reads: {value!r}"
+
+    return sum(float(n) * {"h": 3600, "m": 60, "s": 1}[u] for n, u in parts)
+
+
+def test_the_graph_publish_interval_is_not_below_the_agents_floor():
+    """The edge agent exits at startup when its publish interval is under one
+    minute. At 30s it crash-looped for a whole run, Helm's wait passed anyway,
+    and every attempt failed the empty-graph gate."""
+    src = NATIVE_ARM.read_text()
+    default = re.search(r'^EDGE_GRAPH_INTERVAL="\$\{SREGYM_EDGE_GRAPH_INTERVAL:-([^}]*)\}"$', src, re.M)
+    assert default, "EDGE_GRAPH_INTERVAL default not found in native_arm.sh"
+    assert _go_duration_seconds(default.group(1)) >= 60
+
+    # The value checked above is the one handed to the chart.
+    assert '--set "config.publisher.graph.interval=$EDGE_GRAPH_INTERVAL"' in src
+
+
+# --- install-edge's own check that the agent runs and publishes -------------
+#
+# kubectl, helm and uv are fakes on PATH; brain-go is a stub HTTP server, so
+# the real brain_graph.py reads a real response. The fake uv runs this test's
+# interpreter on whatever follows "python", which is how native_arm.sh calls it.
+
+FAKE_KUBECTL = """#!/bin/sh
+echo "$*" >>"$FAKE_KUBECTL_LOG"
+case "$*" in
+  *"create namespace"*|*"create secret"*) echo "apiVersion: v1" ;;
+  *"apply -f -"*) cat >/dev/null ;;
+  *"get deploy nofire-edge"*) printf nofire-edge ;;
+  *"auth can-i"*) echo no ;;
+  *"get pods -l"*) printf '%s\\n' "$FAKE_PODS" ;;
+  *"get pods -o wide"*) echo FAKE-PODS-WIDE ;;
+  *"get events"*) echo FAKE-EVENTS ;;
+  *"logs deploy/nofire-edge"*) echo FAKE-AGENT-LOG ;;
+esac
+exit 0
+"""
+
+FAKE_UV = """#!/bin/sh
+if [ -n "${FAKE_UV_FAIL:-}" ]; then echo "$FAKE_UV_FAIL" >&2; exit 2; fi
+while [ "$#" -gt 0 ] && [ "$1" != python ]; do shift; done
+shift
+exec "$FAKE_PYTHON" "$@"
+"""
+
+
+class _Graph(BaseHTTPRequestHandler):
+    """brain-go's entity search. Answers with no entities for the first
+    `empty_replies` requests and one entity after that."""
+
+    empty_replies = 0
+    seen: list = []
+
+    def log_message(self, *args):  # noqa: A002
+        pass
+
+    def do_GET(self):  # noqa: N802
+        type(self).seen.append((self.path, self.headers.get("Cookie", "")))
+        populated = len(type(self).seen) > type(self).empty_replies
+        body = {"entities": [{"entity_type": "Pod"}] if populated else []}
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+
+@pytest.fixture
+def install_edge(tmp_path):
+    """Run install-edge against fakes. Returns a runner taking the pod line
+    kubectl reports and how many empty graph reads brain-go serves first."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("kubectl", FAKE_KUBECTL), ("uv", FAKE_UV), ("helm", "#!/bin/sh\nexit 0\n")):
+        (bindir / name).write_text(body)
+        (bindir / name).chmod(0o755)
+
+    chart = tmp_path / "nofire-edge-0.5.2.tgz"
+    chart.write_bytes(b"chart")
+    kubectl_log = tmp_path / "kubectl.log"
+
+    server = HTTPServer(("127.0.0.1", 0), _Graph)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def run(pods: str, empty_replies: int, extra_env: dict | None = None):
+        _Graph.empty_replies = empty_replies
+        _Graph.seen = []
+        env = {
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "FAKE_PYTHON": sys.executable,
+            "FAKE_KUBECTL_LOG": str(kubectl_log),
+            "FAKE_PODS": pods,
+            "SREGYM_EDGE_CHART": str(chart),
+            "BRAIN_ADMIN_API_URL": f"http://127.0.0.1:{server.server_port}",
+            "BRAIN_SESSION": "session_x",
+            "SREGYM_EDGE_READY_SECONDS": "3",
+            "SREGYM_EDGE_PUBLISH_SECONDS": "3",
+            "SREGYM_EDGE_POLL_SECONDS": "1",
+            **(extra_env or {}),
+        }
+        done = subprocess.run(
+            [
+                "bash",
+                str(NATIVE_ARM),
+                "install-edge",
+                "sregym-0",
+                "http://10.0.1.5:8000/api/edge",
+                "key",
+                "nofire-edge",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=env,
+            timeout=60,
+        )
+        return done, list(_Graph.seen)
+
+    yield run
+    server.shutdown()
+
+
+def _assert_diagnostics_dumped(stderr: str) -> None:
+    for marker in ("FAKE-PODS-WIDE", "FAKE-EVENTS", "FAKE-AGENT-LOG"):
+        assert marker in stderr, f"{marker} missing from the slot log dump"
+
+
+def test_install_edge_succeeds_once_the_agent_has_published(install_edge):
+    # A generous budget, since this test returns as soon as the graph fills:
+    # under a loaded machine one Python start can outlast a 3s budget.
+    done, seen = install_edge(
+        "nofire-edge-abc true 0", empty_replies=1, extra_env={"SREGYM_EDGE_PUBLISH_SECONDS": "30"}
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "the edge agent has published" in done.stderr
+    assert "FAKE-AGENT-LOG" not in done.stderr
+    # Polled past the first empty read, under the slot's session.
+    assert len(seen) == 2
+    assert all(path.startswith("/api/entities/search") for path, _ in seen)
+    assert all("session=session_x" in cookie for _, cookie in seen)
+
+
+def test_install_edge_aborts_the_slot_when_nothing_is_published(install_edge):
+    """The smoke-run failure: a pod Helm accepted and a graph that never
+    filled. The slot stops here with the agent's logs, not three attempts
+    later with none."""
+    done, seen = install_edge(
+        "nofire-edge-abc true 0", empty_replies=10_000, extra_env={"SREGYM_EDGE_PUBLISH_SECONDS": "8"}
+    )
+
+    assert done.returncode != 0
+    assert "held no entities" in done.stderr
+    assert len(seen) >= 2
+    _assert_diagnostics_dumped(done.stderr)
+
+
+def test_install_edge_prints_the_entity_counts_stderr_on_failure(install_edge):
+    """A broken uv or Python must not read as an agent that never published."""
+    done, seen = install_edge(
+        "nofire-edge-abc true 0", empty_replies=0, extra_env={"FAKE_UV_FAIL": "uv: interpreter not found"}
+    )
+
+    assert done.returncode != 0
+    assert "uv: interpreter not found" in done.stderr
+    assert "session_x" not in done.stderr
+    assert seen == []
+    _assert_diagnostics_dumped(done.stderr)
+
+
+def test_install_edge_aborts_at_once_when_the_agent_restarts(install_edge):
+    """A startup fault exits on every start, so a restart is not waited out."""
+    done, seen = install_edge("nofire-edge-abc false 2", empty_replies=0)
+
+    assert done.returncode != 0
+    assert "restarted" in done.stderr
+    assert seen == []
+    _assert_diagnostics_dumped(done.stderr)
+
+
+def test_install_edge_aborts_when_the_pod_never_becomes_ready(install_edge):
+    done, seen = install_edge("nofire-edge-abc false 0", empty_replies=0)
+
+    assert done.returncode != 0
+    assert "was not Ready within" in done.stderr
+    assert seen == []
+    _assert_diagnostics_dumped(done.stderr)
+
+
 def test_the_private_address_helper_refuses_a_public_one():
     """Every address this arm builds comes from here, and the arm expects the
     host's RFC1918 address. brain-go's allow_private_networks is not what
@@ -539,6 +734,327 @@ def test_the_gate_returns_the_evidence_it_gathered(monkeypatch):
     assert evidence["arm"] == "native"
     assert evidence["cluster"] == "sregym-2"
     assert evidence["entities"]["total"] == 7
+
+
+# --- the post-fault wait -----------------------------------------------------
+
+NATIVE_ENV = {"SREGYM_ARM": "native", "BRAIN_SESSION": "session_x", "KIND_CLUSTER_NAME": "sregym-0"}
+ROOT_CAUSE = "[fault_spec] component=frontend; namespace=astronomy-shop || bad tag"
+INJECTED_AT = 1_790_000_000.0
+
+
+class _Clock:
+    """A monotonic clock that only moves when the wait sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _change_events_reads(monkeypatch, answer):
+    """Replace brain-go's change-event read. answer(poll, entity_name) is the
+    count; every call is recorded as (entity_name, namespace, since)."""
+    calls = []
+
+    def fake(brain_url, session, cluster, entity_name, namespace="", since=None, timeout=None):
+        assert session == "session_x"
+        assert cluster == "sregym-0"
+        assert timeout is not None, "every post-fault read carries a timeout"
+        calls.append((entity_name, namespace, since))
+        polls = sum(1 for c in calls if c[0] == entity_name)
+
+        return {"count": answer(polls, entity_name)}
+
+    monkeypatch.setattr(native_gate, "change_events", fake)
+
+    return calls
+
+
+def test_the_post_fault_wait_ends_on_a_change_event_on_the_component(monkeypatch):
+    calls = _change_events_reads(monkeypatch, lambda poll, name: 1 if name == "frontend" and poll >= 3 else 0)
+    _no_subprocess(monkeypatch)
+    clock = _Clock()
+
+    evidence = native_gate.wait_for_fault_publish(
+        INJECTED_AT, ROOT_CAUSE, "fallback-ns", NATIVE_ENV, clock=clock, sleep=clock.sleep
+    )
+
+    assert evidence["ended_by"] == "change_event"
+    assert evidence["polls"] == 3
+    assert evidence["waited_seconds"] == 10.0
+    assert evidence["cap_seconds"] == 120
+    assert evidence["component"] == "frontend"
+    # Events are read from injection on, on the component the fault names, in
+    # the namespace the root cause names rather than the fallback.
+    # From a few seconds after injection, so an ingest that started before the
+    # fault and finished just after it does not count.
+    since = native_gate.datetime.fromtimestamp(INJECTED_AT + native_gate.SINCE_MARGIN_S, native_gate.UTC)
+    assert native_gate.SINCE_MARGIN_S > 0
+    assert ("frontend", "astronomy-shop", since) in calls
+    assert all(c[2] == since for c in calls)
+
+
+def test_the_post_fault_wait_ends_on_any_publish_after_the_fault(monkeypatch):
+    """brain-go stamps a change event with its ingest's receive time, so one
+    anywhere in the cluster after injection means a publish landed."""
+    _change_events_reads(monkeypatch, lambda poll, name: 1 if name == "" else 0)
+    clock = _Clock()
+
+    evidence = native_gate.wait_for_fault_publish(
+        INJECTED_AT, ROOT_CAUSE, None, NATIVE_ENV, clock=clock, sleep=clock.sleep
+    )
+
+    assert evidence["ended_by"] == "publish"
+    assert evidence["polls"] == 1
+    assert clock.sleeps == []
+
+
+def _no_subprocess(monkeypatch):
+    """Fail if anything spawns a process, which is how diagnostics would run."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail(f"unexpected subprocess: {a}"))
+
+
+def test_the_post_fault_wait_proceeds_at_the_cap(monkeypatch):
+    """Some faults change no object the agent watches, so a graph that shows
+    nothing after the fault is a result to count, not a broken attempt."""
+    _change_events_reads(monkeypatch, lambda poll, name: 0)
+    _no_subprocess(monkeypatch)
+    clock = _Clock()
+
+    evidence = native_gate.wait_for_fault_publish(
+        INJECTED_AT, ROOT_CAUSE, None, NATIVE_ENV, clock=clock, sleep=clock.sleep
+    )
+
+    assert evidence["ended_by"] == "cap"
+    assert evidence["waited_seconds"] == 120
+    assert evidence["lag_seconds"] is None
+    assert evidence["polls"] == 25
+    assert "last_error" not in evidence
+    assert sum(clock.sleeps) == 120
+
+
+def test_the_post_fault_cap_is_overridable_and_read_errors_do_not_end_it(monkeypatch):
+    def failing(*a, **k):
+        raise brain_graph.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(native_gate, "change_events", failing)
+    _no_subprocess(monkeypatch)
+    clock = _Clock()
+    env = {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "30", "SREGYM_POST_FAULT_POLL_SECONDS": "10"}
+
+    evidence = native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+
+    assert evidence["ended_by"] == "cap"
+    assert evidence["waited_seconds"] == 30
+    assert evidence["last_error"] == "ConnectionError"
+    assert clock.sleeps == [10, 10, 10]
+
+
+@pytest.mark.parametrize("unset", ["BRAIN_SESSION", "KIND_CLUSTER_NAME"])
+def test_the_post_fault_wait_still_raises_when_it_cannot_read(monkeypatch, unset):
+    monkeypatch.setattr(native_gate, "change_events", lambda *a, **k: pytest.fail("nothing to read with"))
+    env = {k: v for k, v in NATIVE_ENV.items() if k != unset}
+
+    with pytest.raises(native_gate.NativeArmNotReady, match=unset):
+        native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env)
+
+
+def test_the_post_fault_wait_records_the_http_status_of_a_failed_read(monkeypatch):
+    """A cap reached on a 401 must read differently from a quiet graph."""
+
+    def unauthorized(*a, **k):
+        response = brain_graph.requests.Response()
+        response.status_code = 401
+        raise brain_graph.requests.HTTPError("401 Client Error", response=response)
+
+    monkeypatch.setattr(native_gate, "change_events", unauthorized)
+    clock = _Clock()
+    env = {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "10"}
+
+    evidence = native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+
+    assert evidence["ended_by"] == "cap"
+    assert evidence["last_error"] == "HTTPError 401"
+
+
+@pytest.mark.parametrize("name", ["SREGYM_POST_FAULT_WAIT_SECONDS", "SREGYM_POST_FAULT_POLL_SECONDS"])
+def test_a_negative_post_fault_budget_raises_before_the_wait(monkeypatch, name):
+    monkeypatch.setattr(native_gate, "change_events", lambda *a, **k: pytest.fail("read before validating"))
+    clock = _Clock()
+
+    with pytest.raises(native_gate.NativeArmNotReady, match=f"{name} is negative"):
+        native_gate.wait_for_fault_publish(
+            INJECTED_AT, ROOT_CAUSE, None, {**NATIVE_ENV, name: "-1"}, clock=clock, sleep=clock.sleep
+        )
+
+    assert clock.sleeps == []
+
+
+def test_a_zero_post_fault_poll_interval_is_floored_at_one_second(monkeypatch):
+    _change_events_reads(monkeypatch, lambda poll, name: 0)
+    clock = _Clock()
+    env = {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "3", "SREGYM_POST_FAULT_POLL_SECONDS": "0"}
+
+    native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+
+    assert clock.sleeps == [1, 1, 1]
+
+
+def test_the_post_fault_request_timeout_shrinks_with_the_budget(monkeypatch):
+    """A hung brain-go spends each request's whole timeout. Capping it at the
+    budget left keeps the wait near the cap instead of 60s per poll past it."""
+    clock = _Clock()
+    timeouts = []
+
+    def slow(*a, timeout=None, **k):
+        timeouts.append(timeout)
+        clock.now += 25
+
+        return {"count": 0}
+
+    monkeypatch.setattr(native_gate, "change_events", slow)
+
+    evidence = native_gate.wait_for_fault_publish(
+        INJECTED_AT, ROOT_CAUSE, None, NATIVE_ENV, clock=clock, sleep=clock.sleep
+    )
+
+    # Remaining budget at each read: 120, 95, 65, 40, 10, then spent.
+    assert timeouts == [30, 30, 30, 30, 10, native_gate.MIN_REQUEST_TIMEOUT_S]
+    assert evidence["ended_by"] == "cap"
+
+
+def test_change_events_passes_its_timeout_to_the_request(monkeypatch):
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [], "pagination": {}}
+
+    def fake_get(url, params=None, cookies=None, timeout=None):
+        seen["timeout"] = timeout
+
+        return _Resp()
+
+    monkeypatch.setattr(brain_graph.requests, "get", fake_get)
+
+    brain_graph.change_events("http://brain", "session_x", "sregym-0", "frontend", timeout=7.5)
+    assert seen["timeout"] == 7.5
+
+    brain_graph.change_events("http://brain", "session_x", "sregym-0", "frontend")
+    assert seen["timeout"] == brain_graph.REQUEST_TIMEOUT_S
+
+
+def test_the_post_fault_wait_is_a_no_op_outside_the_native_arm(monkeypatch):
+    monkeypatch.setattr(native_gate, "change_events", lambda *a, **k: pytest.fail("the MCP arm must not read"))
+    clock = _Clock()
+
+    for env in ({"SREGYM_ARM": "mcp"}, {}):
+        assert (
+            native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+            is None
+        )
+
+    assert clock.sleeps == []
+
+
+class _InjectedProblem:
+    namespace = "astronomy-shop"
+    root_cause = ROOT_CAUSE
+
+    def inject_fault(self):
+        self.injected = True
+
+
+def _conductor_for_injection(monkeypatch, gate_evidence):
+    from sregym.conductor.conductor import Conductor
+
+    monkeypatch.setenv("SREGYM_BASELINE_SYNC_SECONDS", "0")
+    monkeypatch.setattr(native_gate, "check", lambda: dict(gate_evidence))
+    stub = Conductor.__new__(Conductor)
+    stub.problem = _InjectedProblem()
+    stub.problem_id = "incorrect_image"
+    stub.logger = types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    stub.fault_injected = False
+    stub.fault_injected_at = None
+    stub.fault_spec = None
+
+    return Conductor, stub
+
+
+def test_the_conductor_skips_the_post_fault_wait_under_the_mcp_arm(monkeypatch):
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "mcp"})
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", lambda *a, **k: pytest.fail("the MCP arm must not wait"))
+
+    conductor._inject_fault(stub)
+
+    assert stub.fault_injected
+    assert stub.native_arm_evidence == {"arm": "mcp"}
+
+
+def test_the_conductor_records_the_post_fault_wait_under_the_native_arm(monkeypatch):
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native", "cluster": "sregym-0"})
+    seen = []
+
+    def fake_wait(injected_at, root_cause, namespace):
+        seen.append((injected_at, root_cause, namespace))
+        return {"ended_by": "change_event", "waited_seconds": 42.0}
+
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", fake_wait)
+
+    conductor._inject_fault(stub)
+
+    assert seen == [(stub.fault_injected_at, ROOT_CAUSE, "astronomy-shop")]
+    assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 42.0}
+
+
+def test_the_conductor_proceeds_when_the_post_fault_wait_reaches_its_cap(monkeypatch):
+    """The real wait, with a zero cap and a graph that never changes."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
+    for key, value in {**NATIVE_ENV, "SREGYM_POST_FAULT_WAIT_SECONDS": "0"}.items():
+        monkeypatch.setenv(key, value)
+    _change_events_reads(monkeypatch, lambda poll, name: 0)
+    _no_subprocess(monkeypatch)
+
+    conductor._inject_fault(stub)
+
+    assert stub.fault_injected
+    assert stub.native_arm_evidence["post_fault_wait"]["ended_by"] == "cap"
+
+
+def test_the_conductor_fails_the_attempt_when_the_post_fault_wait_does(monkeypatch):
+    """A precondition failure is raised out of start_problem, which main.py's
+    deploy loop retries, the same path the empty-graph gate takes."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
+
+    def fake_wait(*a, **k):
+        raise native_gate.NativeArmNotReady("no publish")
+
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", fake_wait)
+
+    with pytest.raises(native_gate.NativeArmNotReady, match="no publish"):
+        conductor._inject_fault(stub)
+
+
+def test_arm_native_json_carries_the_post_fault_wait(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.delenv("BRAIN_SESSION", raising=False)
+    wait = {"ended_by": "publish", "waited_seconds": 61.0, "lag_seconds": 63.2, "polls": 13, "cap_seconds": 120}
+    conductor = types.SimpleNamespace(native_arm_evidence={"arm": "native", "post_fault_wait": wait})
+
+    main._write_native_arm_evidence(tmp_path, conductor)
+
+    assert json.loads((tmp_path / "arm-native.json").read_text())["post_fault_wait"] == wait
 
 
 def _terminate_body() -> str:

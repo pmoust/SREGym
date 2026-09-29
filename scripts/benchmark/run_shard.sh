@@ -163,11 +163,11 @@ if [ "$SREGYM_ARM" = "native" ]; then
   # application and before injecting the fault, which is the hook
   # SREGYM_BASELINE_SYNC_SECONDS was added for and never used.
   #
-  # 150s, which is five of the edge agent's 30s intervals (see
-  # native_arm.sh). The window has to contain the agent noticing a
-  # just-deployed application (one resync), publishing it (one graph post) and
-  # brain-go ingesting it, and 150s absorbs one missed cycle of each without
-  # being a large share of an attempt.
+  # 150s, which holds at least two of the edge agent's 60s publish ticks
+  # (see native_arm.sh for the arithmetic; 60s is the agent's floor). The
+  # window has to contain the agent publishing the just-deployed application
+  # and brain-go ingesting it, and 150s absorbs one missed tick without being
+  # a large share of an attempt.
   #
   # The number is not what makes this correct. The gate that runs at the end
   # of the wait fails the attempt when the graph is still empty, so a window
@@ -883,8 +883,10 @@ run_slot() {
     fi
 
     # Last, because it needs the edge API key seed_slot.sh only mints once the
-    # tenant exists. --wait inside, so a slot whose agent cannot start fails
-    # here rather than at the first attempt's entity-count gate.
+    # tenant exists. install-edge waits for the agent's pod and for its first
+    # publish to reach brain-go, so a slot whose agent cannot start or cannot
+    # publish fails here, with the agent's logs in the slot log, rather than
+    # at the first attempt's entity-count gate.
     if [ "$SREGYM_ARM" = "native" ]; then
       # seed_slot.sh prints BRAIN_EDGE_API_KEY only when it minted one. Checked
       # here so a seeding that exits 0 without it aborts with this message
