@@ -116,6 +116,10 @@ path:
   brain-go ships its `k8s_*` tool family off, and without the flag the seeded
   kubernetes connection validates healthy while every `k8s_*` call fails
   closed (sregym#139). The MCP arm does not get the flag.
+  For both arms it raises `FEDERATION_EVIDENCE_INLINE_MAX_BYTES` to 4 MiB: the
+  box has no evidence object store, so with the 256 KiB default a large tool
+  result fails its call closed (sregym#141). The cap only decides where a
+  snapshot is stored.
   It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
   resolves the flag, `seed_native_connections.py` registers brain-go's own
   Kubernetes, Prometheus, Loki and Jaeger connections in place of the four
