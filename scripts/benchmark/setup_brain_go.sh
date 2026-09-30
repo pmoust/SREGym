@@ -157,6 +157,18 @@ if [ "${SREGYM_ARM:-}" = "native" ]; then
   log "brain-go Kubernetes tool family: enabled (native arm)"
 fi
 
+# brain-go pins every tool result as evidence. A snapshot larger than this
+# cap must go to the object store, and this box has none: the S3 state store
+# needs a bucket, an access role and a KMS key the box does not have. With the
+# default 256 KiB cap a large Loki result fails its tool call closed
+# ("evidence pin write failed ... no object store is configured"), which a
+# run cannot tell from a bad query. The cap only decides where a snapshot is
+# stored, not what reaches the model, so raising it here costs Postgres row
+# size and nothing else. 4 MiB covers every result seen so far (the largest
+# was 595 KB). This is a benchmark box setting, not a product default.
+set_env_key FEDERATION_EVIDENCE_INLINE_MAX_BYTES 4194304
+log "brain-go inline evidence cap: 4 MiB"
+
 # --- reaching the api from inside a slot's kind cluster ----------------------
 # The native arm's edge agent runs inside the slot's kind cluster and POSTs its
 # resource graph to brain-go's /api/edge, so the api service has to be

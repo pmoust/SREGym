@@ -112,3 +112,13 @@ def test_the_mcp_arm_leaves_brain_gos_kubernetes_tools_alone(tmp_path):
     env, _ = _run(tmp_path, {"SREGYM_ARM": "mcp"})
 
     assert "FEATURE_KUBERNETES_TOOLS_ENABLED" not in env
+
+
+def test_the_box_raises_the_inline_evidence_cap_for_both_arms(tmp_path):
+    """The box has no evidence object store, so a tool result over the cap
+    fails its call closed. Both arms get the raised cap."""
+    for arm in ("native", "mcp"):
+        env, lines = _run(tmp_path / arm, {"SREGYM_ARM": arm})
+
+        assert env["FEDERATION_EVIDENCE_INLINE_MAX_BYTES"] == "4194304", arm
+        assert sum(1 for line in lines if line.startswith("FEDERATION_EVIDENCE_INLINE_MAX_BYTES=")) == 1, arm
