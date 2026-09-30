@@ -94,3 +94,21 @@ def test_a_run_configured_level_overrides_the_forced_one(tmp_path):
     env, _ = _run(tmp_path, {"BRAIN_ENV_EXTRA": "LOG_LEVEL=warn"})
 
     assert env["LOG_LEVEL"] == "warn"
+
+
+def test_the_native_arm_enables_brain_gos_kubernetes_tools(tmp_path):
+    """brain-go ships its k8s_* tool family off. The native arm investigates
+    through that family, so the box must turn it on or every k8s_* call fails
+    closed while the seeded kubernetes connection reads as healthy."""
+    env, lines = _run(tmp_path, {"SREGYM_ARM": "native"})
+
+    assert env["FEATURE_KUBERNETES_TOOLS_ENABLED"] == "true"
+    assert sum(1 for line in lines if line.startswith("FEATURE_KUBERNETES_TOOLS_ENABLED=")) == 1
+
+
+def test_the_mcp_arm_leaves_brain_gos_kubernetes_tools_alone(tmp_path):
+    """The MCP arm reaches the cluster through its sregym-kubectl connection
+    and is the frozen anchor, so the flag is not written for it."""
+    env, _ = _run(tmp_path, {"SREGYM_ARM": "mcp"})
+
+    assert "FEATURE_KUBERNETES_TOOLS_ENABLED" not in env

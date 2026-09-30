@@ -112,6 +112,10 @@ path:
   box only; brain-go's default and production level is info, a
   `BRAIN_ENV_EXTRA` entry can override it per run, and a brain-go ref older
   than brain-go#3704 ignores the key.
+  Under the native arm it also writes `FEATURE_KUBERNETES_TOOLS_ENABLED=true`:
+  brain-go ships its `k8s_*` tool family off, and without the flag the seeded
+  kubernetes connection validates healthy while every `k8s_*` call fails
+  closed (sregym#139). The MCP arm does not get the flag.
   It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
   resolves the flag, `seed_native_connections.py` registers brain-go's own
   Kubernetes, Prometheus, Loki and Jaeger connections in place of the four

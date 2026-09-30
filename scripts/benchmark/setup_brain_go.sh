@@ -141,6 +141,22 @@ log "force-RCI for CLI turns: ${BRAIN_FORCE_RCI:-true}"
 set_env_key LOG_LEVEL debug
 log "brain-go process log level: debug"
 
+# The native arm investigates the cluster through brain-go's own k8s_* tool
+# family, and brain-go ships that family off: FEATURE_KUBERNETES_TOOLS_ENABLED
+# defaults to false, and both the chat and tworker composition roots delete
+# the Kubernetes resolver from the tool set unless it is true. With the flag
+# off, the seeded kubernetes connection validates healthy and every k8s_* call
+# then fails closed with "no kubernetes resolver configured". That is how the
+# first scored native run investigated a Deployment misconfiguration with no
+# way to read a Deployment.
+#
+# Native arm only. The MCP arm reaches the cluster through its sregym-kubectl
+# MCP connection, not this family, and that arm is frozen as the anchor.
+if [ "${SREGYM_ARM:-}" = "native" ]; then
+  set_env_key FEATURE_KUBERNETES_TOOLS_ENABLED true
+  log "brain-go Kubernetes tool family: enabled (native arm)"
+fi
+
 # --- reaching the api from inside a slot's kind cluster ----------------------
 # The native arm's edge agent runs inside the slot's kind cluster and POSTs its
 # resource graph to brain-go's /api/edge, so the api service has to be
