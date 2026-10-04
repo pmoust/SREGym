@@ -134,7 +134,11 @@ path:
   (150s, read through `brain_graph.py`). On a timeout or a restart it writes
   the namespace's pods, its last 30 events and the agent's logs to the slot
   log and aborts the slot. The agent publishes every 60s, which is its floor:
-  it exits at startup on a shorter interval (sregym#133).
+  it exits at startup on a shorter interval (sregym#133). The image is
+  pinned to `nofireai/edge:v3.6.0` rather than `:latest`, and a values file
+  adds the `endpoints` and `networkpolicies` informers that chart 0.5.2's
+  resource list drops, plus the `endpoints` RBAC rule the chart does not
+  grant (sregym#143).
   After the fault is injected the conductor waits, native arm only and capped
   at 120s, until brain-go holds a change event from after the fault, on the
   fault's component or anywhere in the cluster, so diagnosis does not open on

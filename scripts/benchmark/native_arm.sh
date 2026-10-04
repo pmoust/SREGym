@@ -37,10 +37,31 @@ set -uo pipefail
 
 # The edge agent's published image and chart. Pinned rather than floating:
 # an arm comparison that cannot say which agent produced its graph is not a
-# comparison. Overridable so a run can test an unreleased build.
-EDGE_IMAGE="${SREGYM_EDGE_IMAGE:-nofireai/edge:latest}"
+# comparison. The image is a release tag, not :latest, so a new edge release
+# cannot change the agent between two runs of one measurement. v3.6.0 had the
+# same digest as :latest when the pin was made (sha256:4b577d0e...).
+# Overridable so a run can test an unreleased build.
+EDGE_IMAGE="${SREGYM_EDGE_IMAGE:-nofireai/edge:v3.6.0}"
 EDGE_CHART_REPO="${SREGYM_EDGE_CHART_REPO:-NOFireAI/edge-helm-chart}"
 EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
+
+# The resources the agent runs an informer for (config.kube.resources).
+#
+# The chart's list replaces the agent's compiled default rather than adding to
+# it, and chart 0.5.2's list leaves out endpoints and networkpolicies, both of
+# which the agent's default has (edge v3.6.0 internal/edge/config/config.go).
+# A Helm values override of a list replaces the whole list too, so this
+# repeats chart 0.5.2's 15 entries in the chart's order (values.yaml at tag
+# nofire-edge-0.5.2) and adds the two. "services" is not a name the agent
+# knows ("k8services" is its Service informer); it is kept because the chart
+# sends it and dropping it is not this change.
+#
+# endpoints also needs the RBAC rule in edge_values below: the agent lists a
+# resource before starting its informer and skips it when the list is refused,
+# and has_endpoints on a Service comes from an Endpoints get that returns
+# nothing when RBAC denies it. networkpolicies needs no rule; the chart's
+# ClusterRole already grants it.
+EDGE_KUBE_RESOURCES="pods nodes k8services configmaps secrets persistentvolumeclaims persistentvolumes deployments replicasets statefulsets daemonsets jobs ingresses namespaces services endpoints networkpolicies"
 
 # How often the agent's informers resync and how often it publishes the graph,
 # both under the chart's 5m defaults.
@@ -411,6 +432,15 @@ cmd_install_edge() {
     --from-literal=api-key="$api_key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
     || die "could not create the edge API key Secret"
 
+  # The informer list and the endpoints grant go in a values file rather than
+  # --set: a list of 17 strings and a nested RBAC rule are unreadable as --set
+  # paths, and --set still overrides the file for any key both carry.
+  local values
+  values="$(mktemp "${TMPDIR:-/tmp}/nofire-edge-values.XXXXXX")" || die "could not create the edge values file"
+  # shellcheck disable=SC2064  # expand now: values is local and gone at exit
+  trap "rm -f '$values'" EXIT
+  edge_values >"$values" || die "could not write the edge values file"
+
   # Every disabled feature is disabled explicitly, not left to the chart's
   # default, so a chart bump cannot quietly turn one on in a benchmark run:
   #
@@ -432,6 +462,7 @@ cmd_install_edge() {
   # lost every attempt. verify_edge below is the check that means something.
   helm upgrade --install nofire-edge "$chart" \
     --namespace "$ns" \
+    -f "$values" \
     --set "image.repository=${EDGE_IMAGE%:*}" \
     --set "image.tag=${EDGE_IMAGE##*:}" \
     --set "config.kube.clusterName=$cluster" \
@@ -463,6 +494,27 @@ cmd_install_edge() {
   verify_edge "$ns"
 
   log "edge agent installed into $cluster ($EDGE_IMAGE, chart $EDGE_CHART_VERSION), publishing to $graph_url every $EDGE_GRAPH_INTERVAL"
+}
+
+# The values file install-edge hands Helm: the informer list and the extra
+# RBAC rule described at EDGE_KUBE_RESOURCES. The chart renders
+# rbac.extraRules with toYaml into its ClusterRole's rules list
+# (templates/rbac.yaml at nofire-edge-0.5.2), so each entry is one whole rule.
+edge_values() {
+  local r
+  echo "config:"
+  echo "  kube:"
+  echo "    resources:"
+  for r in $EDGE_KUBE_RESOURCES; do
+    echo "      - \"$r\""
+  done
+  cat <<'YAML'
+rbac:
+  extraRules:
+    - apiGroups: [""]
+      resources: ["endpoints"]
+      verbs: ["get", "list", "watch"]
+YAML
 }
 
 # What the slot log needs to explain an agent that never published. Written

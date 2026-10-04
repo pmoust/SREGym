@@ -445,7 +445,8 @@ are produced. Concretely, per slot:
   `jaeger-out` in the `observe` namespace. They are supervised rather than
   started once, because those services belong to the application and the
   conductor deploys it per problem.
-- The edge agent is installed from the `nofire-edge` chart, publishing to
+- The edge agent is installed from the `nofire-edge` chart 0.5.2 with image
+  `nofireai/edge:v3.6.0` (`SREGYM_EDGE_IMAGE` overrides it), publishing to
   `http://<private ip>:8000/api/edge` every 60s under a key of type `edge`
   minted through `POST /api/account/api-keys`. 60s is the agent's floor: it
   exits at startup on a shorter publish interval. Causal analysis, network
@@ -454,6 +455,13 @@ are produced. Concretely, per slot:
   on one download path. The image is not: each kind node pulls it, because
   kind imports all platforms of a manifest list and a pulled image holds only
   one platform's blobs, so neither of kind's load paths can take it.
+- The chart's informer list (`config.kube.resources`) replaces the agent's
+  compiled default and leaves out `endpoints` and `networkpolicies`.
+  `install-edge` passes a values file that repeats the chart's 15 entries and
+  adds those two, and adds a get/list/watch rule on core `endpoints` through
+  `rbac.extraRules`, which the chart's ClusterRole does not grant. Without
+  that rule the agent skips the endpoints informer and `has_endpoints` is
+  never set on a Service. The chart already grants `networkpolicies`.
 - `helm --wait` is not the install's check. Chart 0.5.2 runs one replica with
   `maxUnavailable: 1`, and Helm 3 counts that ready with zero ready pods, so
   a crash-looping agent passes it. `install-edge` then waits for the pod to
@@ -496,7 +504,7 @@ its HTTP status (`last_error`, for example `HTTPError 401`). If
 neither appears inside the cap, the attempt is not failed: diagnosis proceeds
 and `arm-native.json` records `ended_by: "cap"`. Some faults change no object
 the agent watches (chaos-mesh CPU or network stress touches no Kubernetes
-object, and chart 0.5.2's default resources exclude networkpolicies), so an
+object), so an
 empty read at the cap does not show the agent is broken, and `install-edge`
 has already proved it publishes. Failing there would spend all three deploy
 attempts on such a problem and record it as `deploy_failed`.
