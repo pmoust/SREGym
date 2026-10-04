@@ -195,7 +195,7 @@ if [ "$SREGYM_ARM" = "native" ]; then
   #
   # Two attempts to pre-load it failed the same way. kind runs
   # `ctr images import --all-platforms` for both `kind load docker-image` and
-  # `kind load image-archive`, and nofireai/edge:latest is a manifest list:
+  # `kind load image-archive`, and the edge image is a manifest list:
   # docker fetches one platform's blobs, `docker save` keeps the whole list,
   # and the import then asks the node for a digest nobody ever downloaded:
   #

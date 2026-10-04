@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.benchmark import brain_graph, native_gate
 from scripts.benchmark.arm import ARM_MCP, ARM_NATIVE, current_arm, is_native, resolve_arm
@@ -425,6 +426,18 @@ exec "$FAKE_PYTHON" "$@"
 """
 
 
+# Records its arguments one per line and keeps a copy of the values file it
+# was handed, which install-edge deletes when it exits.
+FAKE_HELM = """#!/bin/sh
+for arg in "$@"; do echo "$arg"; done >"$FAKE_HELM_ARGS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-f" ]; then cp "$2" "$FAKE_HELM_VALUES"; fi
+  shift
+done
+exit 0
+"""
+
+
 class _Graph(BaseHTTPRequestHandler):
     """brain-go's entity search. Answers with no entities for the first
     `empty_replies` requests and one entity after that."""
@@ -452,7 +465,7 @@ def install_edge(tmp_path):
     kubectl reports and how many empty graph reads brain-go serves first."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name, body in (("kubectl", FAKE_KUBECTL), ("uv", FAKE_UV), ("helm", "#!/bin/sh\nexit 0\n")):
+    for name, body in (("kubectl", FAKE_KUBECTL), ("uv", FAKE_UV), ("helm", FAKE_HELM)):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
 
@@ -472,6 +485,8 @@ def install_edge(tmp_path):
             "FAKE_PYTHON": sys.executable,
             "FAKE_KUBECTL_LOG": str(kubectl_log),
             "FAKE_PODS": pods,
+            "FAKE_HELM_ARGS": str(tmp_path / "helm.args"),
+            "FAKE_HELM_VALUES": str(tmp_path / "helm-values.yaml"),
             "SREGYM_EDGE_CHART": str(chart),
             "BRAIN_ADMIN_API_URL": f"http://127.0.0.1:{server.server_port}",
             "BRAIN_SESSION": "session_x",
@@ -567,6 +582,94 @@ def test_install_edge_aborts_when_the_pod_never_becomes_ready(install_edge):
     assert "was not Ready within" in done.stderr
     assert seen == []
     _assert_diagnostics_dumped(done.stderr)
+
+
+# --- what install-edge hands the chart ---------------------------------------
+
+# Chart 0.5.2's config.kube.resources, in its order (values.yaml at tag
+# nofire-edge-0.5.2, commit ad148fce). A values override replaces the chart's
+# list, so native_arm.sh has to repeat every one of these.
+CHART_052_RESOURCES = [
+    "pods",
+    "nodes",
+    "k8services",
+    "configmaps",
+    "secrets",
+    "persistentvolumeclaims",
+    "persistentvolumes",
+    "deployments",
+    "replicasets",
+    "statefulsets",
+    "daemonsets",
+    "jobs",
+    "ingresses",
+    "namespaces",
+    "services",
+]
+
+
+def _installed(install_edge, tmp_path, extra_env=None):
+    """Run install-edge to success and return Helm's arguments and values."""
+    done, _ = install_edge(
+        "nofire-edge-abc true 0",
+        empty_replies=0,
+        extra_env={"SREGYM_EDGE_PUBLISH_SECONDS": "30", **(extra_env or {})},
+    )
+    assert done.returncode == 0, done.stderr
+
+    args = (tmp_path / "helm.args").read_text().splitlines()
+    values = yaml.safe_load((tmp_path / "helm-values.yaml").read_text())
+    return args, values
+
+
+def test_the_edge_image_is_pinned_to_a_release_tag(install_edge, tmp_path):
+    """:latest moves with every edge release, so two runs of one measurement
+    could grade two different agents."""
+    args, _ = _installed(install_edge, tmp_path)
+
+    assert "image.repository=nofireai/edge" in args
+    assert "image.tag=v3.6.0" in args
+
+    versions = subprocess.run(
+        ["bash", str(NATIVE_ARM), "edge-versions"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={k: v for k, v in os.environ.items() if k != "SREGYM_EDGE_IMAGE"},
+    )
+    assert versions.stdout.split("\t")[0] == "nofireai/edge:v3.6.0"
+
+
+def test_the_edge_image_is_still_overridable(install_edge, tmp_path):
+    args, _ = _installed(install_edge, tmp_path, {"SREGYM_EDGE_IMAGE": "example/edge:dev"})
+
+    assert "image.repository=example/edge" in args
+    assert "image.tag=dev" in args
+
+
+def test_the_informer_list_keeps_the_charts_and_adds_endpoints_and_networkpolicies(install_edge, tmp_path):
+    """The override replaces the chart's list, so a missing entry is an
+    informer that silently stops running."""
+    args, values = _installed(install_edge, tmp_path)
+
+    assert values["config"]["kube"]["resources"] == CHART_052_RESOURCES + ["endpoints", "networkpolicies"]
+    assert not [a for a in args if a.startswith("config.kube.resources")], "--set would override the file"
+
+
+def test_the_edge_service_account_is_granted_endpoints(install_edge, tmp_path):
+    """Without it the agent skips the endpoints informer and its Endpoints
+    get returns nothing, so has_endpoints is never set on a Service."""
+    _, values = _installed(install_edge, tmp_path)
+
+    assert values["rbac"]["extraRules"] == [
+        {"apiGroups": [""], "resources": ["endpoints"], "verbs": ["get", "list", "watch"]}
+    ]
+
+
+def test_install_edge_removes_its_values_file(install_edge, tmp_path):
+    args, _ = _installed(install_edge, tmp_path)
+
+    assert not Path(args[args.index("-f") + 1]).exists()
 
 
 def test_the_private_address_helper_refuses_a_public_one():
@@ -1110,7 +1213,7 @@ def test_the_chart_fetch_is_handed_the_clone_token():
 
 def test_the_edge_image_is_not_preloaded_into_the_node():
     """kind runs `ctr images import --all-platforms` for both of its load
-    paths, and nofireai/edge:latest is a manifest list. docker fetches one
+    paths, and the edge image is a manifest list. docker fetches one
     platform's blobs, `docker save` keeps the whole list, and the import then
     asks the node for a digest nobody downloaded. Two runs died that way,
     run-20260925-0933 on the docker store and run-20260928-0703 on the
