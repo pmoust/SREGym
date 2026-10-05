@@ -26,13 +26,14 @@ import pytest
 import yaml
 
 from scripts.benchmark import brain_graph, native_gate
-from scripts.benchmark.arm import ARM_MCP, ARM_NATIVE, current_arm, is_native, resolve_arm
+from scripts.benchmark.arm import ARM_EDGE, ARM_MCP, ARM_NATIVE, ARMS, current_arm, is_edge, is_native, resolve_arm
 from scripts.benchmark.seed_connections import build_config as mcp_build_config
 from scripts.benchmark.seed_native_connections import (
     BUCKET,
     DEFAULT_CONFIGMAP_VALUES,
     NATIVE_CONNECTIONS,
     build_config,
+    connections_for_arm,
     resolve_configmap_values,
 )
 
@@ -66,10 +67,24 @@ def test_an_unrecognised_arm_is_a_hard_stop_not_a_fallback():
         current_arm({"SREGYM_ARM": "MCP"})
 
 
-def test_is_native_only_for_the_native_arm():
+def test_is_native_for_the_native_and_edge_arms():
+    """Both run brain-go's own connectors and the edge agent; only the
+    Kubernetes connection tells them apart, which is_edge names."""
     assert is_native({"SREGYM_ARM": "native"})
+    assert is_native({"SREGYM_ARM": "edge"})
     assert not is_native({"SREGYM_ARM": "mcp"})
     assert not is_native({})
+
+
+def test_is_edge_only_for_the_edge_arm():
+    assert is_edge({"SREGYM_ARM": "edge"})
+    assert not is_edge({"SREGYM_ARM": "native"})
+    assert not is_edge({"SREGYM_ARM": "mcp"})
+    assert not is_edge({})
+
+
+def test_arms_lists_all_three():
+    assert set(ARMS) == {ARM_MCP, ARM_NATIVE, ARM_EDGE}
 
 
 def test_arm_py_prints_the_arm_or_exits_two():
@@ -139,6 +154,28 @@ def test_every_native_connection_opts_into_private_addresses():
     for _, _, service in NATIVE_CONNECTIONS:
         config = build_config(service, "http://10.0.1.5:21000", "apiVersion: v1\n")
         assert config.get("allow_private_networks") is True, service
+
+
+# --- what each arm seeds (connections_for_arm) -------------------------------
+
+
+def test_connections_for_arm_drops_kubernetes_under_edge():
+    services = [service for _, _, service in connections_for_arm(ARM_EDGE)]
+
+    assert sorted(services) == ["jaeger", "loki", "prometheus"]
+
+
+def test_connections_for_arm_keeps_the_full_set_under_native():
+    assert connections_for_arm(ARM_NATIVE) == NATIVE_CONNECTIONS
+
+
+def test_connections_for_arm_does_not_mutate_the_shared_list():
+    """A caller that filters in place would quietly change NATIVE_CONNECTIONS
+    for every other reader, including the native arm's own seeding."""
+    before = list(NATIVE_CONNECTIONS)
+    connections_for_arm(ARM_EDGE)
+
+    assert before == NATIVE_CONNECTIONS
 
 
 # --- configmap_values (brain-go#4052) ----------------------------------------
@@ -307,6 +344,107 @@ def test_seeding_the_native_arm_honours_a_configmap_values_override(stub_brain, 
     creates = [body for path, body in posts if path == "/api/connections"]
     kubernetes_config = next(c["config"] for c in creates if c["service"] == "kubernetes")
     assert kubernetes_config["configmap_values"] == "sizes"
+
+
+def test_seeding_the_edge_arm_posts_three_connections_and_skips_kubernetes(stub_brain):
+    """Edge is native minus the Kubernetes connection: no kubeconfig given, no
+    sregym-kubernetes row, and the script must not demand one."""
+    url, posts = stub_brain
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "edge"},
+    )
+    assert done.returncode == 0, done.stderr
+
+    creates = [body for path, body in posts if path == "/api/connections"]
+    assert len(creates) == 3
+    assert {c["service"] for c in creates} == {"prometheus", "loki", "jaeger"}
+    assert all(c["config"]["allow_private_networks"] is True for c in creates)
+    assert all("configmap_values" not in c["config"] for c in creates)
+    # Only Kubernetes is probed at seed time, and there is none under edge.
+    assert [path for path, _ in posts if path.endswith("/validate")] == []
+
+
+def test_seeding_the_edge_arm_needs_no_kubeconfig_file(stub_brain, tmp_path):
+    """A kubeconfig that happens to exist must not be read under edge: it is
+    the native arm's credential and edge has no connection to use it for."""
+    url, posts = stub_brain
+    # A kubeconfig on disk, deliberately not passed with --kubeconfig-file,
+    # proving the edge arm does not go looking for one on its own.
+    (tmp_path / "unused-kubeconfig").write_text("apiVersion: v1\nkind: Config\n")
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "edge"},
+    )
+
+    assert done.returncode == 0, done.stderr
+    creates = [body for path, body in posts if path == "/api/connections"]
+    assert len(creates) == 3
+
+
+def test_seeding_the_native_arm_without_a_kubeconfig_file_is_a_hard_stop(stub_brain):
+    """Native wants the Kubernetes connection, so a caller that forgets
+    --kubeconfig-file must not seed a connection with no credential."""
+    url, posts = stub_brain
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
+    )
+
+    assert done.returncode != 0
+    assert "--kubeconfig-file" in done.stderr
+    assert not [body for path, body in posts if path == "/api/connections"]
 
 
 def test_an_unhealthy_kubernetes_connection_stops_the_slot(tmp_path):
@@ -793,12 +931,14 @@ def test_the_private_address_helper_refuses_a_public_one():
 def test_seed_slot_dispatches_on_the_arm_and_defaults_to_mcp():
     """seed_slot.sh is not runnable here (it drives docker compose), so what
     is checked is the branch itself: two functions, one call site each, and
-    the native one reachable only under the native arm."""
+    the native one reachable under the native and edge arms."""
     src = (ROOT / "scripts" / "benchmark" / "seed_slot.sh").read_text()
 
     assert src.count("seed_mcp() {") == 1
     assert src.count("seed_native() {") == 1
-    assert re.search(r'if \[ "\$ARM" = "native" \]; then\n  seed_native\nelse\n  seed_mcp\nfi', src)
+    assert re.search(
+        r'if \[ "\$ARM" = "native" \] \|\| \[ "\$ARM" = "edge" \]; then\n  seed_native\nelse\n  seed_mcp\nfi', src
+    )
     # The MCP arm's own registration call, unchanged.
     assert "seed_connections.py" in src.split("seed_mcp() {", 1)[1].split("seed_native", 1)[0]
 
@@ -827,6 +967,7 @@ def test_the_mcp_arm_records_the_same_connection_lines_it_always_did(tmp_path):
     fields = _manifest(tmp_path, {})
 
     assert fields["arm"] == "mcp"
+    assert fields["kubernetes_connection"] == "mcp"
     assert fields["seeded_connection_signals"] == "kubectl:-,prometheus:metrics,jaeger:traces,loki:logs"
     assert fields["seeded_connection_buckets"] == (
         "kubectl:state,prometheus:observation,jaeger:observation,loki:observation"
@@ -844,6 +985,7 @@ def test_the_native_arm_records_its_own_connections_and_its_edge_agent(tmp_path)
     fields = _manifest(tmp_path, {"SREGYM_ARM": "native"})
 
     assert fields["arm"] == "native"
+    assert fields["kubernetes_connection"] == "native"
     assert fields["seeded_connection_buckets"] == (
         "kubernetes:observation,prometheus:observation,jaeger:observation,loki:observation"
     )
@@ -860,6 +1002,31 @@ def test_the_native_arm_records_a_configmap_values_override(tmp_path):
     fields = _manifest(tmp_path, {"SREGYM_ARM": "native", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"})
 
     assert fields["seeded_configmap_values"] == "kubernetes:sizes"
+
+
+def test_the_edge_arm_records_no_kubernetes_connection_but_its_own_edge_agent(tmp_path):
+    """Edge is native minus the Kubernetes connection: the same edge agent and
+    telemetry connections, none of the kubernetes-specific fields."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "edge"})
+
+    assert fields["arm"] == "edge"
+    assert fields["kubernetes_connection"] == "none"
+    assert fields["seeded_connection_buckets"] == "prometheus:observation,jaeger:observation,loki:observation"
+    assert fields["seeded_connection_signals"] == "prometheus:-,jaeger:-,loki:-"
+    # The same edge agent the native arm installs, recorded the same way.
+    assert fields["edge_image"].startswith("nofireai/edge:")
+    assert re.match(r"^\d+\.\d+\.\d+$", fields["edge_chart_version"])
+    # No kubernetes connection means no configmap_values to record, the same
+    # as the MCP arm.
+    assert fields["seeded_configmap_values"] == ""
+
+
+def test_an_edge_box_side_configmap_override_is_not_recorded(tmp_path):
+    """SREGYM_K8S_CONFIGMAP_VALUES means nothing without a kubernetes
+    connection to apply it to; the edge arm's manifest must not report it."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "edge", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"})
+
+    assert fields["seeded_configmap_values"] == ""
 
 
 # --- the gate ----------------------------------------------------------------
@@ -903,6 +1070,19 @@ def test_the_gate_is_a_no_op_outside_the_native_arm(monkeypatch):
 
     assert native_gate.check({"SREGYM_ARM": "mcp"}) == {"arm": "mcp"}
     assert native_gate.check({}) == {"arm": "mcp"}
+
+
+def test_the_gate_runs_for_the_edge_arm_too(monkeypatch):
+    """Edge shares the gate with native: neither telemetry reachability nor
+    the entity graph depends on the Kubernetes connection edge lacks."""
+    monkeypatch.setattr(
+        native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
+    )
+    monkeypatch.setattr(native_gate, "require_populated_graph", lambda *a, **k: {"total": 2, "by_type": {"POD": 2}})
+
+    evidence = native_gate.check({"SREGYM_ARM": "edge", "BRAIN_SESSION": "session_x", "KIND_CLUSTER_NAME": "sregym-0"})
+
+    assert evidence["entities"]["total"] == 2
 
 
 def test_the_gate_fails_the_attempt_when_the_graph_is_empty(monkeypatch):
@@ -1174,6 +1354,19 @@ def test_the_post_fault_wait_is_a_no_op_outside_the_native_arm(monkeypatch):
         )
 
     assert clock.sleeps == []
+
+
+def test_the_post_fault_wait_runs_for_the_edge_arm_too(monkeypatch):
+    """The wait exists to keep the pre-fault graph out of the investigation;
+    that applies to edge's graph exactly as it does to native's."""
+    calls = _change_events_reads(monkeypatch, lambda poll, name: 1 if name == "" else 0)
+    clock = _Clock()
+    env = {**NATIVE_ENV, "SREGYM_ARM": "edge"}
+
+    evidence = native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+
+    assert evidence["ended_by"] == "publish"
+    assert calls
 
 
 class _InjectedProblem:

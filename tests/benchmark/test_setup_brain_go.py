@@ -114,10 +114,18 @@ def test_the_mcp_arm_leaves_brain_gos_kubernetes_tools_alone(tmp_path):
     assert "FEATURE_KUBERNETES_TOOLS_ENABLED" not in env
 
 
-def test_the_box_raises_the_inline_evidence_cap_for_both_arms(tmp_path):
+def test_the_edge_arm_leaves_brain_gos_kubernetes_tools_alone(tmp_path):
+    """Edge seeds no kubernetes connection at all, so there is nothing for the
+    k8s_* tool family to serve and the flag stays off, the product default."""
+    env, _ = _run(tmp_path, {"SREGYM_ARM": "edge"})
+
+    assert "FEATURE_KUBERNETES_TOOLS_ENABLED" not in env
+
+
+def test_the_box_raises_the_inline_evidence_cap_for_every_arm(tmp_path):
     """The box has no evidence object store, so a tool result over the cap
-    fails its call closed. Both arms get the raised cap."""
-    for arm in ("native", "mcp"):
+    fails its call closed. Every arm gets the raised cap."""
+    for arm in ("native", "mcp", "edge"):
         env, lines = _run(tmp_path / arm, {"SREGYM_ARM": arm})
 
         assert env["FEDERATION_EVIDENCE_INLINE_MAX_BYTES"] == "4194304", arm

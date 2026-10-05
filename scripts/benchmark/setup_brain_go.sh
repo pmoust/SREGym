@@ -151,7 +151,10 @@ log "brain-go process log level: debug"
 # way to read a Deployment.
 #
 # Native arm only. The MCP arm reaches the cluster through its sregym-kubectl
-# MCP connection, not this family, and that arm is frozen as the anchor.
+# MCP connection, not this family, and that arm is frozen as the anchor. The
+# edge arm leaves the flag unset too, on purpose: it is native minus the
+# Kubernetes API connection, so there is no kubernetes connection for this
+# family to serve and it stays off at the product default.
 if [ "${SREGYM_ARM:-}" = "native" ]; then
   set_env_key FEATURE_KUBERNETES_TOOLS_ENABLED true
   log "brain-go Kubernetes tool family: enabled (native arm)"

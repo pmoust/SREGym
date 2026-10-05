@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which benchmark arm a run is: SREGYM_ARM.
 
-Two values, and the default reproduces every run archived so far.
+Three values, and the default reproduces every run archived so far.
 
     mcp     brain-go reaches the cluster through SREGym's four CUSTOM_MCP
             endpoints and nothing else. The default, and the anchor every
@@ -11,6 +11,13 @@ Two values, and the default reproduces every run archived so far.
             connectors (kubernetes, prometheus, loki, jaeger) and the edge
             agent runs in the slot's cluster, so the entity graph and change
             events exist during the attempt.
+
+    edge    native minus the Kubernetes API connection: the edge agent plus
+            the prometheus, loki and jaeger connectors, and nothing that
+            reaches the API server. No kubeconfig is built, no kind config
+            binds the API server to a reachable address, and brain-go's
+            k8s_* tool family is never enabled. This is NOFire's production
+            posture, where brain-go holds no Kubernetes API token at all.
 
 An unrecognised value is a hard stop, not a fallback to mcp. A typo that
 silently selected the default would produce a run that reads as arm B in the
@@ -33,8 +40,10 @@ import sys
 ARM_MCP = "mcp"
 # The native-connector and edge-agent arm.
 ARM_NATIVE = "native"
+# Native minus the Kubernetes API connection.
+ARM_EDGE = "edge"
 
-ARMS = (ARM_MCP, ARM_NATIVE)
+ARMS = (ARM_MCP, ARM_NATIVE, ARM_EDGE)
 
 
 def resolve_arm(value: str | None) -> str:
@@ -62,8 +71,26 @@ def current_arm(env: dict[str, str] | None = None) -> str:
 
 
 def is_native(env: dict[str, str] | None = None) -> bool:
-    """Whether this process runs under the native arm."""
-    return current_arm(env) == ARM_NATIVE
+    """Whether this process runs its own connectors and an edge agent.
+
+    True for both native and edge: they share every mechanism except the
+    Kubernetes API connection (native_gate's telemetry probe and empty-graph
+    gate, the pre-fault window, the post-fault wait, the edge agent install),
+    so the gating logic for all of that reads this one flag rather than
+    listing both arms at every call site. Code that cares about the one
+    difference, the Kubernetes connection, reads is_edge instead.
+    """
+    return current_arm(env) in (ARM_NATIVE, ARM_EDGE)
+
+
+def is_edge(env: dict[str, str] | None = None) -> bool:
+    """Whether this process runs under the edge arm specifically.
+
+    Unlike is_native, this is false for the native arm: it names the one
+    difference between the two (no Kubernetes API connection), not the
+    mechanism they share.
+    """
+    return current_arm(env) == ARM_EDGE
 
 
 def main() -> int:

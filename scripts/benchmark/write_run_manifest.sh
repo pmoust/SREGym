@@ -127,13 +127,13 @@ print(' '.join(ids))
 # reading those three functions at the run's brain_go_sha and checking
 # tool-calls.json, the way this field's own reasoning was worked out.
 SEEDED_CONNECTION_BUCKETS=$(uv run python -c "
-from scripts.benchmark.arm import is_native
+from scripts.benchmark.arm import current_arm, is_native
 from scripts.benchmark.seed_connections import ENDPOINTS
 
 if is_native():
-    from scripts.benchmark.seed_native_connections import BUCKET, NATIVE_CONNECTIONS
+    from scripts.benchmark.seed_native_connections import BUCKET, connections_for_arm
 
-    print(','.join(f'{service}:{\"+\".join(BUCKET)}' for _, _, service in NATIVE_CONNECTIONS))
+    print(','.join(f'{service}:{\"+\".join(BUCKET)}' for _, _, service in connections_for_arm(current_arm())))
 else:
     print(','.join(f'{path}:{\"+\".join(buckets)}' for _, path, buckets, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_BUCKETS=""
@@ -147,13 +147,13 @@ else:
 # difference between a run whose metrics, logs and traces agents held one
 # server each and a run where they held the same three.
 SEEDED_CONNECTION_SIGNALS=$(uv run python -c "
-from scripts.benchmark.arm import is_native
+from scripts.benchmark.arm import current_arm, is_native
 from scripts.benchmark.seed_connections import ENDPOINTS, SIGNALS
 
 if is_native():
-    from scripts.benchmark.seed_native_connections import NATIVE_CONNECTIONS
+    from scripts.benchmark.seed_native_connections import connections_for_arm
 
-    print(','.join(f'{service}:-' for _, _, service in NATIVE_CONNECTIONS))
+    print(','.join(f'{service}:-' for _, _, service in connections_for_arm(current_arm())))
 else:
     print(','.join(f'{path}:{\"+\".join(SIGNALS.get(path) or [\"-\"])}' for _, path, _, _ in ENDPOINTS))
 " 2>/dev/null) || SEEDED_CONNECTION_SIGNALS=""
@@ -175,15 +175,28 @@ MCP_IMAGE=$("$(dirname "$0")/build_mcp_image.sh" --print-name 2>/dev/null) || MC
 # not exist, which run_shard.sh hard-stops the run over.
 ARM=$(uv run python "$(dirname "$0")/arm.py" 2>/dev/null) || ARM=""
 
+# Which kubernetes connection, if any, gives brain-go cluster access: "mcp"
+# for the CUSTOM_MCP sregym-kubectl endpoint, "native" for brain-go's own
+# Kubernetes connector, or "none" for the edge arm, which has neither -- the
+# edge agent's entity graph is the only cluster access brain-go gets. Empty
+# when ARM is empty, the same way every other arm-dependent field is.
+KUBERNETES_CONNECTION=""
+case "$ARM" in
+  mcp) KUBERNETES_CONNECTION="mcp" ;;
+  native) KUBERNETES_CONNECTION="native" ;;
+  edge) KUBERNETES_CONNECTION="none" ;;
+esac
+
 # The edge agent behind the entity graph, asked of the script that installs it
-# rather than restated here. Both are empty under the MCP arm, which runs no
-# edge agent: the keys are always present so a reader parses one shape.
+# rather than restated here. Empty under the MCP arm, which runs no edge
+# agent: the keys are always present so a reader parses one shape. The native
+# and edge arms both run it the same way, so both get it recorded.
 #
-# Recorded because the graph is the native arm's whole claim, and two runs
-# whose graphs came from different agent builds are not the same run.
+# Recorded because the graph is these arms' whole claim, and two runs whose
+# graphs came from different agent builds are not the same run.
 EDGE_IMAGE=""
 EDGE_CHART_VERSION=""
-if [ "$ARM" = "native" ]; then
+if [ "$ARM" = "native" ] || [ "$ARM" = "edge" ]; then
   EDGE_VERSIONS=$("$(dirname "$0")/native_arm.sh" edge-versions 2>/dev/null) || EDGE_VERSIONS=""
   EDGE_IMAGE=$(printf '%s' "$EDGE_VERSIONS" | cut -f1)
   EDGE_CHART_VERSION=$(printf '%s' "$EDGE_VERSIONS" | cut -f2)
@@ -191,11 +204,12 @@ fi
 
 # The kubernetes connection's configmap_values setting as actually seeded
 # (brain-go#4052), native arm only: the MCP arm seeds no native kubernetes
-# connection and the key means nothing to a CUSTOM_MCP one. Read from
-# resolve_configmap_values() rather than restated here, so this cannot drift
-# from what seed_native_connections.py actually sent if the override or the
-# default ever change. Empty under the MCP arm, the same way edge_image is,
-# so a reader parses one shape regardless of arm.
+# connection and the edge arm seeds no kubernetes connection at all, so the
+# key means nothing to either. Read from resolve_configmap_values() rather
+# than restated here, so this cannot drift from what seed_native_connections.py
+# actually sent if the override or the default ever change. Empty outside the
+# native arm, the same way edge_image is, so a reader parses one shape
+# regardless of arm.
 SEEDED_CONFIGMAP_VALUES=""
 if [ "$ARM" = "native" ]; then
   SEEDED_CONFIGMAP_VALUES=$(uv run python -c "
@@ -235,9 +249,11 @@ fi
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"
   echo "brain_go_sha=${BRAIN_GO_SHA:-}"
-  # mcp or native. Every line below that describes a connection means
+  # mcp, native, or edge. Every line below that describes a connection means
   # something different depending on it.
   echo "arm=$ARM"
+  # mcp, native, or none. See the comment above KUBERNETES_CONNECTION.
+  echo "kubernetes_connection=$KUBERNETES_CONNECTION"
   # sregym-mcp:<sregym sha>, built on the box and loaded into each slot's kind
   # node. See the comment above for what it does and does not promise.
   echo "mcp_image=$MCP_IMAGE"

@@ -21,9 +21,11 @@
 # the four CUSTOM_MCP endpoints and nothing else, byte for byte what every
 # archived run seeded. Under "native" it is brain-go's own Kubernetes,
 # Prometheus, Loki and Jaeger connections against the same backends, plus the
-# edge API key the in-cluster agent publishes the entity graph with. The two
-# are exclusive: seeding both would give every node two servers for the same
-# signal and the comparison would measure neither arm.
+# edge API key the in-cluster agent publishes the entity graph with. Under
+# "edge" it is the same three telemetry connections and edge API key, minus
+# the Kubernetes connection and its kubeconfig. These are mutually exclusive:
+# seeding more than one would give every node two servers for the same signal
+# and the comparison would measure neither arm.
 #
 # Usage:
 #   scripts/benchmark/seed_slot.sh <customer> <mcp-port> [brain-api-url]
@@ -170,6 +172,12 @@ seed_mcp() {
 }
 
 # --- seed_native: brain-go's own connectors, plus the edge key ---------------
+# Shared by the native and edge arms: both register the same three telemetry
+# connections and mint the same edge API key. Native also registers a
+# Kubernetes connection, which needs the read-only kubeconfig run_shard.sh
+# built; edge seeds nothing for the Kubernetes API, so that step and its
+# kubeconfig requirement are skipped.
+#
 # The three telemetry URLs are the host side of the port-forwards run_shard.sh
 # keeps alive to prometheus-server, loki and jaeger-out in the observe
 # namespace: the same three backends the MCP endpoints proxy to, reached
@@ -182,22 +190,35 @@ seed_mcp() {
 # which is also the only point at which the answer matters.
 seed_native() {
   [ -n "${SREGYM_PROMETHEUS_PORT:-}" ] && [ -n "${SREGYM_LOKI_PORT:-}" ] && [ -n "${SREGYM_JAEGER_PORT:-}" ] \
-    || die "the native arm needs SREGYM_PROMETHEUS_PORT, SREGYM_LOKI_PORT and SREGYM_JAEGER_PORT from run_slot_env.sh"
-  [ -n "${SREGYM_NATIVE_KUBECONFIG:-}" ] \
-    || die "the native arm needs SREGYM_NATIVE_KUBECONFIG, the read-only kubeconfig native_arm.sh wrote"
-  [ -f "$SREGYM_NATIVE_KUBECONFIG" ] \
-    || die "no read-only kubeconfig at $SREGYM_NATIVE_KUBECONFIG"
+    || die "the native and edge arms need SREGYM_PROMETHEUS_PORT, SREGYM_LOKI_PORT and SREGYM_JAEGER_PORT from run_slot_env.sh"
 
-  log "registering four native connections"
-  uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
-    --brain-url "$BRAIN_API_URL" \
-    --session "$DEV_SESSION" \
-    --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
-    --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
-    --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
-    --kubeconfig-file "$SREGYM_NATIVE_KUBECONFIG" \
-    1>&2 \
-    || die "native connection seeding failed"
+  if [ "$ARM" = "native" ]; then
+    [ -n "${SREGYM_NATIVE_KUBECONFIG:-}" ] \
+      || die "the native arm needs SREGYM_NATIVE_KUBECONFIG, the read-only kubeconfig native_arm.sh wrote"
+    [ -f "$SREGYM_NATIVE_KUBECONFIG" ] \
+      || die "no read-only kubeconfig at $SREGYM_NATIVE_KUBECONFIG"
+
+    log "registering native connections, Kubernetes included"
+    uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
+      --brain-url "$BRAIN_API_URL" \
+      --session "$DEV_SESSION" \
+      --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
+      --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
+      --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
+      --kubeconfig-file "$SREGYM_NATIVE_KUBECONFIG" \
+      1>&2 \
+      || die "native connection seeding failed"
+  else
+    log "registering native connections, no Kubernetes (edge arm)"
+    uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
+      --brain-url "$BRAIN_API_URL" \
+      --session "$DEV_SESSION" \
+      --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
+      --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
+      --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
+      1>&2 \
+      || die "edge connection seeding failed"
+  fi
 
   log "minting this slot's edge API key"
   EDGE_API_KEY="$(uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/mint_edge_key.py" \
@@ -215,7 +236,7 @@ ARM="$(uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/arm.py")" \
   || die "SREGYM_ARM is not a recognised arm; see the message above"
 log "arm: $ARM"
 
-if [ "$ARM" = "native" ]; then
+if [ "$ARM" = "native" ] || [ "$ARM" = "edge" ]; then
   seed_native
 else
   seed_mcp

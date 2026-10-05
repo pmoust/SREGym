@@ -415,7 +415,7 @@ E2E figure when the stage did not run.
 
 ## Which arm a run is
 
-`SREGYM_ARM`, set from a scenario's `arm` tfvars value. Two values, and the
+`SREGYM_ARM`, set from a scenario's `arm` tfvars value. Three values, and the
 default is what every archived run is.
 
 `mcp` seeds four CUSTOM_MCP connections at SREGym's own MCP endpoints and
@@ -492,6 +492,31 @@ are produced. Concretely, per slot:
 - `SREGYM_BASELINE_SYNC_SECONDS` is 150, the window the conductor already
   sleeps before injecting a fault.
 
+`edge` is native minus the Kubernetes API connection: NOFire's production
+posture, where brain-go holds no Kubernetes API token at all. It seeds the
+same Prometheus, Loki and Jaeger connections against the same backends and
+installs the same edge agent the same way, so the entity graph and change
+events are produced exactly as they are under native. What it does not do:
+
+- No kubeconfig is built, so no read-only ServiceAccount is created and the
+  kind cluster keeps its committed config, API server on loopback. Native's
+  private-address bind exists only so brain-go's Kubernetes connector can
+  dial the API server; with no such connector there is nothing to dial it for.
+- No kubernetes connection is seeded, so `configmap_values` is never set and
+  `seed_native_connections.py` seeds three connections, not four.
+- `setup_brain_go.sh` leaves `FEATURE_KUBERNETES_TOOLS_ENABLED` unset, the
+  product default, so brain-go's `k8s_*` tool family never binds. No tool in
+  that family resolves for this arm's investigations.
+
+Both arms' pre-fault window, gate and post-fault wait are identical: the gate
+reads `is_native`, which is true for native and edge alike, because neither
+telemetry reachability nor the entity graph depends on the Kubernetes
+connection. `arm-native.json` (the name is the shared gate's, not either
+arm's own) and the comments on `native_gate.py` make the same point. The run
+manifest is what records the arm itself: `arm=edge` and
+`kubernetes_connection=none`, against `arm=native`/`kubernetes_connection=native`
+and `arm=mcp`/`kubernetes_connection=mcp`.
+
 At the end of that window, and before the fault, the attempt is gated: the
 three telemetry backends must answer and brain-go must hold at least one
 entity. An attempt that fails either is aborted rather than scored, because an
@@ -548,16 +573,26 @@ paired result with these in mind rather than gating on them.
    favours arm B. The cap does not fail the attempt. `post_fault_wait` in
    `arm-native.json` records each wait, and the attempts with
    `ended_by: "cap"` count how often the graph showed nothing after a fault.
+5. The edge arm shares items 2 through 4 with the native arm: same tool
+   routing, same pre-fault settle, same post-fault wait. It does not share
+   item 1, because it has no Kubernetes connection to compare: neither the
+   MCP arm's kubectl ClusterRole nor the native arm's read-only
+   ServiceAccount exists under edge. The only cluster access brain-go has is
+   whatever the edge agent's own entity graph carries.
 
-The manifest records `arm`, `edge_image` and `edge_chart_version`, and
-`seeded_connection_buckets`/`seeded_connection_signals` describe whichever
-set the run actually seeded. `seeded_configmap_values` (native arm only,
-empty under mcp) records the kubernetes connection's `configmap_values` the
-same way, so an archived run says what it actually seeded even when
+The manifest records `arm`, `kubernetes_connection`, `edge_image` and
+`edge_chart_version`, and `seeded_connection_buckets`/`seeded_connection_signals`
+describe whichever set the run actually seeded: three entries under edge
+(prometheus, jaeger, loki), four under native (those three plus kubernetes),
+and the four CUSTOM_MCP endpoints under mcp. `kubernetes_connection` is `mcp`,
+`native`, or `none` (edge), naming which connection, if any, gives brain-go
+cluster access. `seeded_configmap_values` (native arm only, empty under mcp
+and edge) records the kubernetes connection's `configmap_values` the same
+way, so an archived run says what it actually seeded even when
 `SREGYM_K8S_CONFIGMAP_VALUES` was overridden by hand on the box. Per attempt,
-`arm-native.json` lands beside `fault-spec.json` with the entity counts by
-type, whether a change event exists on the mutated component, and
-`post_fault_wait`: how long the
+`arm-native.json` (the gate family's name, shared by native and edge) lands
+beside `fault-spec.json` with the entity counts by type, whether a change
+event exists on the mutated component, and `post_fault_wait`: how long the
 post-fault wait took (`waited_seconds`), injection to the poll that ended it
 (`lag_seconds`, null at the cap), and what ended it (`ended_by`:
 `change_event`, `publish` or `cap`). `archive_run.sh` already ships `*.json`, so
@@ -567,6 +602,7 @@ Smoke it on one problem before a paired run:
 
 ```bash
 ./scripts/benchmark/launch.sh smoke-native
+./scripts/benchmark/launch.sh smoke-edge
 ```
 
 ## Running your own branch
