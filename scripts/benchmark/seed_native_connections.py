@@ -39,11 +39,26 @@ Kubernetes API server kind exposes, which the kubeconfig names. buildKubernetes
 reads the flag and passes it to the client, whose guard sits on the REST config
 the clientset is built from, so it also covers the dial brain-go makes when it
 validates the connection. Without the flag that validation is refused.
+
+The kubernetes connection also sets `configmap_values` (brain-go#4052),
+default "screened". Screened is what lets k8s_describe show a ConfigMap's
+actual data, secrets masked, instead of only key names and byte sizes;
+measuring arm B's native kubernetes connector without it would never exercise
+that code path. The three telemetry connections do not carry the key; it
+means nothing outside internal/clients/kubernetes.
+
+SREGYM_K8S_CONFIGMAP_VALUES overrides the default (resolve_configmap_values),
+but only in the environment of the process that runs this script on the
+instance: launch.sh and terraform/templates/bootstrap.sh.tftpl do not forward
+it, the way neither forwards SREGYM_BASELINE_SYNC_SECONDS. There is no tfvars
+field or launch.sh flag for it. Changing it means exporting it by hand on the
+box before seed_slot.sh runs, for one slot of one run.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -79,8 +94,44 @@ BUCKET = ["observation"]
 
 REQUEST_TIMEOUT_S = 60
 
+# The env var that overrides the kubernetes connection's "configmap_values"
+# setting (brain-go#4052, internal/clients/kubernetes/configmap.go). Default
+# is "screened": arm B measures brain-go's own native kubernetes connector,
+# and the benchmark's cluster holds no customer data, so there is no reason
+# to run it in the "sizes"-only mode a real customer connection would default
+# to. "Screened" is what lets k8s_describe answer a question about a
+# ConfigMap's actual content, with secrets masked, instead of only key names
+# and byte sizes.
+#
+# Read only from this process's own environment. Nothing forwards it from a
+# launch: launch.sh does not pass it as a terraform var and
+# terraform/templates/bootstrap.sh.tftpl does not export it into the
+# instance's bootstrap, so "overridable" means set by hand in the shell that
+# runs seed_slot.sh on the box, not from a scenario's tfvars.
+CONFIGMAP_VALUES_ENV = "SREGYM_K8S_CONFIGMAP_VALUES"
+DEFAULT_CONFIGMAP_VALUES = "screened"
 
-def build_config(service: str, url: str, kubeconfig: str) -> dict[str, Any]:
+
+def resolve_configmap_values(env: dict[str, str] | None = None) -> str:
+    """The "configmap_values" value to seed, read from CONFIGMAP_VALUES_ENV.
+
+    Defaults to DEFAULT_CONFIGMAP_VALUES when the variable is unset or empty.
+    Not validated here. A brain-go carrying #4052 rejects a value that is
+    neither "screened" nor "sizes" (ErrInvalidConfigMapValues), but only when
+    it actually builds the client: POST /api/connections stores the config
+    as given, so a typo here passes seeding and surfaces later, at
+    POST /api/connections/{uuid}/validate, as an unhealthy kubernetes
+    connection. A brain-go predating #4052 does not check the value at all,
+    at either call, and accepts a typo silently.
+    """
+    source = os.environ if env is None else env
+
+    return source.get(CONFIGMAP_VALUES_ENV, "").strip() or DEFAULT_CONFIGMAP_VALUES
+
+
+def build_config(
+    service: str, url: str, kubeconfig: str, configmap_values: str = DEFAULT_CONFIGMAP_VALUES
+) -> dict[str, Any]:
     """Build one native connection's config for the given service."""
     if service == "kubernetes":
         # A kubeconfig, not api_server plus bearer_token. Three reasons, in
@@ -95,7 +146,23 @@ def build_config(service: str, url: str, kubeconfig: str) -> dict[str, Any]:
         #
         # The credential inside it is a read-only ServiceAccount token, not
         # kind's cluster-admin client certificate. native_arm.sh builds it.
-        return {"kubeconfig": kubeconfig, "allow_private_networks": True}
+        #
+        # configmap_values is read by brain-go's internal/clients/kubernetes
+        # New() only, not by buildKubernetes (internal/clients/factory/
+        # builders.go), which reads allow_private_networks and stops there,
+        # translating it into the WithAllowPrivateDial() option before
+        # calling New(). An older brain-go without that key support ignores
+        # it: New() just forwards cfg to its own buildRESTConfig, which reads
+        # a fixed set of named keys off the config map (kubeconfig,
+        # api_server/host/url, bearer_token/token, ca_cert,
+        # insecure_skip_tls_verify) and never rejects an unrecognised one, so
+        # this key sits unread beside kubeconfig on a brain-go predating
+        # #4052.
+        return {
+            "kubeconfig": kubeconfig,
+            "allow_private_networks": True,
+            "configmap_values": configmap_values,
+        }
 
     return {"url": url, "allow_private_networks": True}
 
@@ -204,11 +271,13 @@ def main() -> int:
 
     csrf = csrf_token(args.brain_url, args.session)
 
+    configmap_values = resolve_configmap_values()
+
     urls = {"prometheus": args.prometheus_url, "loki": args.loki_url, "jaeger": args.jaeger_url}
     unhealthy: list[str] = []
 
     for name, kind, service in NATIVE_CONNECTIONS:
-        config = build_config(service, urls.get(service, ""), kubeconfig)
+        config = build_config(service, urls.get(service, ""), kubeconfig, configmap_values)
         uuid = create_connection(args.brain_url, args.session, csrf, name, kind, service, config)
 
         # Only Kubernetes is gated on here, and only because it is the one
@@ -221,9 +290,16 @@ def main() -> int:
             continue
 
         if not uuid:
-            print(f"  {name}: pre-existing, skipping the health probe")
+            # create_connection already logged the 409 and returned no uuid:
+            # the pre-existing row keeps whatever configmap_values it was
+            # created with, which this resolved value was not applied to.
+            print(
+                f"  {name}: pre-existing, skipping the health probe; configmap_values={configmap_values} not applied to it"
+            )
 
             continue
+
+        print(f"  {name}: configmap_values={configmap_values}")
 
         healthy, detail = validate_connection(args.brain_url, args.session, csrf, uuid)
         if healthy:

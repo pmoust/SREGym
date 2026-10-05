@@ -441,6 +441,18 @@ are produced. Concretely, per slot:
   absence is not survivable: `ListWorkloads` returns an error for the whole
   call if listing Jobs is refused, so `k8s_list_workloads` would fail every
   time.
+- The kubernetes connection's config sets `configmap_values: "screened"`
+  (brain-go#4052). Screened is what lets `k8s_describe` show a ConfigMap's
+  data with secrets masked, rather than only key names and byte sizes, so the
+  arm actually exercises that code path. A brain-go predating #4052 ignores
+  the key: `New()` reads a fixed set of named config keys and never rejects
+  an unrecognised one. `SREGYM_K8S_CONFIGMAP_VALUES`
+  (`seed_native_connections.py`'s `resolve_configmap_values`) overrides the
+  default the same way `SREGYM_BASELINE_SYNC_SECONDS` does: read only from
+  the environment of the process that runs `seed_slot.sh` on the instance.
+  `launch.sh` and `terraform/templates/bootstrap.sh.tftpl` do not forward it,
+  so there is no tfvars field for it; changing it means exporting it by hand
+  on the box before that slot's `seed_slot.sh` runs.
 - Host port-forwards are kept alive to `prometheus-server`, `loki` and
   `jaeger-out` in the `observe` namespace. They are supervised rather than
   started once, because those services belong to the application and the
@@ -539,9 +551,13 @@ paired result with these in mind rather than gating on them.
 
 The manifest records `arm`, `edge_image` and `edge_chart_version`, and
 `seeded_connection_buckets`/`seeded_connection_signals` describe whichever
-set the run actually seeded. Per attempt, `arm-native.json` lands beside
-`fault-spec.json` with the entity counts by type, whether a change event
-exists on the mutated component, and `post_fault_wait`: how long the
+set the run actually seeded. `seeded_configmap_values` (native arm only,
+empty under mcp) records the kubernetes connection's `configmap_values` the
+same way, so an archived run says what it actually seeded even when
+`SREGYM_K8S_CONFIGMAP_VALUES` was overridden by hand on the box. Per attempt,
+`arm-native.json` lands beside `fault-spec.json` with the entity counts by
+type, whether a change event exists on the mutated component, and
+`post_fault_wait`: how long the
 post-fault wait took (`waited_seconds`), injection to the poll that ended it
 (`lag_seconds`, null at the cap), and what ended it (`ended_by`:
 `change_event`, `publish` or `cap`). `archive_run.sh` already ships `*.json`, so
