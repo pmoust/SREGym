@@ -151,13 +151,14 @@ path:
   adds the `endpoints` and `networkpolicies` informers that chart 0.5.2's
   resource list drops, plus the `endpoints` RBAC rule the chart does not
   grant (sregym#143).
-  After the fault is injected the conductor waits, native arm only and capped
-  at 120s, until brain-go holds a change event from after the fault, on the
-  fault's component or anywhere in the cluster, so diagnosis does not open on
-  the pre-fault graph. Reaching the cap does not fail the attempt, because a
-  fault that changes no watched object leaves no visible publish; diagnosis
-  proceeds and the wait records `ended_by: "cap"`. The wait is recorded as
-  `post_fault_wait` in `arm-native.json`; `scripts/benchmark/README.md` lists
+  After the fault is injected the conductor waits, native and edge arms only
+  and capped at 120s, until brain-go holds a change event from after the
+  fault, on the fault's component or anywhere in the cluster, so diagnosis
+  does not open on the pre-fault graph. Reaching the cap does not fail the
+  attempt, because a fault that changes no watched object leaves no visible
+  publish; diagnosis proceeds and the wait records `ended_by: "cap"`. The
+  wait is recorded as `post_fault_wait` in `arm-native.json`;
+  `scripts/benchmark/README.md` lists
   it with the other recorded differences between the arms.
   With `SREGYM_ARM` unset none of them runs.
   A third value, `SREGYM_ARM=edge` (sregym#147), is native minus the
