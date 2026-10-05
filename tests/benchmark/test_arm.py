@@ -26,13 +26,24 @@ import pytest
 import yaml
 
 from scripts.benchmark import brain_graph, native_gate
-from scripts.benchmark.arm import ARM_MCP, ARM_NATIVE, current_arm, is_native, resolve_arm
+from scripts.benchmark.arm import (
+    ARM_EDGE,
+    ARM_MCP,
+    ARM_NATIVE,
+    ARMS,
+    current_arm,
+    is_edge,
+    is_native,
+    resolve_arm,
+    runs_edge_agent,
+)
 from scripts.benchmark.seed_connections import build_config as mcp_build_config
 from scripts.benchmark.seed_native_connections import (
     BUCKET,
     DEFAULT_CONFIGMAP_VALUES,
     NATIVE_CONNECTIONS,
     build_config,
+    connections_for_arm,
     resolve_configmap_values,
 )
 
@@ -66,10 +77,30 @@ def test_an_unrecognised_arm_is_a_hard_stop_not_a_fallback():
         current_arm({"SREGYM_ARM": "MCP"})
 
 
-def test_is_native_only_for_the_native_arm():
-    assert is_native({"SREGYM_ARM": "native"})
-    assert not is_native({"SREGYM_ARM": "mcp"})
-    assert not is_native({})
+def test_runs_edge_agent_for_the_native_and_edge_arms():
+    """Both run brain-go's own connectors and the edge agent; only the
+    Kubernetes connection tells them apart, which is_edge names."""
+    assert runs_edge_agent({"SREGYM_ARM": "native"})
+    assert runs_edge_agent({"SREGYM_ARM": "edge"})
+    assert not runs_edge_agent({"SREGYM_ARM": "mcp"})
+    assert not runs_edge_agent({})
+
+
+def test_is_native_is_a_deprecated_alias_for_runs_edge_agent():
+    """The old name stuck around only so an import written against it does
+    not break; new code and this repo's own callers use runs_edge_agent."""
+    assert is_native is runs_edge_agent
+
+
+def test_is_edge_only_for_the_edge_arm():
+    assert is_edge({"SREGYM_ARM": "edge"})
+    assert not is_edge({"SREGYM_ARM": "native"})
+    assert not is_edge({"SREGYM_ARM": "mcp"})
+    assert not is_edge({})
+
+
+def test_arms_lists_all_three():
+    assert set(ARMS) == {ARM_MCP, ARM_NATIVE, ARM_EDGE}
 
 
 def test_arm_py_prints_the_arm_or_exits_two():
@@ -139,6 +170,28 @@ def test_every_native_connection_opts_into_private_addresses():
     for _, _, service in NATIVE_CONNECTIONS:
         config = build_config(service, "http://10.0.1.5:21000", "apiVersion: v1\n")
         assert config.get("allow_private_networks") is True, service
+
+
+# --- what each arm seeds (connections_for_arm) -------------------------------
+
+
+def test_connections_for_arm_drops_kubernetes_under_edge():
+    services = [service for _, _, service in connections_for_arm(ARM_EDGE)]
+
+    assert sorted(services) == ["jaeger", "loki", "prometheus"]
+
+
+def test_connections_for_arm_keeps_the_full_set_under_native():
+    assert connections_for_arm(ARM_NATIVE) == NATIVE_CONNECTIONS
+
+
+def test_connections_for_arm_does_not_mutate_the_shared_list():
+    """A caller that filters in place would quietly change NATIVE_CONNECTIONS
+    for every other reader, including the native arm's own seeding."""
+    before = list(NATIVE_CONNECTIONS)
+    connections_for_arm(ARM_EDGE)
+
+    assert before == NATIVE_CONNECTIONS
 
 
 # --- configmap_values (brain-go#4052) ----------------------------------------
@@ -251,6 +304,7 @@ def test_seeding_the_native_arm_posts_four_native_connections(stub_brain, tmp_pa
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
     )
     assert done.returncode == 0, done.stderr
 
@@ -300,13 +354,80 @@ def test_seeding_the_native_arm_honours_a_configmap_values_override(stub_brain, 
         capture_output=True,
         text=True,
         cwd=ROOT,
-        env={**os.environ, "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"},
+        env={**os.environ, "SREGYM_ARM": "native", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"},
     )
     assert done.returncode == 0, done.stderr
 
     creates = [body for path, body in posts if path == "/api/connections"]
     kubernetes_config = next(c["config"] for c in creates if c["service"] == "kubernetes")
     assert kubernetes_config["configmap_values"] == "sizes"
+
+
+def test_seeding_the_edge_arm_posts_three_connections_and_skips_kubernetes(stub_brain):
+    """Edge is native minus the Kubernetes connection: no kubeconfig given, no
+    sregym-kubernetes row, and the script must not demand one."""
+    url, posts = stub_brain
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "edge"},
+    )
+    assert done.returncode == 0, done.stderr
+
+    creates = [body for path, body in posts if path == "/api/connections"]
+    assert len(creates) == 3
+    assert {c["service"] for c in creates} == {"prometheus", "loki", "jaeger"}
+    assert all(c["config"]["allow_private_networks"] is True for c in creates)
+    assert all("configmap_values" not in c["config"] for c in creates)
+    # Only Kubernetes is probed at seed time, and there is none under edge.
+    assert [path for path, _ in posts if path.endswith("/validate")] == []
+
+
+def test_seeding_the_native_arm_without_a_kubeconfig_file_is_a_hard_stop(stub_brain):
+    """Native wants the Kubernetes connection, so a caller that forgets
+    --kubeconfig-file must not seed a connection with no credential."""
+    url, posts = stub_brain
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
+    )
+
+    assert done.returncode != 0
+    assert "--kubeconfig-file" in done.stderr
+    assert not [body for path, body in posts if path == "/api/connections"]
 
 
 def test_an_unhealthy_kubernetes_connection_stops_the_slot(tmp_path):
@@ -351,6 +472,7 @@ def test_an_unhealthy_kubernetes_connection_stops_the_slot(tmp_path):
             capture_output=True,
             text=True,
             cwd=ROOT,
+            env={**os.environ, "SREGYM_ARM": "native"},
         )
     finally:
         server.shutdown()
@@ -384,6 +506,7 @@ def test_a_loopback_telemetry_url_is_refused(tmp_path):
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
     )
 
     assert done.returncode != 0
@@ -793,12 +916,14 @@ def test_the_private_address_helper_refuses_a_public_one():
 def test_seed_slot_dispatches_on_the_arm_and_defaults_to_mcp():
     """seed_slot.sh is not runnable here (it drives docker compose), so what
     is checked is the branch itself: two functions, one call site each, and
-    the native one reachable only under the native arm."""
+    the native one reachable under the native and edge arms."""
     src = (ROOT / "scripts" / "benchmark" / "seed_slot.sh").read_text()
 
     assert src.count("seed_mcp() {") == 1
     assert src.count("seed_native() {") == 1
-    assert re.search(r'if \[ "\$ARM" = "native" \]; then\n  seed_native\nelse\n  seed_mcp\nfi', src)
+    assert re.search(
+        r'if \[ "\$ARM" = "native" \] \|\| \[ "\$ARM" = "edge" \]; then\n  seed_native\nelse\n  seed_mcp\nfi', src
+    )
     # The MCP arm's own registration call, unchanged.
     assert "seed_connections.py" in src.split("seed_mcp() {", 1)[1].split("seed_native", 1)[0]
 
@@ -827,6 +952,7 @@ def test_the_mcp_arm_records_the_same_connection_lines_it_always_did(tmp_path):
     fields = _manifest(tmp_path, {})
 
     assert fields["arm"] == "mcp"
+    assert fields["kubernetes_connection"] == "mcp"
     assert fields["seeded_connection_signals"] == "kubectl:-,prometheus:metrics,jaeger:traces,loki:logs"
     assert fields["seeded_connection_buckets"] == (
         "kubectl:state,prometheus:observation,jaeger:observation,loki:observation"
@@ -844,6 +970,7 @@ def test_the_native_arm_records_its_own_connections_and_its_edge_agent(tmp_path)
     fields = _manifest(tmp_path, {"SREGYM_ARM": "native"})
 
     assert fields["arm"] == "native"
+    assert fields["kubernetes_connection"] == "native"
     assert fields["seeded_connection_buckets"] == (
         "kubernetes:observation,prometheus:observation,jaeger:observation,loki:observation"
     )
@@ -860,6 +987,67 @@ def test_the_native_arm_records_a_configmap_values_override(tmp_path):
     fields = _manifest(tmp_path, {"SREGYM_ARM": "native", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"})
 
     assert fields["seeded_configmap_values"] == "kubernetes:sizes"
+
+
+def test_the_edge_arm_records_no_kubernetes_connection_but_its_own_edge_agent(tmp_path):
+    """Edge is native minus the Kubernetes connection: the same edge agent and
+    telemetry connections, none of the kubernetes-specific fields."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "edge"})
+
+    assert fields["arm"] == "edge"
+    assert fields["kubernetes_connection"] == "none"
+    assert fields["seeded_connection_buckets"] == "prometheus:observation,jaeger:observation,loki:observation"
+    assert fields["seeded_connection_signals"] == "prometheus:-,jaeger:-,loki:-"
+    # The same edge agent the native arm installs, recorded the same way.
+    assert fields["edge_image"].startswith("nofireai/edge:")
+    assert re.match(r"^\d+\.\d+\.\d+$", fields["edge_chart_version"])
+    # No kubernetes connection means no configmap_values to record, the same
+    # as the MCP arm.
+    assert fields["seeded_configmap_values"] == ""
+
+
+def test_an_edge_box_side_configmap_override_is_not_recorded(tmp_path):
+    """SREGYM_K8S_CONFIGMAP_VALUES means nothing without a kubernetes
+    connection to apply it to; the edge arm's manifest must not report it."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "edge", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"})
+
+    assert fields["seeded_configmap_values"] == ""
+
+
+# --- kubernetes_tools_enabled -------------------------------------------------
+
+
+def test_manifest_reads_kubernetes_tools_enabled_from_deploy_env(tmp_path):
+    """Read back from the box's own deploy/.env rather than derived from the
+    arm, so an override through BRAIN_ENV_EXTRA is reflected rather than
+    guessed at."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("FEATURE_KUBERNETES_TOOLS_ENABLED=true\n")
+
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "native", "BRAIN_GO_DIR": str(brain_go_dir)})
+
+    assert fields["kubernetes_tools_enabled"] == "true"
+
+
+def test_manifest_defaults_kubernetes_tools_enabled_to_false_when_the_key_is_absent(tmp_path):
+    """brain-go's own default when the key is absent from deploy/.env, so a
+    reader always gets true or false rather than sometimes an empty field."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("LOG_LEVEL=debug\n")
+
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "mcp", "BRAIN_GO_DIR": str(brain_go_dir)})
+
+    assert fields["kubernetes_tools_enabled"] == "false"
+
+
+def test_manifest_defaults_kubernetes_tools_enabled_to_false_with_no_brain_go_checkout(tmp_path):
+    """A missing BRAIN_GO_DIR or deploy/.env must not crash the manifest
+    write; it reads the same as the key being absent."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "mcp", "BRAIN_GO_DIR": str(tmp_path / "does-not-exist")})
+
+    assert fields["kubernetes_tools_enabled"] == "false"
 
 
 # --- the gate ----------------------------------------------------------------
@@ -905,6 +1093,35 @@ def test_the_gate_is_a_no_op_outside_the_native_arm(monkeypatch):
     assert native_gate.check({}) == {"arm": "mcp"}
 
 
+def test_the_gate_runs_for_the_edge_arm_too(monkeypatch):
+    """Edge shares the gate with native: neither telemetry reachability nor
+    the entity graph depends on the Kubernetes connection edge lacks."""
+    monkeypatch.setattr(
+        native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
+    )
+    monkeypatch.setattr(native_gate, "require_populated_graph", lambda *a, **k: {"total": 2, "by_type": {"POD": 2}})
+
+    evidence = native_gate.check({"SREGYM_ARM": "edge", "BRAIN_SESSION": "session_x", "KIND_CLUSTER_NAME": "sregym-0"})
+
+    assert evidence["entities"]["total"] == 2
+
+
+def test_the_gate_pins_the_sentinel_and_records_the_real_arm_under_edge(monkeypatch):
+    """ "arm" is the gate-family sentinel both arms share, always "native", so
+    conductor.py and main.py keep branching on one value under either arm.
+    "run_arm" is the resolved SREGYM_ARM, so arm-native.json itself can tell
+    an edge attempt from a native one without the run manifest."""
+    monkeypatch.setattr(
+        native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
+    )
+    monkeypatch.setattr(native_gate, "require_populated_graph", lambda *a, **k: {"total": 1, "by_type": {"POD": 1}})
+
+    evidence = native_gate.check({"SREGYM_ARM": "edge", "BRAIN_SESSION": "session_x", "KIND_CLUSTER_NAME": "sregym-0"})
+
+    assert evidence["arm"] == "native"
+    assert evidence["run_arm"] == "edge"
+
+
 def test_the_gate_fails_the_attempt_when_the_graph_is_empty(monkeypatch):
     monkeypatch.setattr(
         native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
@@ -941,6 +1158,7 @@ def test_the_gate_returns_the_evidence_it_gathered(monkeypatch):
     )
 
     assert evidence["arm"] == "native"
+    assert evidence["run_arm"] == "native"
     assert evidence["cluster"] == "sregym-2"
     assert evidence["entities"]["total"] == 7
 
@@ -1176,6 +1394,19 @@ def test_the_post_fault_wait_is_a_no_op_outside_the_native_arm(monkeypatch):
     assert clock.sleeps == []
 
 
+def test_the_post_fault_wait_runs_for_the_edge_arm_too(monkeypatch):
+    """The wait exists to keep the pre-fault graph out of the investigation;
+    that applies to edge's graph exactly as it does to native's."""
+    calls = _change_events_reads(monkeypatch, lambda poll, name: 1 if name == "" else 0)
+    clock = _Clock()
+    env = {**NATIVE_ENV, "SREGYM_ARM": "edge"}
+
+    evidence = native_gate.wait_for_fault_publish(INJECTED_AT, ROOT_CAUSE, None, env, clock=clock, sleep=clock.sleep)
+
+    assert evidence["ended_by"] == "publish"
+    assert calls
+
+
 class _InjectedProblem:
     namespace = "astronomy-shop"
     root_cause = ROOT_CAUSE
@@ -1226,6 +1457,39 @@ def test_the_conductor_records_the_post_fault_wait_under_the_native_arm(monkeypa
     assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 42.0}
 
 
+def test_the_conductor_log_line_names_the_real_arm(monkeypatch):
+    """The "arm" key conductor.py branches on is always "native", for native
+    and edge alike, so the log line has to read run_arm instead or it would
+    always say "Native arm ready" on an edge attempt."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native", "run_arm": "edge", "cluster": "sregym-0"})
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", lambda *a, **k: None)
+    logged = []
+    stub.logger = types.SimpleNamespace(info=lambda msg: logged.append(msg), warning=lambda *a, **k: None)
+
+    conductor._inject_fault(stub)
+
+    assert any(msg.startswith("[ENV] Edge arm ready:") for msg in logged), logged
+
+
+def test_the_conductor_records_the_post_fault_wait_under_the_edge_arm(monkeypatch):
+    """Edge gets the same post-fault wait as native: the gate-family sentinel
+    ("arm") is what the conductor branches on, and it is "native" for edge
+    too. run_arm is what says this attempt is actually edge."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native", "run_arm": "edge", "cluster": "sregym-0"})
+    seen = []
+
+    def fake_wait(injected_at, root_cause, namespace):
+        seen.append((injected_at, root_cause, namespace))
+        return {"ended_by": "change_event", "waited_seconds": 17.0}
+
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", fake_wait)
+
+    conductor._inject_fault(stub)
+
+    assert seen == [(stub.fault_injected_at, ROOT_CAUSE, "astronomy-shop")]
+    assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 17.0}
+
+
 def test_the_conductor_proceeds_when_the_post_fault_wait_reaches_its_cap(monkeypatch):
     """The real wait, with a zero cap and a graph that never changes."""
     conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
@@ -1264,6 +1528,22 @@ def test_arm_native_json_carries_the_post_fault_wait(tmp_path, monkeypatch):
     main._write_native_arm_evidence(tmp_path, conductor)
 
     assert json.loads((tmp_path / "arm-native.json").read_text())["post_fault_wait"] == wait
+
+
+def test_arm_native_json_carries_run_arm_under_edge(tmp_path, monkeypatch):
+    """main.py copies whatever native_gate.check() returned verbatim, so
+    run_arm reaches the file with no code change here: this pins that it
+    does, and that the file still says edge rather than native."""
+    import main
+
+    monkeypatch.delenv("BRAIN_SESSION", raising=False)
+    conductor = types.SimpleNamespace(native_arm_evidence={"arm": "native", "run_arm": "edge"})
+
+    main._write_native_arm_evidence(tmp_path, conductor)
+
+    written = json.loads((tmp_path / "arm-native.json").read_text())
+    assert written["arm"] == "native"
+    assert written["run_arm"] == "edge"
 
 
 def _terminate_body() -> str:

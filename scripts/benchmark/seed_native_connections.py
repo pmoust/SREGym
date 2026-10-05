@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Register the native arm's four brain-go connections for one slot.
+"""Register the native and edge arms' brain-go connections for one slot.
 
 The MCP arm's seed_connections.py registers four CUSTOM_MCP rows pointing at
 SREGym's MCP endpoints, so brain-go's own connectors never run. This registers
-the same four backends as native connections instead: brain-go dials
-Prometheus, Loki, Jaeger and the Kubernetes API server itself, through
-internal/clients/{prometheus,loki,jaeger,kubernetes}.
+the same backends as native connections instead: brain-go dials Prometheus,
+Loki, Jaeger and, for the native arm only, the Kubernetes API server itself,
+through internal/clients/{prometheus,loki,jaeger,kubernetes}. The edge arm is
+native minus that last one: the same three telemetry connections, no
+kubeconfig, no Kubernetes connection row at all.
 
 Authentication is the owner session cookie and the double-submit CSRF token,
 for the same reason seed_connections.py uses them: a CLI API key carries no
@@ -74,6 +76,7 @@ import requests
 # clients/*/driver.py, which carries the same exception for the same reason.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from scripts.benchmark.arm import ARM_EDGE, current_arm  # noqa: E402
 from scripts.benchmark.seed_connections import csrf_token  # noqa: E402
 
 # The four in-cluster backends, in the order they are seeded. Each entry is
@@ -81,12 +84,30 @@ from scripts.benchmark.seed_connections import csrf_token  # noqa: E402
 #
 # The names match the MCP arm's, so a results tree names the same four things
 # in either arm and a reader comparing them is not also comparing labels.
+#
+# This is the native arm's full set. The edge arm seeds all but the first row:
+# see connections_for_arm.
 NATIVE_CONNECTIONS: list[tuple[str, str, str]] = [
     ("sregym-kubernetes", "OBSERVABILITY", "kubernetes"),
     ("sregym-prometheus", "METRICS", "prometheus"),
     ("sregym-jaeger", "TRACES", "jaeger"),
     ("sregym-loki", "LOGS", "loki"),
 ]
+
+
+def connections_for_arm(arm: str) -> list[tuple[str, str, str]]:
+    """Which of NATIVE_CONNECTIONS this arm actually seeds.
+
+    Edge drops the Kubernetes row: brain-go holds no Kubernetes API
+    connection under that arm, by design, so seeding one unhealthy (no
+    kubeconfig exists to seed it with) would be worse than not seeding it at
+    all. Every other arm that reaches this function seeds the full set.
+    """
+    if arm == ARM_EDGE:
+        return [c for c in NATIVE_CONNECTIONS if c[2] != "kubernetes"]
+
+    return list(NATIVE_CONNECTIONS)
+
 
 # Every native connection is registered under this one bucket. See the module
 # docstring for why Kubernetes is here too rather than under state.
@@ -249,7 +270,12 @@ def main() -> int:
     ap.add_argument("--prometheus-url", required=True, help="Prometheus base on the host's RFC1918 address")
     ap.add_argument("--loki-url", required=True, help="Loki base on the host's RFC1918 address")
     ap.add_argument("--jaeger-url", required=True, help="Jaeger query base on the host's RFC1918 address")
-    ap.add_argument("--kubeconfig-file", required=True, help="Path to the slot's read-only kubeconfig")
+    ap.add_argument(
+        "--kubeconfig-file",
+        default=None,
+        help="Path to the slot's read-only kubeconfig. Required for the native arm's Kubernetes "
+        "connection; the edge arm seeds no such connection and takes none.",
+    )
     args = ap.parse_args()
 
     for flag, url in (
@@ -263,20 +289,33 @@ def main() -> int:
                 "container's own. Use the instance's private address, the same one the MCP arm uses."
             )
 
-    kubeconfig = Path(args.kubeconfig_file).read_text()
-    if not kubeconfig.strip():
-        raise SystemExit(
-            f"--kubeconfig-file {args.kubeconfig_file} is empty; the Kubernetes connection has no credential"
-        )
+    # Read from this process's own environment rather than a CLI flag, the
+    # same source seed_slot.sh and run_shard.sh already resolved SREGYM_ARM
+    # from, so the two cannot disagree about which connections this slot
+    # seeds.
+    arm = current_arm()
+    connections = connections_for_arm(arm)
+    wants_kubernetes = any(service == "kubernetes" for _, _, service in connections)
+
+    kubeconfig = ""
+    if wants_kubernetes:
+        if not args.kubeconfig_file:
+            raise SystemExit(f"arm {arm!r} needs --kubeconfig-file for its Kubernetes connection")
+
+        kubeconfig = Path(args.kubeconfig_file).read_text()
+        if not kubeconfig.strip():
+            raise SystemExit(
+                f"--kubeconfig-file {args.kubeconfig_file} is empty; the Kubernetes connection has no credential"
+            )
 
     csrf = csrf_token(args.brain_url, args.session)
 
-    configmap_values = resolve_configmap_values()
+    configmap_values = resolve_configmap_values() if wants_kubernetes else ""
 
     urls = {"prometheus": args.prometheus_url, "loki": args.loki_url, "jaeger": args.jaeger_url}
     unhealthy: list[str] = []
 
-    for name, kind, service in NATIVE_CONNECTIONS:
+    for name, kind, service in connections:
         config = build_config(service, urls.get(service, ""), kubeconfig, configmap_values)
         uuid = create_connection(args.brain_url, args.session, csrf, name, kind, service, config)
 

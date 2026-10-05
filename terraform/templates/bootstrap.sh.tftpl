@@ -449,7 +449,7 @@ SREGYM_BRAIN_ENV
 # produce a full run under the wrong label.
 SREGYM_ARM="${arm}"
 case "$SREGYM_ARM" in
-  mcp|native) ;;
+  mcp|native|edge) ;;
   *) terminate "SREGYM_ARM is '$SREGYM_ARM', which is not an arm"; exit 1 ;;
 esac
 export SREGYM_ARM

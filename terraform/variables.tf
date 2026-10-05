@@ -131,6 +131,11 @@ variable "arm" {
     agent into each slot's cluster, so the entity graph and change events
     exist during an attempt.
 
+    "edge" is native minus the Kubernetes API connection: the edge agent plus
+    the Prometheus, Loki and Jaeger connectors, no kubeconfig, and no k8s_*
+    tools. This is NOFire's production posture, where brain-go holds no
+    Kubernetes API token at all.
+
     Validated here as well as in the harness, because a plan-time failure
     costs nothing and a boot-time one costs an instance.
   EOT
@@ -138,8 +143,8 @@ variable "arm" {
   default     = "mcp"
 
   validation {
-    condition     = contains(["mcp", "native"], var.arm)
-    error_message = "arm must be mcp or native."
+    condition     = contains(["mcp", "native", "edge"], var.arm)
+    error_message = "arm must be mcp, native, or edge."
   }
 }
 

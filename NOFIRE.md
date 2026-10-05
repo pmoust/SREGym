@@ -151,15 +151,33 @@ path:
   adds the `endpoints` and `networkpolicies` informers that chart 0.5.2's
   resource list drops, plus the `endpoints` RBAC rule the chart does not
   grant (sregym#143).
-  After the fault is injected the conductor waits, native arm only and capped
-  at 120s, until brain-go holds a change event from after the fault, on the
-  fault's component or anywhere in the cluster, so diagnosis does not open on
-  the pre-fault graph. Reaching the cap does not fail the attempt, because a
-  fault that changes no watched object leaves no visible publish; diagnosis
-  proceeds and the wait records `ended_by: "cap"`. The wait is recorded as
-  `post_fault_wait` in `arm-native.json`; `scripts/benchmark/README.md` lists
+  After the fault is injected the conductor waits, native and edge arms only
+  and capped at 120s, until brain-go holds a change event from after the
+  fault, on the fault's component or anywhere in the cluster, so diagnosis
+  does not open on the pre-fault graph. Reaching the cap does not fail the
+  attempt, because a fault that changes no watched object leaves no visible
+  publish; diagnosis proceeds and the wait records `ended_by: "cap"`. The
+  wait is recorded as `post_fault_wait` in `arm-native.json`;
+  `scripts/benchmark/README.md` lists
   it with the other recorded differences between the arms.
   With `SREGYM_ARM` unset none of them runs.
+  A third value, `SREGYM_ARM=edge` (sregym#147), is native minus the
+  Kubernetes API connection: NOFire's production posture, where brain-go holds
+  no Kubernetes API token at all. `seed_native_connections.py` seeds the
+  three telemetry connections and drops `sregym-kubernetes`; no kubeconfig is
+  read and `configmap_values` goes unused. `run_shard.sh` skips
+  `native_arm.sh kubeconfig` and the API-server private-IP bind, both of
+  which exist only for the Kubernetes connection, but still mints the edge
+  key and installs the agent exactly as the native arm does.
+  `setup_brain_go.sh` leaves `FEATURE_KUBERNETES_TOOLS_ENABLED` unset, so
+  brain-go's `k8s_*` tool family stays off, the product default.
+  `arm.py`'s `is_native` is true for both native and edge, since
+  `native_gate.py`'s telemetry probe and empty-graph gate and the
+  post-fault wait depend on the edge agent and the telemetry connections, not
+  on the Kubernetes one; `is_edge` names the one difference. The run manifest
+  is what records which arm actually ran: `write_run_manifest.sh` writes
+  `arm=edge` and a new `kubernetes_connection` field (`mcp`, `native`, or
+  `none`) alongside it.
   `build_mcp_image.sh` builds that server's image from the checkout and names
   it `sregym-mcp:<sregym sha>`; `run_shard.sh` builds once per box and loads it
   into each slot's kind node, and `write_run_manifest.sh` records the same name

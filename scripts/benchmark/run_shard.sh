@@ -158,7 +158,13 @@ SREGYM_ARM=$(uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/arm.
 export SREGYM_ARM
 echo "[bootstrap] arm $SREGYM_ARM"
 
-if [ "$SREGYM_ARM" = "native" ]; then
+if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
+  # Both arms run the edge agent and need everything in this block: the
+  # pre-fault window, the private address the agent and the telemetry
+  # connections use, and the agent's own image and chart. Only the API
+  # server's private-IP bind below is native-only, because that is what
+  # brain-go's Kubernetes connection needs and edge has none.
+  #
   # The pre-fault window. The conductor sleeps this long after deploying the
   # application and before injecting the fault, which is the hook
   # SREGYM_BASELINE_SYNC_SECONDS was added for and never used.
@@ -452,7 +458,9 @@ run_slot() {
     # address instead of loopback, because brain-go's Kubernetes connector
     # dials it from inside a container. kind puts that address in the API
     # server certificate's SANs, so the slot's own kubeconfig stays usable and
-    # TLS still verifies. The MCP arm gets the committed config untouched.
+    # TLS still verifies. The MCP and edge arms get the committed config
+    # untouched: edge has no Kubernetes connection to dial the API server at
+    # all, so there is nothing that needs the private bind.
     if [ "$SREGYM_ARM" = "native" ]; then
       KIND_CONFIG=$(SREGYM_KIND_CONFIG_OUT="$slot_dir/kind-config.yaml" \
         "$WORKDIR/scripts/benchmark/native_arm.sh" kind-config x86 "$SREGYM_PRIVATE_IP") || {
@@ -839,10 +847,9 @@ run_slot() {
       fi
     }
 
-    # The native arm's two prerequisites for seeding, in the order the seed
-    # needs them: the credential brain-go's Kubernetes connection
-    # authenticates as, then the host forwards its three telemetry
-    # connections are registered against.
+    # The native arm's prerequisite for seeding its Kubernetes connection: the
+    # credential brain-go authenticates as. Edge seeds no Kubernetes
+    # connection, so it needs no kubeconfig and this step does not run for it.
     if [ "$SREGYM_ARM" = "native" ]; then
       echo "[slot $slot] creating the read-only ServiceAccount and kubeconfig"
       SREGYM_NATIVE_KUBECONFIG="$slot_dir/brain-readonly.kubeconfig"
@@ -852,7 +859,12 @@ run_slot() {
         return 1
       fi
       export SREGYM_NATIVE_KUBECONFIG
+    fi
 
+    # The host forwards the three telemetry connections are registered
+    # against. Both native and edge need these: neither arm's Prometheus,
+    # Loki or Jaeger connector differs from the other's.
+    if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
       echo "[slot $slot] keeping telemetry forwards on $SREGYM_PROMETHEUS_PORT/$SREGYM_LOKI_PORT/$SREGYM_JAEGER_PORT"
       TELEMETRY_KEEPER_PID=$("$WORKDIR/scripts/benchmark/native_arm.sh" forwards \
         "$SREGYM_PROMETHEUS_PORT" "$SREGYM_LOKI_PORT" "$SREGYM_JAEGER_PORT" \
@@ -886,8 +898,9 @@ run_slot() {
     # tenant exists. install-edge waits for the agent's pod and for its first
     # publish to reach brain-go, so a slot whose agent cannot start or cannot
     # publish fails here, with the agent's logs in the slot log, rather than
-    # at the first attempt's entity-count gate.
-    if [ "$SREGYM_ARM" = "native" ]; then
+    # at the first attempt's entity-count gate. Both native and edge run the
+    # same edge agent the same way; neither arm changes what install-edge does.
+    if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
       # seed_slot.sh prints BRAIN_EDGE_API_KEY only when it minted one. Checked
       # here so a seeding that exits 0 without it aborts with this message
       # rather than with `set -u` killing the slot on the read below.

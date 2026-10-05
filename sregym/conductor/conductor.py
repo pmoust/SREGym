@@ -269,7 +269,12 @@ class Conductor:
 
         self.native_arm_evidence = native_arm_check()
         if self.native_arm_evidence.get("arm") == "native":
-            self.logger.info(f"[ENV] Native arm ready: {self.native_arm_evidence}")
+            # "arm" is the gate-family sentinel and always "native" here, for
+            # native and edge alike; "run_arm" is the resolved SREGYM_ARM
+            # value, so the log says which arm this actually is rather than
+            # always naming native.
+            run_arm = self.native_arm_evidence.get("run_arm", "native")
+            self.logger.info(f"[ENV] {run_arm.capitalize()} arm ready: {self.native_arm_evidence}")
 
         # Snapshot the healthy cluster before breaking it. The oracle is built
         # in Problem.__init__, which runs before deploy_app(), so this is the
