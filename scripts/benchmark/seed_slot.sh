@@ -192,6 +192,23 @@ seed_native() {
   [ -n "${SREGYM_PROMETHEUS_PORT:-}" ] && [ -n "${SREGYM_LOKI_PORT:-}" ] && [ -n "${SREGYM_JAEGER_PORT:-}" ] \
     || die "the native and edge arms need SREGYM_PROMETHEUS_PORT, SREGYM_LOKI_PORT and SREGYM_JAEGER_PORT from run_slot_env.sh"
 
+  # One call site for both arms. The flags every arm shares are built here;
+  # native's extra --kubeconfig-file is appended through "$@" rather than a
+  # bash array, because this script runs under set -u and bash 3.2 (macOS's
+  # default /bin/bash) raises "unbound variable" on an empty array expansion
+  # even when the array was declared empty -- confirmed directly. Positional
+  # parameters do not have that problem: "$@" expands to nothing, safely,
+  # when the caller passed no extra arguments.
+  _seed_native_connections() {
+    uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
+      --brain-url "$BRAIN_API_URL" \
+      --session "$DEV_SESSION" \
+      --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
+      --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
+      --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
+      "$@"
+  }
+
   if [ "$ARM" = "native" ]; then
     [ -n "${SREGYM_NATIVE_KUBECONFIG:-}" ] \
       || die "the native arm needs SREGYM_NATIVE_KUBECONFIG, the read-only kubeconfig native_arm.sh wrote"
@@ -199,24 +216,11 @@ seed_native() {
       || die "no read-only kubeconfig at $SREGYM_NATIVE_KUBECONFIG"
 
     log "registering native connections, Kubernetes included"
-    uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
-      --brain-url "$BRAIN_API_URL" \
-      --session "$DEV_SESSION" \
-      --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
-      --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
-      --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
-      --kubeconfig-file "$SREGYM_NATIVE_KUBECONFIG" \
-      1>&2 \
+    _seed_native_connections --kubeconfig-file "$SREGYM_NATIVE_KUBECONFIG" 1>&2 \
       || die "native connection seeding failed"
   else
     log "registering native connections, no Kubernetes (edge arm)"
-    uv run --project "$SREGYM_DIR" python "${SCRIPT_DIR}/seed_native_connections.py" \
-      --brain-url "$BRAIN_API_URL" \
-      --session "$DEV_SESSION" \
-      --prometheus-url "http://${PRIVATE_IP}:${SREGYM_PROMETHEUS_PORT}" \
-      --loki-url "http://${PRIVATE_IP}:${SREGYM_LOKI_PORT}" \
-      --jaeger-url "http://${PRIVATE_IP}:${SREGYM_JAEGER_PORT}" \
-      1>&2 \
+    _seed_native_connections 1>&2 \
       || die "edge connection seeding failed"
   fi
 

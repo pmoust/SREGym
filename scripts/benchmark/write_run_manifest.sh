@@ -127,10 +127,10 @@ print(' '.join(ids))
 # reading those three functions at the run's brain_go_sha and checking
 # tool-calls.json, the way this field's own reasoning was worked out.
 SEEDED_CONNECTION_BUCKETS=$(uv run python -c "
-from scripts.benchmark.arm import current_arm, is_native
+from scripts.benchmark.arm import current_arm, runs_edge_agent
 from scripts.benchmark.seed_connections import ENDPOINTS
 
-if is_native():
+if runs_edge_agent():
     from scripts.benchmark.seed_native_connections import BUCKET, connections_for_arm
 
     print(','.join(f'{service}:{\"+\".join(BUCKET)}' for _, _, service in connections_for_arm(current_arm())))
@@ -147,10 +147,10 @@ else:
 # difference between a run whose metrics, logs and traces agents held one
 # server each and a run where they held the same three.
 SEEDED_CONNECTION_SIGNALS=$(uv run python -c "
-from scripts.benchmark.arm import current_arm, is_native
+from scripts.benchmark.arm import current_arm, runs_edge_agent
 from scripts.benchmark.seed_connections import ENDPOINTS, SIGNALS
 
-if is_native():
+if runs_edge_agent():
     from scripts.benchmark.seed_native_connections import connections_for_arm
 
     print(','.join(f'{service}:-' for _, _, service in connections_for_arm(current_arm())))
@@ -219,6 +219,20 @@ print(f'kubernetes:{resolve_configmap_values()}')
 " 2>/dev/null) || SEEDED_CONFIGMAP_VALUES=""
 fi
 
+# The flag that actually gates brain-go's k8s_* tool family, read back from
+# the box's own deploy/.env rather than re-derived from SREGYM_ARM, so this
+# cannot drift from what setup_brain_go.sh actually wrote after BRAIN_ENV_EXTRA
+# was applied: BRAIN_ENV_EXTRA can set this key on any arm, and a re-derived
+# value would silently disagree with a box where it did. Defaults to "false",
+# brain-go's own default when the key is absent, so a reader always gets
+# true or false rather than sometimes an empty string.
+BRAIN_GO_DIR="${BRAIN_GO_DIR:-/opt/brain-go}"
+KUBERNETES_TOOLS_ENABLED="false"
+if [ -f "$BRAIN_GO_DIR/deploy/.env" ]; then
+  effective_k8s_tools=$(grep '^FEATURE_KUBERNETES_TOOLS_ENABLED=' "$BRAIN_GO_DIR/deploy/.env" | tail -1 | cut -d= -f2-)
+  [ -n "$effective_k8s_tools" ] && KUBERNETES_TOOLS_ENABLED="$effective_k8s_tools"
+fi
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -254,6 +268,9 @@ fi
   echo "arm=$ARM"
   # mcp, native, or none. See the comment above KUBERNETES_CONNECTION.
   echo "kubernetes_connection=$KUBERNETES_CONNECTION"
+  # true or false, read back from the box's deploy/.env. See the comment
+  # above KUBERNETES_TOOLS_ENABLED.
+  echo "kubernetes_tools_enabled=$KUBERNETES_TOOLS_ENABLED"
   # sregym-mcp:<sregym sha>, built on the box and loaded into each slot's kind
   # node. See the comment above for what it does and does not promise.
   echo "mcp_image=$MCP_IMAGE"

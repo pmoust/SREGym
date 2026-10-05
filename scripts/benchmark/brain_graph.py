@@ -221,7 +221,10 @@ def main() -> int:
         sys.stdout.write(text)
 
     if args.require_entities and not (evidence.get("entities") or {}).get("total"):
-        sys.stderr.write("brain-go holds no entities for this account; this is not the native arm\n")
+        sys.stderr.write(
+            "brain-go holds no entities for this account; the entity graph has not populated "
+            "(expected under the native or edge arm)\n"
+        )
 
         return 3
 

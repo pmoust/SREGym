@@ -70,7 +70,7 @@ def current_arm(env: dict[str, str] | None = None) -> str:
     return resolve_arm(source.get("SREGYM_ARM"))
 
 
-def is_native(env: dict[str, str] | None = None) -> bool:
+def runs_edge_agent(env: dict[str, str] | None = None) -> bool:
     """Whether this process runs its own connectors and an edge agent.
 
     True for both native and edge: they share every mechanism except the
@@ -83,11 +83,17 @@ def is_native(env: dict[str, str] | None = None) -> bool:
     return current_arm(env) in (ARM_NATIVE, ARM_EDGE)
 
 
+# Deprecated alias. The old name read as "the native arm only", which stopped
+# being true the moment edge started sharing this flag; kept only so an
+# import written against the old name does not break.
+is_native = runs_edge_agent
+
+
 def is_edge(env: dict[str, str] | None = None) -> bool:
     """Whether this process runs under the edge arm specifically.
 
-    Unlike is_native, this is false for the native arm: it names the one
-    difference between the two (no Kubernetes API connection), not the
+    Unlike runs_edge_agent, this is false for the native arm: it names the
+    one difference between the two (no Kubernetes API connection), not the
     mechanism they share.
     """
     return current_arm(env) == ARM_EDGE

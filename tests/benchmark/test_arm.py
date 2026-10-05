@@ -26,7 +26,17 @@ import pytest
 import yaml
 
 from scripts.benchmark import brain_graph, native_gate
-from scripts.benchmark.arm import ARM_EDGE, ARM_MCP, ARM_NATIVE, ARMS, current_arm, is_edge, is_native, resolve_arm
+from scripts.benchmark.arm import (
+    ARM_EDGE,
+    ARM_MCP,
+    ARM_NATIVE,
+    ARMS,
+    current_arm,
+    is_edge,
+    is_native,
+    resolve_arm,
+    runs_edge_agent,
+)
 from scripts.benchmark.seed_connections import build_config as mcp_build_config
 from scripts.benchmark.seed_native_connections import (
     BUCKET,
@@ -67,13 +77,19 @@ def test_an_unrecognised_arm_is_a_hard_stop_not_a_fallback():
         current_arm({"SREGYM_ARM": "MCP"})
 
 
-def test_is_native_for_the_native_and_edge_arms():
+def test_runs_edge_agent_for_the_native_and_edge_arms():
     """Both run brain-go's own connectors and the edge agent; only the
     Kubernetes connection tells them apart, which is_edge names."""
-    assert is_native({"SREGYM_ARM": "native"})
-    assert is_native({"SREGYM_ARM": "edge"})
-    assert not is_native({"SREGYM_ARM": "mcp"})
-    assert not is_native({})
+    assert runs_edge_agent({"SREGYM_ARM": "native"})
+    assert runs_edge_agent({"SREGYM_ARM": "edge"})
+    assert not runs_edge_agent({"SREGYM_ARM": "mcp"})
+    assert not runs_edge_agent({})
+
+
+def test_is_native_is_a_deprecated_alias_for_runs_edge_agent():
+    """The old name stuck around only so an import written against it does
+    not break; new code and this repo's own callers use runs_edge_agent."""
+    assert is_native is runs_edge_agent
 
 
 def test_is_edge_only_for_the_edge_arm():
@@ -288,6 +304,7 @@ def test_seeding_the_native_arm_posts_four_native_connections(stub_brain, tmp_pa
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
     )
     assert done.returncode == 0, done.stderr
 
@@ -337,7 +354,7 @@ def test_seeding_the_native_arm_honours_a_configmap_values_override(stub_brain, 
         capture_output=True,
         text=True,
         cwd=ROOT,
-        env={**os.environ, "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"},
+        env={**os.environ, "SREGYM_ARM": "native", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"},
     )
     assert done.returncode == 0, done.stderr
 
@@ -380,40 +397,6 @@ def test_seeding_the_edge_arm_posts_three_connections_and_skips_kubernetes(stub_
     assert all("configmap_values" not in c["config"] for c in creates)
     # Only Kubernetes is probed at seed time, and there is none under edge.
     assert [path for path, _ in posts if path.endswith("/validate")] == []
-
-
-def test_seeding_the_edge_arm_needs_no_kubeconfig_file(stub_brain, tmp_path):
-    """A kubeconfig that happens to exist must not be read under edge: it is
-    the native arm's credential and edge has no connection to use it for."""
-    url, posts = stub_brain
-    # A kubeconfig on disk, deliberately not passed with --kubeconfig-file,
-    # proving the edge arm does not go looking for one on its own.
-    (tmp_path / "unused-kubeconfig").write_text("apiVersion: v1\nkind: Config\n")
-
-    done = subprocess.run(
-        [
-            sys.executable,
-            str(SEED_NATIVE),
-            "--brain-url",
-            url,
-            "--session",
-            "session_x",
-            "--prometheus-url",
-            "http://10.0.1.5:21000",
-            "--loki-url",
-            "http://10.0.1.5:22000",
-            "--jaeger-url",
-            "http://10.0.1.5:23000",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        env={**os.environ, "SREGYM_ARM": "edge"},
-    )
-
-    assert done.returncode == 0, done.stderr
-    creates = [body for path, body in posts if path == "/api/connections"]
-    assert len(creates) == 3
 
 
 def test_seeding_the_native_arm_without_a_kubeconfig_file_is_a_hard_stop(stub_brain):
@@ -489,6 +472,7 @@ def test_an_unhealthy_kubernetes_connection_stops_the_slot(tmp_path):
             capture_output=True,
             text=True,
             cwd=ROOT,
+            env={**os.environ, "SREGYM_ARM": "native"},
         )
     finally:
         server.shutdown()
@@ -522,6 +506,7 @@ def test_a_loopback_telemetry_url_is_refused(tmp_path):
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env={**os.environ, "SREGYM_ARM": "native"},
     )
 
     assert done.returncode != 0
@@ -1029,6 +1014,42 @@ def test_an_edge_box_side_configmap_override_is_not_recorded(tmp_path):
     assert fields["seeded_configmap_values"] == ""
 
 
+# --- kubernetes_tools_enabled -------------------------------------------------
+
+
+def test_manifest_reads_kubernetes_tools_enabled_from_deploy_env(tmp_path):
+    """Read back from the box's own deploy/.env rather than derived from the
+    arm, so an override through BRAIN_ENV_EXTRA is reflected rather than
+    guessed at."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("FEATURE_KUBERNETES_TOOLS_ENABLED=true\n")
+
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "native", "BRAIN_GO_DIR": str(brain_go_dir)})
+
+    assert fields["kubernetes_tools_enabled"] == "true"
+
+
+def test_manifest_defaults_kubernetes_tools_enabled_to_false_when_the_key_is_absent(tmp_path):
+    """brain-go's own default when the key is absent from deploy/.env, so a
+    reader always gets true or false rather than sometimes an empty field."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("LOG_LEVEL=debug\n")
+
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "mcp", "BRAIN_GO_DIR": str(brain_go_dir)})
+
+    assert fields["kubernetes_tools_enabled"] == "false"
+
+
+def test_manifest_defaults_kubernetes_tools_enabled_to_false_with_no_brain_go_checkout(tmp_path):
+    """A missing BRAIN_GO_DIR or deploy/.env must not crash the manifest
+    write; it reads the same as the key being absent."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "mcp", "BRAIN_GO_DIR": str(tmp_path / "does-not-exist")})
+
+    assert fields["kubernetes_tools_enabled"] == "false"
+
+
 # --- the gate ----------------------------------------------------------------
 
 
@@ -1085,6 +1106,22 @@ def test_the_gate_runs_for_the_edge_arm_too(monkeypatch):
     assert evidence["entities"]["total"] == 2
 
 
+def test_the_gate_pins_the_sentinel_and_records_the_real_arm_under_edge(monkeypatch):
+    """ "arm" is the gate-family sentinel both arms share, always "native", so
+    conductor.py and main.py keep branching on one value under either arm.
+    "run_arm" is the resolved SREGYM_ARM, so arm-native.json itself can tell
+    an edge attempt from a native one without the run manifest."""
+    monkeypatch.setattr(
+        native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
+    )
+    monkeypatch.setattr(native_gate, "require_populated_graph", lambda *a, **k: {"total": 1, "by_type": {"POD": 1}})
+
+    evidence = native_gate.check({"SREGYM_ARM": "edge", "BRAIN_SESSION": "session_x", "KIND_CLUSTER_NAME": "sregym-0"})
+
+    assert evidence["arm"] == "native"
+    assert evidence["run_arm"] == "edge"
+
+
 def test_the_gate_fails_the_attempt_when_the_graph_is_empty(monkeypatch):
     monkeypatch.setattr(
         native_gate, "telemetry_reachable", lambda env: {"prometheus": "ok", "loki": "ok", "jaeger": "ok"}
@@ -1121,6 +1158,7 @@ def test_the_gate_returns_the_evidence_it_gathered(monkeypatch):
     )
 
     assert evidence["arm"] == "native"
+    assert evidence["run_arm"] == "native"
     assert evidence["cluster"] == "sregym-2"
     assert evidence["entities"]["total"] == 7
 
@@ -1419,6 +1457,39 @@ def test_the_conductor_records_the_post_fault_wait_under_the_native_arm(monkeypa
     assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 42.0}
 
 
+def test_the_conductor_log_line_names_the_real_arm(monkeypatch):
+    """The "arm" key conductor.py branches on is always "native", for native
+    and edge alike, so the log line has to read run_arm instead or it would
+    always say "Native arm ready" on an edge attempt."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native", "run_arm": "edge", "cluster": "sregym-0"})
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", lambda *a, **k: None)
+    logged = []
+    stub.logger = types.SimpleNamespace(info=lambda msg: logged.append(msg), warning=lambda *a, **k: None)
+
+    conductor._inject_fault(stub)
+
+    assert any(msg.startswith("[ENV] Edge arm ready:") for msg in logged), logged
+
+
+def test_the_conductor_records_the_post_fault_wait_under_the_edge_arm(monkeypatch):
+    """Edge gets the same post-fault wait as native: the gate-family sentinel
+    ("arm") is what the conductor branches on, and it is "native" for edge
+    too. run_arm is what says this attempt is actually edge."""
+    conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native", "run_arm": "edge", "cluster": "sregym-0"})
+    seen = []
+
+    def fake_wait(injected_at, root_cause, namespace):
+        seen.append((injected_at, root_cause, namespace))
+        return {"ended_by": "change_event", "waited_seconds": 17.0}
+
+    monkeypatch.setattr(native_gate, "wait_for_fault_publish", fake_wait)
+
+    conductor._inject_fault(stub)
+
+    assert seen == [(stub.fault_injected_at, ROOT_CAUSE, "astronomy-shop")]
+    assert stub.native_arm_evidence["post_fault_wait"] == {"ended_by": "change_event", "waited_seconds": 17.0}
+
+
 def test_the_conductor_proceeds_when_the_post_fault_wait_reaches_its_cap(monkeypatch):
     """The real wait, with a zero cap and a graph that never changes."""
     conductor, stub = _conductor_for_injection(monkeypatch, {"arm": "native"})
@@ -1457,6 +1528,22 @@ def test_arm_native_json_carries_the_post_fault_wait(tmp_path, monkeypatch):
     main._write_native_arm_evidence(tmp_path, conductor)
 
     assert json.loads((tmp_path / "arm-native.json").read_text())["post_fault_wait"] == wait
+
+
+def test_arm_native_json_carries_run_arm_under_edge(tmp_path, monkeypatch):
+    """main.py copies whatever native_gate.check() returned verbatim, so
+    run_arm reaches the file with no code change here: this pins that it
+    does, and that the file still says edge rather than native."""
+    import main
+
+    monkeypatch.delenv("BRAIN_SESSION", raising=False)
+    conductor = types.SimpleNamespace(native_arm_evidence={"arm": "native", "run_arm": "edge"})
+
+    main._write_native_arm_evidence(tmp_path, conductor)
+
+    written = json.loads((tmp_path / "arm-native.json").read_text())
+    assert written["arm"] == "native"
+    assert written["run_arm"] == "edge"
 
 
 def _terminate_body() -> str:

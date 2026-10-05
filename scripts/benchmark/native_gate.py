@@ -24,12 +24,15 @@ A third is checked just after the fault is injected: brain-go holds a
 publish from after the fault, so the investigation does not start against the
 pre-fault graph. See wait_for_fault_publish.
 
-Gated on is_native, which is true for both the native and the edge arm: they
-share every mechanism here, since neither telemetry reachability nor the
+Gated on runs_edge_agent, which is true for both the native and the edge arm:
+they share every mechanism here, since neither telemetry reachability nor the
 entity graph depends on whether brain-go also holds a Kubernetes connection.
-The evidence this module returns still labels itself "native" rather than the
-resolved SREGYM_ARM value -- it names the gate family, not the arm; the
-manifest's own `arm` field is what records which arm actually ran.
+The evidence this module returns still labels its `arm` key "native" rather
+than the resolved SREGYM_ARM value -- that key names the gate family, not the
+arm, and conductor.py and main.py both key off it being exactly "native" to
+decide whether to act, for either arm. `run_arm` carries the real value
+(current_arm()) for anything that needs to tell native and edge apart, such
+as arm-native.json and the conductor's own log line.
 
 Everything reads the environment the slot already exports, so the conductor
 passes nothing: BRAIN_ADMIN_API_URL and BRAIN_SESSION come from seed_slot.sh,
@@ -47,7 +50,7 @@ from datetime import UTC, datetime
 
 import requests
 
-from scripts.benchmark.arm import is_native
+from scripts.benchmark.arm import current_arm, runs_edge_agent
 from scripts.benchmark.brain_graph import (
     REQUEST_TIMEOUT_S,
     GraphEmpty,
@@ -126,10 +129,19 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
     entity graph is empty.
     """
     source = os.environ if env is None else env
-    if not is_native(source):
+    if not runs_edge_agent(source):
         return {"arm": "mcp"}
 
-    evidence: dict[str, object] = {"arm": "native", "cluster": source.get("KIND_CLUSTER_NAME", "")}
+    # "arm" is the gate-family sentinel, always "native": conductor.py and
+    # main.py both branch on evidence["arm"] == "native" to decide whether to
+    # log or to write arm-native.json, under either arm. "run_arm" is the
+    # resolved SREGYM_ARM value, so a reader of arm-native.json itself (not
+    # just the run manifest) can tell which arm actually ran.
+    evidence: dict[str, object] = {
+        "arm": "native",
+        "run_arm": current_arm(source),
+        "cluster": source.get("KIND_CLUSTER_NAME", ""),
+    }
 
     telemetry = telemetry_reachable(source)
     evidence["telemetry"] = telemetry
@@ -137,7 +149,7 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
     broken = sorted(name for name, status in telemetry.items() if status != "ok")
     if broken:
         raise NativeArmNotReady(
-            "native connections cannot reach "
+            "the native/edge telemetry connections cannot reach "
             + ", ".join(f"{name} ({telemetry[name]})" for name in broken)
             + ". brain-go would investigate this attempt with no telemetry at all."
         )
@@ -245,8 +257,7 @@ def wait_for_fault_publish(
     """Block until brain-go holds a publish from after the fault.
 
     Returns None outside the native and edge arms without reading anything.
-    Otherwise
-    returns what ended the wait, for arm-native.json:
+    Otherwise returns what ended the wait, for arm-native.json:
 
       {"ended_by": "change_event" | "publish" | "cap", "waited_seconds": ...,
        "lag_seconds": ..., "polls": ..., "cap_seconds": ..., ...}
@@ -265,7 +276,7 @@ def wait_for_fault_publish(
     cannot run.
     """
     source = os.environ if env is None else env
-    if not is_native(source):
+    if not runs_edge_agent(source):
         return None
 
     cap = _int_env(source, "SREGYM_POST_FAULT_WAIT_SECONDS", POST_FAULT_WAIT_S)

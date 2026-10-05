@@ -122,6 +122,56 @@ def test_the_edge_arm_leaves_brain_gos_kubernetes_tools_alone(tmp_path):
     assert "FEATURE_KUBERNETES_TOOLS_ENABLED" not in env
 
 
+def test_the_edge_arm_accepts_an_override_that_leaves_kubernetes_tools_off(tmp_path):
+    """An edge run's BRAIN_ENV_EXTRA is free to set other keys; only turning
+    the k8s_* tool family on is refused."""
+    env, _ = _run(tmp_path, {"SREGYM_ARM": "edge", "BRAIN_ENV_EXTRA": "FEATURE_KUBERNETES_TOOLS_ENABLED=false"})
+
+    assert env["FEATURE_KUBERNETES_TOOLS_ENABLED"] == "false"
+
+
+def test_the_edge_arm_refuses_an_override_that_turns_kubernetes_tools_on(tmp_path):
+    """Edge measures brain-go with no Kubernetes connection. An override that
+    enables the k8s_* tool family anyway would give it tools with nothing to
+    resolve against, which is not what this arm is for, so the box must not
+    start rather than silently run a different experiment."""
+    brain_go = tmp_path / "brain-go"
+    (brain_go / "scripts").mkdir(parents=True)
+    dev_env = brain_go / "scripts" / "dev-env.sh"
+    dev_env.write_text(FAKE_DEV_ENV)
+    dev_env.chmod(0o755)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("curl", FAKE_CURL), ("docker", FAKE_DOCKER), ("make", "#!/bin/sh\nexit 0\n")):
+        stub = bindir / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HOME": os.environ.get("HOME", str(tmp_path)),
+        "BRAIN_GO_DIR": str(brain_go),
+        "BRAIN_GO_ENV_OUT": str(tmp_path / "sregym-brain-go.sh"),
+        "AGENT_MODEL_ID": "test-model",
+        "SREGYM_ARM": "edge",
+        "BRAIN_ENV_EXTRA": "FEATURE_KUBERNETES_TOOLS_ENABLED=true",
+    }
+    done = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=str(ROOT))
+
+    assert done.returncode != 0
+    assert "FEATURE_KUBERNETES_TOOLS_ENABLED" in done.stderr
+    assert "edge" in done.stderr
+
+
+def test_the_native_arm_tolerates_the_flag_brain_env_extra_would_also_set(tmp_path):
+    """The edge-only refusal must not misfire on native, where the flag is
+    expected to be true regardless of what BRAIN_ENV_EXTRA says."""
+    env, _ = _run(tmp_path, {"SREGYM_ARM": "native", "BRAIN_ENV_EXTRA": "FEATURE_KUBERNETES_TOOLS_ENABLED=true"})
+
+    assert env["FEATURE_KUBERNETES_TOOLS_ENABLED"] == "true"
+
+
 def test_the_box_raises_the_inline_evidence_cap_for_every_arm(tmp_path):
     """The box has no evidence object store, so a tool result over the cap
     fails its call closed. Every arm gets the raised cap."""

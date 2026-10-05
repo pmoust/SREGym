@@ -244,6 +244,26 @@ BRAIN_ENV_EOF
   log "run-configured keys:${applied:- none}"
 fi
 
+# --- edge measures no Kubernetes connection, and the flag must agree --------
+# The edge arm's whole claim is that brain-go investigates with no Kubernetes
+# API access at all. BRAIN_ENV_EXTRA is applied above and can set any key,
+# including this one; if it turns the k8s_* tool family on anyway, the arm
+# stops measuring what its name says it measures, and nothing downstream
+# (the gate, the manifest) can tell. Checked against the file setup_brain_go.sh
+# itself just wrote, after BRAIN_ENV_EXTRA, so this reads the value brain-go
+# will actually start with rather than the override string, which could be
+# "True", "1", or absent-and-defaulted and still mean yes.
+if [ "${SREGYM_ARM:-}" = "edge" ]; then
+  # grep finds no match whenever BRAIN_ENV_EXTRA never touched the key (the
+  # ordinary edge case: the key is simply absent from deploy/.env), and under
+  # this script's set -e a plain assignment failing on that would abort the
+  # whole setup silently. `|| true` keeps that the normal case it is.
+  effective_k8s_tools=$(grep '^FEATURE_KUBERNETES_TOOLS_ENABLED=' deploy/.env | tail -1 | cut -d= -f2- || true)
+  if [ "$effective_k8s_tools" = "true" ]; then
+    die "BRAIN_ENV_EXTRA sets FEATURE_KUBERNETES_TOOLS_ENABLED=true under the edge arm. Edge measures brain-go with no Kubernetes connection; enabling the k8s_* tool family here would give it tools with no connection to resolve against, which is not edge."
+  fi
+fi
+
 # --- AWS credentials for the containers --------------------------------------
 # Without these every LLM call fails and the agent submits nothing:
 #
