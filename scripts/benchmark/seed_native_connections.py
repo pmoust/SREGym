@@ -39,11 +39,20 @@ Kubernetes API server kind exposes, which the kubeconfig names. buildKubernetes
 reads the flag and passes it to the client, whose guard sits on the REST config
 the clientset is built from, so it also covers the dial brain-go makes when it
 validates the connection. Without the flag that validation is refused.
+
+The kubernetes connection also sets `configmap_values` (brain-go#4052),
+default "screened", overridable with SREGYM_K8S_CONFIGMAP_VALUES
+(resolve_configmap_values). Screened is what lets k8s_describe show a
+ConfigMap's actual data, secrets masked, instead of only key names and byte
+sizes; measuring arm B's native kubernetes connector without it would never
+exercise that code path. The three telemetry connections do not carry the
+key; it means nothing outside internal/clients/kubernetes.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -79,8 +88,34 @@ BUCKET = ["observation"]
 
 REQUEST_TIMEOUT_S = 60
 
+# The env var that overrides the kubernetes connection's "configmap_values"
+# setting (brain-go#4052, internal/clients/kubernetes/configmap.go). Default
+# is "screened": arm B measures brain-go's own native kubernetes connector,
+# and the benchmark's cluster holds no customer data, so there is no reason
+# to run it in the "sizes"-only mode a real customer connection would default
+# to. "Screened" is what lets k8s_describe answer a question about a
+# ConfigMap's actual content, with secrets masked, instead of only key names
+# and byte sizes.
+CONFIGMAP_VALUES_ENV = "SREGYM_K8S_CONFIGMAP_VALUES"
+DEFAULT_CONFIGMAP_VALUES = "screened"
 
-def build_config(service: str, url: str, kubeconfig: str) -> dict[str, Any]:
+
+def resolve_configmap_values(env: dict[str, str] | None = None) -> str:
+    """The "configmap_values" value to seed, read from CONFIGMAP_VALUES_ENV.
+
+    Defaults to DEFAULT_CONFIGMAP_VALUES when the variable is unset or empty.
+    Not validated here: brain-go's own New() rejects a value that is neither
+    "screened" nor "sizes" (ErrInvalidConfigMapValues) when the connection is
+    built, which is the one place that validation needs to live.
+    """
+    source = os.environ if env is None else env
+
+    return source.get(CONFIGMAP_VALUES_ENV, "").strip() or DEFAULT_CONFIGMAP_VALUES
+
+
+def build_config(
+    service: str, url: str, kubeconfig: str, configmap_values: str = DEFAULT_CONFIGMAP_VALUES
+) -> dict[str, Any]:
     """Build one native connection's config for the given service."""
     if service == "kubernetes":
         # A kubeconfig, not api_server plus bearer_token. Three reasons, in
@@ -95,7 +130,19 @@ def build_config(service: str, url: str, kubeconfig: str) -> dict[str, Any]:
         #
         # The credential inside it is a read-only ServiceAccount token, not
         # kind's cluster-admin client certificate. native_arm.sh builds it.
-        return {"kubeconfig": kubeconfig, "allow_private_networks": True}
+        #
+        # configmap_values is read by brain-go's internal/clients/kubernetes
+        # New() only. An older brain-go without that key support ignores it:
+        # buildRESTConfig reads a fixed set of named keys off the config map
+        # (kubeconfig, api_server/host/url, bearer_token/token, ca_cert,
+        # insecure_skip_tls_verify) and never rejects an unrecognised one, so
+        # this key sits unread beside kubeconfig on a brain-go predating
+        # #4052.
+        return {
+            "kubeconfig": kubeconfig,
+            "allow_private_networks": True,
+            "configmap_values": configmap_values,
+        }
 
     return {"url": url, "allow_private_networks": True}
 
@@ -204,11 +251,14 @@ def main() -> int:
 
     csrf = csrf_token(args.brain_url, args.session)
 
+    configmap_values = resolve_configmap_values()
+    print(f"  kubernetes configmap_values: {configmap_values}")
+
     urls = {"prometheus": args.prometheus_url, "loki": args.loki_url, "jaeger": args.jaeger_url}
     unhealthy: list[str] = []
 
     for name, kind, service in NATIVE_CONNECTIONS:
-        config = build_config(service, urls.get(service, ""), kubeconfig)
+        config = build_config(service, urls.get(service, ""), kubeconfig, configmap_values)
         uuid = create_connection(args.brain_url, args.session, csrf, name, kind, service, config)
 
         # Only Kubernetes is gated on here, and only because it is the one

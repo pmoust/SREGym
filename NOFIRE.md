@@ -127,6 +127,13 @@ path:
   agent publishes with, `native_arm.sh` does the cluster-side work (API server
   address, read-only ServiceAccount, telemetry forwards, the Helm install),
   and `native_gate.py` plus `brain_graph.py` gate and record the entity graph.
+  The kubernetes connection's config also sets `configmap_values: "screened"`
+  (brain-go#4052), overridable with `SREGYM_K8S_CONFIGMAP_VALUES`
+  (`seed_native_connections.py`'s `resolve_configmap_values`), so arm B's
+  `k8s_describe` shows a ConfigMap's actual data with secrets masked rather
+  than only key names and byte sizes. A brain-go predating #4052 ignores the
+  key: `New()` reads a fixed set of named config keys off the connection's
+  config and never rejects one it does not recognise.
   `install-edge` does not trust `helm --wait`: chart 0.5.2 runs one replica
   with `maxUnavailable: 1`, so Helm 3 counts it ready with zero ready pods.
   After the release it waits for the agent's pod to be Ready with no restarts

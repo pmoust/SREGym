@@ -27,7 +27,14 @@ import yaml
 
 from scripts.benchmark import brain_graph, native_gate
 from scripts.benchmark.arm import ARM_MCP, ARM_NATIVE, current_arm, is_native, resolve_arm
-from scripts.benchmark.seed_native_connections import BUCKET, NATIVE_CONNECTIONS, build_config
+from scripts.benchmark.seed_connections import build_config as mcp_build_config
+from scripts.benchmark.seed_native_connections import (
+    BUCKET,
+    DEFAULT_CONFIGMAP_VALUES,
+    NATIVE_CONNECTIONS,
+    build_config,
+    resolve_configmap_values,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SEED_NATIVE = ROOT / "scripts" / "benchmark" / "seed_native_connections.py"
@@ -117,9 +124,13 @@ def test_the_telemetry_connections_opt_into_private_addresses():
 def test_the_kubernetes_connection_carries_a_kubeconfig_and_the_private_network_opt_in():
     """kind's API server is on the host's RFC1918 address too, and brain-go's
     guard on the Kubernetes client refuses it unless the connection opts in."""
-    config = build_config("kubernetes", "", "apiVersion: v1\nkind: Config\n")
+    config = build_config("kubernetes", "", "apiVersion: v1\nkind: Config\n", "screened")
 
-    assert config == {"kubeconfig": "apiVersion: v1\nkind: Config\n", "allow_private_networks": True}
+    assert config == {
+        "kubeconfig": "apiVersion: v1\nkind: Config\n",
+        "allow_private_networks": True,
+        "configmap_values": "screened",
+    }
 
 
 def test_every_native_connection_opts_into_private_addresses():
@@ -128,6 +139,47 @@ def test_every_native_connection_opts_into_private_addresses():
     for _, _, service in NATIVE_CONNECTIONS:
         config = build_config(service, "http://10.0.1.5:21000", "apiVersion: v1\n")
         assert config.get("allow_private_networks") is True, service
+
+
+# --- configmap_values (brain-go#4052) ----------------------------------------
+
+
+def test_configmap_values_defaults_to_screened():
+    """Arm B's cluster holds no customer data, so there is no reason to seed
+    the "sizes"-only default a real customer connection would start from."""
+    assert DEFAULT_CONFIGMAP_VALUES == "screened"
+    assert resolve_configmap_values({}) == "screened"
+    assert resolve_configmap_values({"SREGYM_K8S_CONFIGMAP_VALUES": "  "}) == "screened"
+
+
+def test_configmap_values_override_is_read_from_its_own_env_var():
+    assert resolve_configmap_values({"SREGYM_K8S_CONFIGMAP_VALUES": "sizes"}) == "sizes"
+
+
+def test_build_config_defaults_configmap_values_when_the_caller_passes_none():
+    """main() always passes a resolved value; the default argument only
+    matters to a caller, such as a test, that does not."""
+    config = build_config("kubernetes", "", "apiVersion: v1\n")
+
+    assert config["configmap_values"] == DEFAULT_CONFIGMAP_VALUES
+
+
+def test_only_the_kubernetes_connection_carries_configmap_values():
+    """The key means nothing outside internal/clients/kubernetes; writing it
+    on the three telemetry connections would be dead config."""
+    for service in ("prometheus", "loki", "jaeger"):
+        config = build_config(service, "http://10.0.1.5:21000", "apiVersion: v1\n", "screened")
+        assert "configmap_values" not in config
+
+
+def test_arm_a_never_gains_configmap_values():
+    """Arm A seeds through seed_connections.py's own build_config, a
+    different function this change does not touch, and a CUSTOM_MCP config
+    has no kubernetes-service branch for the key to reach."""
+    tools = [{"name": "exec_kubectl_cmd_safely", "inputSchema": {"type": "object"}}]
+    config = mcp_build_config("http://10.0.1.5:9954", "kubectl", True, "sid", tools, None)
+
+    assert "configmap_values" not in config
 
 
 # --- the seeding request bodies, against a stub brain-go --------------------
@@ -217,6 +269,44 @@ def test_seeding_the_native_arm_posts_four_native_connections(stub_brain, tmp_pa
     # Only Kubernetes is probed at seed time: the three telemetry backends
     # belong to the application, which does not exist yet.
     assert [path for path, _ in posts if path.endswith("/validate")] == ["/api/connections/u-1/validate"]
+
+    kubernetes_config = next(c["config"] for c in creates if c["service"] == "kubernetes")
+    assert kubernetes_config["configmap_values"] == "screened"
+    assert all("configmap_values" not in c["config"] for c in creates if c["service"] != "kubernetes")
+
+
+def test_seeding_the_native_arm_honours_a_configmap_values_override(stub_brain, tmp_path):
+    url, posts = stub_brain
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\nkind: Config\n")
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(SEED_NATIVE),
+            "--brain-url",
+            url,
+            "--session",
+            "session_x",
+            "--prometheus-url",
+            "http://10.0.1.5:21000",
+            "--loki-url",
+            "http://10.0.1.5:22000",
+            "--jaeger-url",
+            "http://10.0.1.5:23000",
+            "--kubeconfig-file",
+            str(kubeconfig),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env={**os.environ, "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"},
+    )
+    assert done.returncode == 0, done.stderr
+
+    creates = [body for path, body in posts if path == "/api/connections"]
+    kubernetes_config = next(c["config"] for c in creates if c["service"] == "kubernetes")
+    assert kubernetes_config["configmap_values"] == "sizes"
 
 
 def test_an_unhealthy_kubernetes_connection_stops_the_slot(tmp_path):

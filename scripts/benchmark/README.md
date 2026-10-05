@@ -441,6 +441,13 @@ are produced. Concretely, per slot:
   absence is not survivable: `ListWorkloads` returns an error for the whole
   call if listing Jobs is refused, so `k8s_list_workloads` would fail every
   time.
+- The kubernetes connection's config sets `configmap_values: "screened"`
+  (brain-go#4052), overridable with `SREGYM_K8S_CONFIGMAP_VALUES`
+  (`seed_native_connections.py`'s `resolve_configmap_values`). Screened is
+  what lets `k8s_describe` show a ConfigMap's data with secrets masked,
+  rather than only key names and byte sizes, so the arm actually exercises
+  that code path. A brain-go predating #4052 ignores the key: `New()` reads a
+  fixed set of named config keys and never rejects an unrecognised one.
 - Host port-forwards are kept alive to `prometheus-server`, `loki` and
   `jaeger-out` in the `observe` namespace. They are supervised rather than
   started once, because those services belong to the application and the
