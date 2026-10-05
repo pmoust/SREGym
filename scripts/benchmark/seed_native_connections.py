@@ -41,12 +41,18 @@ the clientset is built from, so it also covers the dial brain-go makes when it
 validates the connection. Without the flag that validation is refused.
 
 The kubernetes connection also sets `configmap_values` (brain-go#4052),
-default "screened", overridable with SREGYM_K8S_CONFIGMAP_VALUES
-(resolve_configmap_values). Screened is what lets k8s_describe show a
-ConfigMap's actual data, secrets masked, instead of only key names and byte
-sizes; measuring arm B's native kubernetes connector without it would never
-exercise that code path. The three telemetry connections do not carry the
-key; it means nothing outside internal/clients/kubernetes.
+default "screened". Screened is what lets k8s_describe show a ConfigMap's
+actual data, secrets masked, instead of only key names and byte sizes;
+measuring arm B's native kubernetes connector without it would never exercise
+that code path. The three telemetry connections do not carry the key; it
+means nothing outside internal/clients/kubernetes.
+
+SREGYM_K8S_CONFIGMAP_VALUES overrides the default (resolve_configmap_values),
+but only in the environment of the process that runs this script on the
+instance: launch.sh and terraform/templates/bootstrap.sh.tftpl do not forward
+it, the way neither forwards SREGYM_BASELINE_SYNC_SECONDS. There is no tfvars
+field or launch.sh flag for it. Changing it means exporting it by hand on the
+box before seed_slot.sh runs, for one slot of one run.
 """
 
 from __future__ import annotations
@@ -96,6 +102,12 @@ REQUEST_TIMEOUT_S = 60
 # to. "Screened" is what lets k8s_describe answer a question about a
 # ConfigMap's actual content, with secrets masked, instead of only key names
 # and byte sizes.
+#
+# Read only from this process's own environment. Nothing forwards it from a
+# launch: launch.sh does not pass it as a terraform var and
+# terraform/templates/bootstrap.sh.tftpl does not export it into the
+# instance's bootstrap, so "overridable" means set by hand in the shell that
+# runs seed_slot.sh on the box, not from a scenario's tfvars.
 CONFIGMAP_VALUES_ENV = "SREGYM_K8S_CONFIGMAP_VALUES"
 DEFAULT_CONFIGMAP_VALUES = "screened"
 
@@ -104,9 +116,13 @@ def resolve_configmap_values(env: dict[str, str] | None = None) -> str:
     """The "configmap_values" value to seed, read from CONFIGMAP_VALUES_ENV.
 
     Defaults to DEFAULT_CONFIGMAP_VALUES when the variable is unset or empty.
-    Not validated here: brain-go's own New() rejects a value that is neither
-    "screened" nor "sizes" (ErrInvalidConfigMapValues) when the connection is
-    built, which is the one place that validation needs to live.
+    Not validated here. A brain-go carrying #4052 rejects a value that is
+    neither "screened" nor "sizes" (ErrInvalidConfigMapValues), but only when
+    it actually builds the client: POST /api/connections stores the config
+    as given, so a typo here passes seeding and surfaces later, at
+    POST /api/connections/{uuid}/validate, as an unhealthy kubernetes
+    connection. A brain-go predating #4052 does not check the value at all,
+    at either call, and accepts a typo silently.
     """
     source = os.environ if env is None else env
 
@@ -132,9 +148,13 @@ def build_config(
         # kind's cluster-admin client certificate. native_arm.sh builds it.
         #
         # configmap_values is read by brain-go's internal/clients/kubernetes
-        # New() only. An older brain-go without that key support ignores it:
-        # buildRESTConfig reads a fixed set of named keys off the config map
-        # (kubeconfig, api_server/host/url, bearer_token/token, ca_cert,
+        # New() only, not by buildKubernetes (internal/clients/factory/
+        # builders.go), which reads allow_private_networks and stops there,
+        # translating it into the WithAllowPrivateDial() option before
+        # calling New(). An older brain-go without that key support ignores
+        # it: New() just forwards cfg to its own buildRESTConfig, which reads
+        # a fixed set of named keys off the config map (kubeconfig,
+        # api_server/host/url, bearer_token/token, ca_cert,
         # insecure_skip_tls_verify) and never rejects an unrecognised one, so
         # this key sits unread beside kubeconfig on a brain-go predating
         # #4052.
@@ -252,7 +272,6 @@ def main() -> int:
     csrf = csrf_token(args.brain_url, args.session)
 
     configmap_values = resolve_configmap_values()
-    print(f"  kubernetes configmap_values: {configmap_values}")
 
     urls = {"prometheus": args.prometheus_url, "loki": args.loki_url, "jaeger": args.jaeger_url}
     unhealthy: list[str] = []
@@ -271,9 +290,16 @@ def main() -> int:
             continue
 
         if not uuid:
-            print(f"  {name}: pre-existing, skipping the health probe")
+            # create_connection already logged the 409 and returned no uuid:
+            # the pre-existing row keeps whatever configmap_values it was
+            # created with, which this resolved value was not applied to.
+            print(
+                f"  {name}: pre-existing, skipping the health probe; configmap_values={configmap_values} not applied to it"
+            )
 
             continue
+
+        print(f"  {name}: configmap_values={configmap_values}")
 
         healthy, detail = validate_connection(args.brain_url, args.session, csrf, uuid)
         if healthy:

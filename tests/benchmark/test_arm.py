@@ -811,7 +811,10 @@ def _manifest(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
         capture_output=True,
         text=True,
         cwd=ROOT,
-        env={**{k: v for k, v in os.environ.items() if k != "SREGYM_ARM"}, **env},
+        env={
+            **{k: v for k, v in os.environ.items() if k not in ("SREGYM_ARM", "SREGYM_K8S_CONFIGMAP_VALUES")},
+            **env,
+        },
     )
     assert done.returncode == 0, done.stderr
 
@@ -832,6 +835,9 @@ def test_the_mcp_arm_records_the_same_connection_lines_it_always_did(tmp_path):
     # reader parses one shape.
     assert fields["edge_image"] == ""
     assert fields["edge_chart_version"] == ""
+    # The MCP arm seeds no native kubernetes connection, so the key is
+    # recorded empty rather than guessed at.
+    assert fields["seeded_configmap_values"] == ""
 
 
 def test_the_native_arm_records_its_own_connections_and_its_edge_agent(tmp_path):
@@ -844,6 +850,16 @@ def test_the_native_arm_records_its_own_connections_and_its_edge_agent(tmp_path)
     assert fields["seeded_connection_signals"] == "kubernetes:-,prometheus:-,jaeger:-,loki:-"
     assert fields["edge_image"].startswith("nofireai/edge:")
     assert re.match(r"^\d+\.\d+\.\d+$", fields["edge_chart_version"])
+    assert fields["seeded_configmap_values"] == "kubernetes:screened"
+
+
+def test_the_native_arm_records_a_configmap_values_override(tmp_path):
+    """The manifest reads resolve_configmap_values() itself rather than a
+    fixed "screened", so a box that overrides SREGYM_K8S_CONFIGMAP_VALUES by
+    hand still gets an archived manifest that says what it actually seeded."""
+    fields = _manifest(tmp_path, {"SREGYM_ARM": "native", "SREGYM_K8S_CONFIGMAP_VALUES": "sizes"})
+
+    assert fields["seeded_configmap_values"] == "kubernetes:sizes"
 
 
 # --- the gate ----------------------------------------------------------------

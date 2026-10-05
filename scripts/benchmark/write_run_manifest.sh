@@ -189,6 +189,22 @@ if [ "$ARM" = "native" ]; then
   EDGE_CHART_VERSION=$(printf '%s' "$EDGE_VERSIONS" | cut -f2)
 fi
 
+# The kubernetes connection's configmap_values setting as actually seeded
+# (brain-go#4052), native arm only: the MCP arm seeds no native kubernetes
+# connection and the key means nothing to a CUSTOM_MCP one. Read from
+# resolve_configmap_values() rather than restated here, so this cannot drift
+# from what seed_native_connections.py actually sent if the override or the
+# default ever change. Empty under the MCP arm, the same way edge_image is,
+# so a reader parses one shape regardless of arm.
+SEEDED_CONFIGMAP_VALUES=""
+if [ "$ARM" = "native" ]; then
+  SEEDED_CONFIGMAP_VALUES=$(uv run python -c "
+from scripts.benchmark.seed_native_connections import resolve_configmap_values
+
+print(f'kubernetes:{resolve_configmap_values()}')
+" 2>/dev/null) || SEEDED_CONFIGMAP_VALUES=""
+fi
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -234,6 +250,9 @@ fi
   # does and does not tell a reader about a node's actual bound toolset.
   echo "seeded_connection_buckets=$SEEDED_CONNECTION_BUCKETS"
   echo "seeded_connection_signals=$SEEDED_CONNECTION_SIGNALS"
+  # kind:value for the kubernetes connection's configmap_values setting,
+  # native arm only. See the comment above SEEDED_CONFIGMAP_VALUES.
+  echo "seeded_configmap_values=$SEEDED_CONFIGMAP_VALUES"
 
   # Which stages ran. See emit_stages above; run_shard.sh calls this script a
   # second time with --stages once it has generated the tasklist, because at
