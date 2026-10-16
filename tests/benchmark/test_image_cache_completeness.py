@@ -13,6 +13,16 @@ subtracting the deliberate-fault images (never meant to resolve) and the
 list's own documented out-of-scope gaps (the kind node image, pulled by the
 host rather than the in-cluster containerd this list covers).
 
+This also covers the vendored third-party manifests under
+sregym/resources/vendored/ and kind/manifests/: those are plain .yaml files
+with no Chart.yaml of their own, so the chart-tree exclusion below does not
+apply to them, and they scan like any
+other raw manifest in this tree. The OpenEBS operator manifest sets its
+helper image through two env vars (OPENEBS_IO_HELPER_IMAGE,
+CLEANUP_JOB_IMAGE), not an "image:" key, so a second pattern below
+(_YAML_ENV_IMAGE_RE) catches a "name: ...IMAGE...\\n  value: <ref>" pair the
+same way the plain "image:" pattern catches a normal container spec.
+
 Deliberately NOT scanned: any directory tree rooted at a vendored Helm
 chart (one containing its own Chart.yaml). image_cache.list's own images
 for those charts (prometheus, grafana, the astronomy-shop chart, ...) come
@@ -47,6 +57,16 @@ IMAGE_LIST = ROOT / "scripts" / "benchmark" / "image_cache.list"
 # shape, so _looks_like_image below stops a handful of common built-in type
 # names from being mistaken for a real image reference.
 _YAML_IMAGE_RE = re.compile(r'^\s*image:\s*"?([^"\s#]+)"?\s*$', re.MULTILINE)
+
+# A Kubernetes env var entry naming an image through "value:" rather than an
+# "image:" key, the shape the OpenEBS operator manifest's own
+# OPENEBS_IO_HELPER_IMAGE and CLEANUP_JOB_IMAGE env vars take
+# (sregym/resources/vendored/openebs-operator-v3.5.0.yaml). "IMAGE" anywhere
+# in the env var's own name, matching the same naming convention this
+# codebase's Python IMAGE-named constants already use, so a future vendored
+# manifest's own helper-image env var is caught the same way without a new
+# pattern.
+_YAML_ENV_IMAGE_RE = re.compile(r'name:\s*(?:\S*IMAGE\S*)\s*\n\s*value:\s*"?([^"\s]+)"?', re.MULTILINE)
 
 # The Python shapes an image literal actually takes in this tree: a dict
 # literal's "image" key, an "image=" keyword argument, a module-level
@@ -162,18 +182,19 @@ def _scan_images() -> dict[str, set[str]]:
                 continue
             text = path.read_text(errors="ignore")
             if path.suffix in (".yaml", ".yml"):
-                matches = _YAML_IMAGE_RE.finditer(text)
+                matches = (m for rx in (_YAML_IMAGE_RE, _YAML_ENV_IMAGE_RE) for m in rx.finditer(text))
             elif path.suffix == ".py":
-                # _YAML_IMAGE_RE too, not just the three Python-syntax
-                # patterns: a raw manifest built as a Python string (a
-                # triple-quoted block, an f-string) carries its "image:" key
-                # as plain YAML text, which none of the Python-syntax
-                # patterns below ever match (mutating_webhook_resource_
-                # limits.py's webhook Deployment is one such case).
+                # _YAML_IMAGE_RE and _YAML_ENV_IMAGE_RE too, not just the
+                # three Python-syntax patterns: a raw manifest built as a
+                # Python string (a triple-quoted block, an f-string) carries
+                # its "image:" key as plain YAML text, which none of the
+                # Python-syntax patterns below ever match (mutating_webhook_
+                # resource_limits.py's webhook Deployment is one such case).
                 matches = (
                     m
                     for rx in (
                         _YAML_IMAGE_RE,
+                        _YAML_ENV_IMAGE_RE,
                         _PY_IMAGE_DICT_RE,
                         _PY_IMAGE_KW_RE,
                         _PY_IMAGE_CONST_RE,
@@ -272,3 +293,28 @@ def test_bare_type_annotation_is_not_an_image():
     shape as a real "image: <ref>" line and must not be mistaken for one."""
     assert not _looks_like_image("str")
     assert not _looks_like_image("Path")
+
+
+def test_scan_finds_vendored_calico_and_metrics_server_images():
+    """The vendored manifests under kind/manifests/ and sregym/resources/
+    vendored/ are plain .yaml files with no Chart.yaml, so they scan like any
+    other raw manifest, not like a Helm chart tree."""
+    found = _scan_images()
+    assert any("calico-v3.27.0.yaml" in f for f in found.get("docker.io/calico/node:v3.27.0", set()))
+    assert any(
+        "metrics-server-components-v0.9.0.yaml" in f
+        for f in found.get("registry.k8s.io/metrics-server/metrics-server:v0.9.0", set())
+    )
+
+
+def test_scan_finds_openebs_helper_image_in_env_value():
+    """The vendored OpenEBS operator manifest sets its helper image through
+    OPENEBS_IO_HELPER_IMAGE/CLEANUP_JOB_IMAGE env vars, not an "image:" key:
+    _YAML_ENV_IMAGE_RE has to exist and run against .yaml files, or removing
+    this image from image_cache.list would go undetected. Confirmed by
+    actually deleting the
+    docker.io/openebs/linux-utils:3.5.0 line from image_cache.list and
+    re-running test_image_cache_list_has_every_scanned_image, which failed
+    naming that image, then restoring the line."""
+    found = _scan_images()
+    assert any("openebs-operator-v3.5.0.yaml" in f for f in found.get("docker.io/openebs/linux-utils:3.5.0", set()))

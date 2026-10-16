@@ -103,6 +103,10 @@ Subsequent deployments are faster since images are cached. Remote clusters typic
 
 Delete the existing KIND cluster using the command below before recreating it.
 
+## Vendored manifests
+
+`manifests/calico-v3.27.0.yaml` is a vendored copy of `https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml`, applied by `setup_kind_cluster.sh` instead of fetched at run time. See `sregym/resources/vendored/README.md` for the same pattern applied to the other remote manifests a benchmark box used to fetch (metrics-server, the OpenEBS operator, tidb-operator's CRDs and recovery CR) and how to refresh one.
+
 ## Delete the cluster
 
 ```bash

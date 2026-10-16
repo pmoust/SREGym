@@ -2,12 +2,25 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # Vendored third-party manifests (sregym/resources/vendored/,
+      # kind/manifests/) must stay byte-identical to their upstream source
+      # so a diff against that source means something; trailing-whitespace
+      # and end-of-file-fixer rewrite bytes, which was silently reformatting
+      # the vendored OpenEBS operator manifest on every commit that touched
+      # it.
       - id: trailing-whitespace
+        exclude: "^(sregym/resources/vendored|kind/manifests)/"
       - id: end-of-file-fixer
+        exclude: "^(sregym/resources/vendored|kind/manifests)/"
       - id: check-yaml
         args: [--allow-multiple-documents]
         exclude: "templates/.*\\.yaml$"
+      # tidb-operator-crd-v1.6.3.yaml is a vendored CRD bundle, legitimately
+      # over the default 500KB cap; excluded rather than raising the cap
+      # repo-wide, which would stop catching an accidentally committed large
+      # file anywhere else.
       - id: check-added-large-files
+        exclude: "^sregym/resources/vendored/tidb-operator-crd-v1\\.6\\.3\\.yaml$"
       - id: check-merge-conflict
 
   - repo: https://github.com/astral-sh/ruff-pre-commit

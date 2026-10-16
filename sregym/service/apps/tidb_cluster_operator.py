@@ -22,7 +22,13 @@ class TiDBClusterDeployer:
         self.operator_release_name = self.metadata["Helm Operator Config"]["release_name"]
         self.operator_chart = self.metadata["Helm Operator Config"]["chart_path"]
         self.operator_version = self.metadata["Helm Operator Config"]["version"]
-        self.operator_crd_url = self.metadata["Helm Operator Config"]["CRD"]
+        # Vendored, not fetched: this used to be a raw.githubusercontent.com
+        # URL, applied at deploy time on every run. The metadata file now
+        # names a path relative to BASE_DIR
+        # (sregym/), resolved to the vendored copy under
+        # sregym/resources/vendored/ (see that directory's README for the
+        # source URL, version, and refresh steps).
+        self.operator_crd_path = str((BASE_DIR / self.metadata["Helm Operator Config"]["CRD"]).resolve())
 
         env_path = os.environ.get("TIDB_OPERATOR_VALUES")
         self.operator_values_path = ""
@@ -58,8 +64,8 @@ class TiDBClusterDeployer:
         self.run_cmd(f"kubectl create ns {ns} --dry-run=client -o yaml | kubectl apply -f -")
 
     def install_crds(self):
-        print(f"Installing CRDs from {self.operator_crd_url} ...")
-        self.run_cmd(f"kubectl create -f {self.operator_crd_url} || kubectl replace -f {self.operator_crd_url}")
+        print(f"Installing CRDs from {self.operator_crd_path} ...")
+        self.run_cmd(f"kubectl create -f {self.operator_crd_path} || kubectl replace -f {self.operator_crd_path}")
 
     def apply_prometheus(self):
         ns = "observe"

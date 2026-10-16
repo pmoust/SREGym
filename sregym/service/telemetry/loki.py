@@ -18,6 +18,10 @@ class Loki:
         self.helm_configs = {}
         self.promtail_release_name = "promtail"
         self.promtail_values_file = str(BASE_DIR / "observer/loki/promtail-values.yaml")
+        # Vendored chart archive, not a "grafana/promtail" repo coordinate:
+        # see sregym/resources/vendored/README.md for the source and refresh
+        # steps. Pinned to the same version Helm.install passes below.
+        self.promtail_chart_path = str(BASE_DIR / "resources/vendored/charts/promtail-6.17.1.tgz")
         self.pvc_config_file = None
 
         self.logger = logging.getLogger("all.infra.loki")
@@ -40,11 +44,15 @@ class Loki:
         self.namespace = metadata["Namespace"]
         if "Helm Config" in metadata:
             self.helm_configs = metadata["Helm Config"]
-            # Handle remote charts differently - don't prepend BASE_DIR
-            if not self.helm_configs.get("remote_chart", False):
-                if "chart_path" in self.helm_configs:
-                    chart_path = self.helm_configs["chart_path"]
-                    self.helm_configs["chart_path"] = str(BASE_DIR / chart_path)
+            # A Helm repo coordinate ("grafana/loki") is left alone; a
+            # vendored chart archive is a path relative to BASE_DIR
+            # (sregym/) and always needs resolving, "remote_chart" or not.
+            # "remote_chart" by itself only means "skip `helm dependency
+            # update`" (Helm.install), which a packaged .tgz's own bundled
+            # subcharts make correct here too.
+            chart_path = self.helm_configs.get("chart_path")
+            if chart_path and (chart_path.endswith(".tgz") or not self.helm_configs.get("remote_chart", False)):
+                self.helm_configs["chart_path"] = str((BASE_DIR / chart_path).resolve())
 
             # Resolve extra_args paths relative to BASE_DIR
             if "extra_args" in self.helm_configs:
@@ -91,9 +99,6 @@ class Loki:
         self._delete_pvc()
         Helm.uninstall(**self.helm_configs)
 
-        # Add Grafana Helm repo for Loki chart
-        self._add_grafana_helm_repo()
-
         if self.pvc_config_file:
             pvc_name = self._get_pvc_name_from_file(self.pvc_config_file)
             if not self._pvc_exists(pvc_name):
@@ -102,15 +107,6 @@ class Loki:
         Helm.install(**self.helm_configs)
         Helm.assert_if_deployed(self.namespace)
         self._deploy_promtail()
-
-    def _add_grafana_helm_repo(self):
-        """Add Grafana Helm repository for Loki chart."""
-        self.logger.info("Adding Grafana Helm repository...")
-        try:
-            KubeCtl().exec_command("helm repo add grafana https://grafana.github.io/helm-charts")
-            KubeCtl().exec_command("helm repo update")
-        except Exception as e:
-            self.logger.warning(f"Failed to add Grafana Helm repo (may already exist): {e}")
 
     def teardown(self):
         """Teardown the Loki deployment."""
@@ -173,8 +169,9 @@ class Loki:
         self.logger.info("Deploying Promtail for Loki log collection...")
         Helm.install(
             release_name=self.promtail_release_name,
-            chart_path="grafana/promtail",
+            chart_path=self.promtail_chart_path,
             namespace=self.namespace,
+            version="6.17.1",
             remote_chart=True,
             extra_args=["-f", self.promtail_values_file],
         )

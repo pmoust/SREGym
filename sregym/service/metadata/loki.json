@@ -10,8 +10,9 @@
     ],
     "Helm Config": {
         "release_name": "loki",
-        "chart_path": "grafana/loki",
+        "chart_path": "resources/vendored/charts/loki-7.3.0.tgz",
         "namespace": "observe",
+        "version": "7.3.0",
         "remote_chart": true,
         "extra_args": ["-f", "observer/loki/loki-values.yaml"]
     },

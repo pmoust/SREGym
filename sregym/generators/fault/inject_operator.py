@@ -3,7 +3,15 @@ import time
 import yaml
 
 from sregym.generators.fault.base import FaultInjector
+from sregym.paths import BASE_DIR
 from sregym.service.kubectl import KubeCtl
+
+# The clean TidbCluster CR this fault's recovery re-applies. Vendored, not
+# fetched, so recovery does not depend on raw.githubusercontent.com being
+# reachable mid-run. See
+# sregym/resources/vendored/README.md for the source URL and refresh steps;
+# its helper.image: alpine:3.16.0 is why that tag is in image_cache.list.
+_CLEAN_TIDB_CLUSTER_CR = BASE_DIR / "resources" / "vendored" / "tidb-cluster-recovery-v1.6.0.yaml"
 
 # A tag that never resolves on any registry, used by
 # inject_wrong_operator_image's fault pod. Named here, once, so the harness's
@@ -275,8 +283,7 @@ class K8SOperatorFaultInjector(FaultInjector):
         )
         print(f"[RECOVER] PVC delete: {result}")
         print("[RECOVER] Applying clean TidbCluster CR...")
-        clean_url = "https://raw.githubusercontent.com/pingcap/tidb-operator/v1.6.0/examples/basic/tidb-cluster.yaml"
-        result = self.kubectl.exec_command(f"kubectl apply -f {clean_url} -n {self.namespace}")
+        result = self.kubectl.exec_command(f"kubectl apply -f {_CLEAN_TIDB_CLUSTER_CR} -n {self.namespace}")
         print(f"Restored clean TiDBCluster: {result}")
 
     def inject_wrong_operator_image(self):
@@ -349,8 +356,7 @@ class K8SOperatorFaultInjector(FaultInjector):
 
     def recover_fault(self, cr_name: str):
         self._delete_yaml(cr_name)
-        clean_url = "https://raw.githubusercontent.com/pingcap/tidb-operator/v1.6.0/examples/basic/tidb-cluster.yaml"
-        command = f"kubectl apply -f {clean_url} -n {self.namespace}"
+        command = f"kubectl apply -f {_CLEAN_TIDB_CLUSTER_CR} -n {self.namespace}"
         result = self.kubectl.exec_command(command)
         print(f"Restored clean TiDBCluster: {result}")
 

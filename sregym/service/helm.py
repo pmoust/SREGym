@@ -1,14 +1,128 @@
 """Interface for helm operations"""
 
 import logging
+import re
+import shutil
 import subprocess
+import tempfile
 import time
+from pathlib import Path
+
+import yaml
 
 from sregym.service.kubectl import KubeCtl
 
 logger = logging.getLogger("all.infra.helm")
 logger.propagate = True
 logger.setLevel(logging.DEBUG)
+
+# Packaged dependency charts this repo carries for a local chart that needs
+# them, one subdirectory per chart name (the `name` field in that chart's own
+# Chart.yaml). A lite benchmark run must not fetch dependency charts over the
+# network mid-run, so Helm.install never runs `helm dependency update`; a
+# chart whose own `charts/` directory does not already have every declared
+# dependency gets the missing ones copied in from here instead.
+VENDORED_DEPENDENCY_CHARTS_DIR = Path(__file__).resolve().parents[1] / "resources" / "vendored" / "charts"
+
+
+def _version_pattern(version: str) -> str:
+    """Turn a Chart.yaml dependency version (exact, or a wildcard like
+    "5.15.*") into a regex matching the versions it allows."""
+    return re.escape(version).replace(r"\*", ".*")
+
+
+def _find_tgz(directory: Path, name: str, version: str) -> Path | None:
+    if not directory.is_dir():
+        return None
+    pattern = re.compile(rf"{re.escape(name)}-{_version_pattern(version)}\.tgz$")
+    for entry in sorted(directory.glob(f"{name}-*.tgz")):
+        if pattern.fullmatch(entry.name):
+            return entry
+    return None
+
+
+def _any_tgz_for(directory: Path, name: str) -> Path | None:
+    if not directory.is_dir():
+        return None
+    for entry in sorted(directory.glob(f"{name}-*.tgz")):
+        return entry
+    return None
+
+
+def _subchart_dir_exists(directory: Path, name: str) -> bool:
+    return (directory / name / "Chart.yaml").exists()
+
+
+def _resolve_local_chart(chart_path: str) -> tuple[str, tempfile.TemporaryDirectory | None]:
+    """Return a chart path safe to `helm install` with no network access.
+
+    Reads the chart's own declared dependencies and checks each one is
+    already present, by name, in its `charts/` directory, either as a
+    `<name>-<anything>.tgz` or an unpacked `<name>/` subdirectory; a
+    dependency missing there is copied in from
+    VENDORED_DEPENDENCY_CHARTS_DIR/<chart name>/ instead, matched on the
+    exact version the chart declares. A dependency missing from both raises
+    before any `helm` subprocess runs, naming the chart and the dependency.
+
+    Returns (path_to_pass_to_helm, tmp_dir). tmp_dir is None when
+    chart_path can be used unmodified; otherwise the caller must keep it
+    alive until the helm command has run and then call tmp_dir.cleanup().
+    """
+    chart_dir = Path(chart_path)
+    with open(chart_dir / "Chart.yaml") as f:
+        chart_yaml = yaml.safe_load(f) or {}
+
+    dependencies = chart_yaml.get("dependencies") or []
+    if not dependencies:
+        return chart_path, None
+
+    chart_name = chart_yaml.get("name", chart_dir.name)
+    own_charts_dir = chart_dir / "charts"
+    vendored_dir = VENDORED_DEPENDENCY_CHARTS_DIR / chart_name
+
+    missing = []
+    to_copy = []
+    for dependency in dependencies:
+        name = dependency["name"]
+        version = str(dependency.get("version", ""))
+        # Presence in the chart's own charts/ directory is checked by name
+        # only, matching what `helm install`/`helm template` itself does:
+        # neither one re-validates an already-packaged or already-unpacked
+        # subchart against the parent's declared version, so a chart
+        # already committed here with a dependency one patch version ahead
+        # of its own Chart.lock (drift, not a missing dependency) still
+        # installs. Picking a vendored tgz when nothing is present
+        # locally DOES match on version: that choice is ours to get right,
+        # not something already on disk to merely trust.
+        if _any_tgz_for(own_charts_dir, name) is not None:
+            continue
+        if _subchart_dir_exists(own_charts_dir, name):
+            continue
+        vendored_tgz = _find_tgz(vendored_dir, name, version)
+        if vendored_tgz is None:
+            missing.append(f"{name} {version}")
+            continue
+        to_copy.append(vendored_tgz)
+
+    if missing:
+        raise RuntimeError(
+            f"Helm chart '{chart_name}' at {chart_path} declares dependencies that are "
+            f"neither in its own charts/ directory nor vendored under "
+            f"{VENDORED_DEPENDENCY_CHARTS_DIR}/{chart_name}/: {', '.join(missing)}. "
+            "Vendor the missing dependency tgz there (see sregym/resources/vendored/"
+            "README.md) before installing this chart."
+        )
+
+    if not to_copy:
+        return chart_path, None
+
+    tmp_dir = tempfile.TemporaryDirectory(prefix="sregym-helm-chart-")
+    tmp_chart_dir = Path(tmp_dir.name) / chart_dir.name
+    shutil.copytree(chart_dir, tmp_chart_dir)
+    (tmp_chart_dir / "charts").mkdir(exist_ok=True)
+    for tgz in to_copy:
+        shutil.copy2(tgz, tmp_chart_dir / "charts" / tgz.name)
+    return str(tmp_chart_dir), tmp_dir
 
 
 class Helm:
@@ -34,42 +148,50 @@ class Helm:
 
         logger.info(f"Helm Install: {release_name} in namespace {namespace}")
 
+        tmp_dir = None
         if not remote_chart:
-            # Install dependencies for chart before installation
-            dependency_command = f"helm dependency update {chart_path}"
-            dependency_process = subprocess.Popen(
-                dependency_command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            dependency_output, dependency_error = dependency_process.communicate()
+            chart_path, tmp_dir = _resolve_local_chart(chart_path)
 
-        command = f"helm install {release_name} {chart_path} -n {namespace} --create-namespace"
+        try:
+            command = f"helm install {release_name} {chart_path} -n {namespace} --create-namespace"
 
-        if version:
-            command += f" --version {version}"
+            # --version only does anything when chart_path is a repo
+            # coordinate (e.g. "grafana/loki"): Helm resolves that name
+            # against the version this flag names. When chart_path is a
+            # local path instead (a directory, or a packaged .tgz such as
+            # the vendored charts under sregym/resources/vendored/), Helm
+            # ignores --version entirely and installs whatever that path
+            # actually contains; the file's own name is what pins the
+            # version in that case. Still passed here when a caller sets
+            # it, because a repo-coordinate caller needs it and a
+            # local-path caller passing it too is harmless, just a no-op,
+            # not wrong.
+            if version:
+                command += f" --version {version}"
 
-        if extra_args:
-            command += " " + " ".join(extra_args)
+            if extra_args:
+                command += " " + " ".join(extra_args)
 
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        output, error = process.communicate()
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output, error = process.communicate()
 
-        stderr = error.decode("utf-8").strip() if error else ""
-        stdout = output.decode("utf-8").strip() if output else ""
+            stderr = error.decode("utf-8").strip() if error else ""
+            stdout = output.decode("utf-8").strip() if output else ""
 
-        if stderr:
-            logger.warning(f"Helm install stderr output:\n{stderr}")
+            if stderr:
+                logger.warning(f"Helm install stderr output:\n{stderr}")
 
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"Helm install failed for release '{release_name}' in namespace '{namespace}'. "
-                f"Chart: {chart_path}. Error output:\n{stderr}\n"
-                f"Stdout (for context):\n{stdout}"
-            )
-        else:
-            logger.debug(stdout)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Helm install failed for release '{release_name}' in namespace '{namespace}'. "
+                    f"Chart: {chart_path}. Error output:\n{stderr}\n"
+                    f"Stdout (for context):\n{stdout}"
+                )
+            else:
+                logger.debug(stdout)
+        finally:
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
 
     @staticmethod
     def uninstall(**args):

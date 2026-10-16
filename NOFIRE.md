@@ -404,28 +404,22 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     at all: `build_mcp_image.sh` builds this repo's MCP server locally and
     `kind load`s it with `imagePullPolicy: Never`), and every chart or
     manifest still fetched from a remote Helm repo or a raw GitHub URL at
-    deploy time rather than vendored: ingress-nginx (`sregym/observer/
-    ingress_nginx.py`, `sregym/service/apps/fleet_cast.py`), chaos-mesh
-    (`sregym/generators/noise/manager.py`, `sregym/generators/noise/impl/
-    stress_injector.py`), the pingcap Helm repo's own chart coordinates
-    (`sregym/service/apps/tidb_cluster_operator.py`'s
-    `install_operator_with_values`, including the CRDs and recovery CR it
-    applies), the fleetcast and
-    flight-ticket chart repos (`sregym/service/apps/fleet_cast.py`,
-    `sregym/service/apps/flight_ticket.py`), and the TidbCluster CR's own
-    `config_url` (`sregym/service/metadata/tidb_metadata.json`'s
-    `raw.githubusercontent.com` reference). None of these run under M2
-    (`noise=false`, no sregym-lite problem deploys them), so they are listed
-    here as a known gap rather than fixed this round: with the containerd
-    `_default` host mirror fail-closed (see above), enabling noise or
-    running a problem that reaches one of these apps fails with
-    ImagePullBackOff, or a `helm repo add` network error upstream of any
-    pull, rather than silently reaching the internet. They are also outside
-    `test_image_cache_completeness.py`'s own coverage, the same as the
-    train-ticket job's own manifests: none of these apps' charts live under
-    `sregym/` or `kind/` the way a vendored one does, so the scan cannot see
-    them. Caching them (vendoring each one, pointing the installer at a
-    local copy) is future work. `build_mcp_image.sh`'s
+    deploy time rather than vendored: ingress-nginx, chaos-mesh, the pingcap
+    Helm repo's own `pingcap/tidb-operator` chart coordinates (its CRDs and
+    recovery CR ARE vendored, the chart itself is not), the fleetcast and
+    flight-ticket chart repos, and the TidbCluster CR's own `config_url`.
+    None of these run under M2 (`noise=false`, no sregym-lite problem
+    deploys them), so with the containerd `_default` host mirror fail-closed
+    (see above), enabling noise or running a problem that reaches one of
+    these apps fails closed (`ImagePullBackOff`, or a `helm repo add`
+    network error upstream of any pull) rather than silently reaching the
+    internet. They are also outside `test_image_cache_completeness.py`'s own
+    coverage, the same as the train-ticket job's own manifests: none of
+    these apps' charts live under `sregym/` or `kind/` the way a vendored
+    one does, so the scan cannot see them. Covered by sregym-lite only (see
+    the "Helm dependency vendoring" section below): extending this caching
+    and vendoring to every problem set is NOFireAI/sregym#152, not this
+    gap list. `build_mcp_image.sh`'s
     own build still used to reach Docker Hub for one thing: `mcp_server/
     Dockerfile`'s `FROM python:3.12-slim` base, a plain `docker build` on the
     box's own daemon, outside kind and outside the registry mirror's reach.
@@ -435,6 +429,42 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     mirror and `docker tag`s it to the bare name the Dockerfile asks for
     before building, so `docker build` finds it already present. A no-op on
     a developer machine with no mirror running.
+  - Loki and Promtail (the always-on telemetry stack) used to install from
+    `grafana/loki` and `grafana/promtail` Helm-repo coordinates with no
+    pinned `version`, which needed `helm repo add grafana`/`helm repo
+    update` at deploy time and could silently resolve to a different chart
+    version between runs. `sregym/service/telemetry/loki.py` now installs
+    both from vendored chart archives
+    (`sregym/resources/vendored/charts/loki-7.3.0.tgz`,
+    `.../promtail-6.17.1.tgz`, checksum-verified against the Helm repo's own
+    published index at vendor time) with `version` pinned to match, and no
+    longer adds or updates the Grafana Helm repo at all. `helm template`
+    against both, with this repo's own values files, renders only images
+    already in `image_cache.list`.
+  - Helm dependency vendoring: `sregym/service/helm.py`'s `Helm.install`
+    never runs `helm dependency update` for a local chart (`remote_chart:
+    false`), because that reaches every declared dependency's Helm
+    repository mid-run. It reads the chart's own `Chart.yaml` first and
+    checks each dependency is already present in that chart's `charts/`
+    directory (a packaged `<name>-<version>.tgz` or an unpacked `<name>/`
+    subdirectory at that version); a dependency that is not gets copied in
+    from `sregym/resources/vendored/charts/<chart name>/` instead, into a
+    scratch copy of the chart so the checked-out tree on disk is untouched.
+    A dependency present in neither place fails the install, naming the
+    chart and the dependency, before any `helm` subprocess runs. Covers
+    sregym-lite only: `sregym/observer/prometheus/prometheus` and
+    `SREGym-applications/socialNetwork/helm-chart/socialnetwork` already
+    carry every declared dependency as a committed chart, so they need
+    nothing from the vendored directory; astronomy-shop's
+    `opentelemetry-demo` chart (`SREGym-applications/astronomy-shop`
+    submodule) does not, so its five dependencies
+    (`opentelemetry-collector`, `jaeger`, `prometheus`, `grafana`,
+    `opensearch`, each pinned to the version in that chart's own
+    `Chart.lock`) are vendored under `sregym/resources/vendored/
+    charts/opentelemetry-demo/`. See that directory's README for the
+    refresh steps. Extending this to every problem set, and a periodic
+    check that these pinned versions still match what upstream resolves to,
+    are NOFireAI/sregym#152 and #153.
   - `scripts/benchmark/seed_image_cache.sh` is the one-time seed, run from a
     developer machine with AWS credentials for the bucket, never from inside
     a benchmark run. For each upstream with images in the list: start a
@@ -602,15 +632,20 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     kind node pulls resolves against this box's own cache, seeded from the
     one shared bucket, and the box itself never pulls `registry:2` or the
     kind node image from Docker Hub either (`seed_host_images.sh` above).
-    Five remote YAML manifests are still fetched the other way, round trip,
-    on every run, a known gap this change does not close:
-    `kind/setup_kind_cluster.sh`'s Calico manifest (once per cluster),
-    `Conductor.deploy_app`'s metrics-server manifest and OpenEBS operator
-    manifest (once per attempt), and the TiDB-operator problem's CRDs and
-    fault-recovery CR (`raw.githubusercontent.com`, two files). None of
-    these go through kind's containerd or this box's own docker daemon, so
-    neither the registry mirror nor the host-image cache above covers them;
-    vendoring them is future work.
+    Five remote YAML manifests used to be fetched the same way, round
+    trip, on every run: `kind/setup_kind_cluster.sh`'s Calico manifest
+    (once per cluster), `Conductor.deploy_app`'s metrics-server manifest
+    and OpenEBS operator manifest (once per attempt), and the TiDB-operator
+    problem's CRDs and fault-recovery CR (`raw.githubusercontent.com`,
+    two files). All five are now vendored under `sregym/resources/
+    vendored/` and `kind/manifests/` (see that directory's README for
+    source, version, and refresh steps) and every caller points at the
+    local file instead, so a benchmark run no longer depends on GitHub or
+    `openebs.github.io` being reachable mid-run. Because those files live
+    under `sregym/` and `kind/`, `test_image_cache_completeness.py`'s scan
+    covers their `image:` keys and (for the OpenEBS manifest's
+    `OPENEBS_IO_HELPER_IMAGE`/`CLEANUP_JOB_IMAGE` env vars) its new env
+    `value:` pattern the same as any other raw manifest in this tree.
   - The edge agent's image (`nofireai/edge:v3.6.0`, `native_arm.sh`) still
     cannot be `kind load`ed (a known, unrelated limitation: kind's import
     path requires `--all-platforms` and the image is a multi-arch manifest

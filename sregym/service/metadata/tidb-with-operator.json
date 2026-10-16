@@ -11,7 +11,7 @@
         "namespace": "tidb-cluster"
     },
     "Helm Operator Config": {
-        "CRD": "https://raw.githubusercontent.com/pingcap/tidb-operator/v1.6.0/manifests/crd.yaml",
+        "CRD": "resources/vendored/tidb-operator-crd-v1.6.0.yaml",
         "release_name": "tidb-operator",
         "chart_path": "pingcap/tidb-operator",
         "namespace": "tidb-admin",

@@ -24,7 +24,7 @@ from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.generators.noise.manager import get_noise_manager
 from sregym.observer.jaeger import Jaeger
 from sregym.observer.otel_collector import OtelCollector
-from sregym.paths import BASE_PARENT_DIR, CLUSTER_BASELINE_STATE_FILE
+from sregym.paths import BASE_DIR, BASE_PARENT_DIR, CLUSTER_BASELINE_STATE_FILE
 from sregym.service.apps.app_registry import AppRegistry
 from sregym.service.cluster_state import ClusterStateManager
 from sregym.service.dm_flakey_manager import DmFlakeyManager
@@ -36,6 +36,14 @@ from sregym.service.telemetry.loki import Loki
 from sregym.service.telemetry.prometheus import Prometheus
 
 _IMAGE_CACHE_LIST = BASE_PARENT_DIR / "scripts" / "benchmark" / "image_cache.list"
+
+# Vendored copies of manifests this box used to fetch from their upstream URL
+# at deploy time: a benchmark run must not
+# depend on GitHub or openebs.github.io being reachable mid-run. See
+# sregym/resources/vendored/README.md for the source URL, version, and
+# refresh steps for each.
+_VENDORED_METRICS_SERVER = BASE_DIR / "resources" / "vendored" / "metrics-server-components-v0.9.0.yaml"
+_VENDORED_OPENEBS_OPERATOR = BASE_DIR / "resources" / "vendored" / "openebs-operator-v3.5.0.yaml"
 
 
 def _container_images(pod_spec) -> list[str]:
@@ -979,10 +987,7 @@ class Conductor:
         self.submission_stage = "setup"
 
         self.logger.info("[DEPLOY] Setting up metrics-server…")
-        self.kubectl.exec_command(
-            "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/"
-            "releases/latest/download/components.yaml"
-        )
+        self.kubectl.exec_command(f"kubectl apply -f {_VENDORED_METRICS_SERVER}")
         self.kubectl.exec_command(
             "kubectl -n kube-system patch deployment metrics-server "
             "--type=json -p='["
@@ -999,7 +1004,7 @@ class Conductor:
 
         self.logger.info("[DEPLOY] Setting up OpenEBS…")
         self._preflight_openebs_udev_mount()
-        self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
+        self.kubectl.exec_command(f"kubectl apply -f {_VENDORED_OPENEBS_OPERATOR}")
         self.kubectl.exec_command(
             "kubectl patch storageclass openebs-hostpath "
             '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
