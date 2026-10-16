@@ -25,7 +25,650 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   injection (`SREGYM_BASELINE_SYNC_SECONDS`), the native arm's gate at the
   end of that wait, and the native arm's post-fault wait right after
   injection. The baseline wait is a candidate for upstreaming; the gate and
-  the post-fault wait are not, since they read brain-go.
+  the post-fault wait are not, since they read brain-go. `_cleanup_sync()`
+  checks observed pod state for an image-pull failure via
+  `_detect_image_pull_harness_failure()` before `recover_fault()` runs, then
+  folds a problem's own `harness_failure` (set by `recover_fault` raising)
+  into the attempt's results after `recover_fault()` returns. See the
+  harness_failure entry below (NOFireAI/sregym#145, #150). All of this runs
+  for every arm and is an upstreaming candidate: none of it reads brain-go.
+- **`harness_failure` (NOFireAI/sregym#145, #150).** Two harness failures
+  were costing whole attempts and reading as agent regressions: `wrk2-job`
+  sitting in ImagePullBackOff because `deathstarbench/wrk2-client` had never
+  been pulled onto a cold kind node, and `rolling_update_misconfigured`'s
+  standalone `custom-service` baseline deployment (`python:3.9-slim`) missing
+  its 120s healthy-rollout window for the same reason. The original fix
+  (#145) pre-pulled a problem's images onto every kind node before its fault
+  ran; #150 removed that per-attempt pre-pull (see the registry mirror entry
+  below for why and for the replacement) and reworked only the detection
+  side to not depend on a pre-pull list. What is still here, unchanged by
+  #150:
+  - A `harness_failure` field (`image_pull`, `deploy_failed`,
+    `recovery_error`), recorded per attempt so scoring can tell "the harness
+    never let this run cleanly" apart from "the agent reasoned badly".
+    `deploy_failed` is set in `main.py`'s `_deploy_failed_snapshot()`
+    (extracted from the deploy-retry loop for testability) on every row
+    whose deploy exhausted all 3 retries, for any of the reasons
+    `start_problem()` can fail that many times: a readiness wait timing out,
+    a `Helm.install` `RuntimeError`, the native arm's own gate abort, or
+    `inject_fault()` itself raising. Every one of those means the attempt
+    never ran at all. `recovery_error` is set by
+    `sregym/utils/decorators.py`'s `mark_fault_injected`: when a
+    `recover_fault` raises (previously logged as a warning and silently
+    swallowed with no trace left anywhere), it now also records
+    `self.harness_failure = "recovery_error"` on the `Problem` instance,
+    which `sregym/conductor/problems/base.py`'s `fold_harness_failure()`
+    copies into the conductor's results after cleanup. First harness_failure
+    recorded in an attempt wins (the image-pull check runs before
+    `recover_fault`, so it wins over a `recovery_error` found afterward),
+    since a recovery problem found during cleanup is usually a secondary
+    symptom of whatever already went wrong, not a second, unrelated cause.
+    `recovery_error` is reported like the others but, unlike `image_pull`,
+    does not remove the attempt from `graded`: see the `score_run.py` entry
+    below for why.
+  - The recovery-error finding this surfaced:
+    `rolling_update_misconfigured`'s `recover_rolling_update_misconfigured`
+    (`inject_virtual.py`) tried to `kubectl apply` a baseline manifest
+    (`/tmp/<service>-orig.yaml`) that `inject_rolling_update_misconfigured`
+    only ever writes *after* the baseline rollout succeeds. When the baseline
+    timed out, the file was never written, and the apply against a
+    nonexistent path failed as a plain `kubectl` stderr string (`exec_command`
+    returns that string rather than raising), so recovery looked like it ran
+    cleanly while actually doing nothing. It now raises a clear
+    `FileNotFoundError` before attempting the apply, so `mark_fault_injected`
+    can record it as above. The faulty deployment is still deleted either
+    way. `inject_rolling_update_misconfigured` also now unlinks
+    `/tmp/<service>-orig.yaml` at the very start of injection, before the
+    baseline rollout: the file is never deleted on its own, so a leftover
+    from an earlier attempt (a different namespace, a different baseline)
+    would otherwise pass the `FileNotFoundError` guard above and get applied
+    against the wrong cluster state.
+  - `sregym/generators/fault/inject_virtual.py`'s
+    `_wait_for_deployment_rollout` (used by `rolling_update_misconfigured`'s
+    standalone baseline deployment) logs rollout status and every pod's
+    full `kubectl describe pod` output (matched by the `app=<service>`
+    label) before raising its `TimeoutError`, which previously named no pod
+    and no reason at all. `sregym/service/kubectl.py`'s `wait_for_ready`
+    (used by every app's own Helm-chart readiness wait) also logs each
+    blocked container's full, untruncated kubelet message at its own
+    timeout, alongside the existing 160-char-truncated one-line summary
+    `blocking_reason()` already put in the raised exception.
+  - `scripts/benchmark/score_run.py` reports every `harness_failure` kind as
+    its own category (count, breakdown by kind, per-attempt list), always
+    counted toward `strict_pct` the same way an absent verdict already is.
+    Only `image_pull` (`GRADED_EXCLUDING_HARNESS_FAILURES`, a named constant)
+    is also excluded from `graded_pct`/`graded`. `recovery_error` is not:
+    `recover_fault` runs during cleanup, after both Diagnosis and Mitigation
+    are already graded, so it cannot have affected either verdict, and
+    excluding it would bias the remaining pool, since a recovery is more
+    likely to fail after the agent's own mitigation changed the deployment
+    (a mitigated attempt), not before. `run_stats.py` needed its own small
+    fix to match: `group_report()`'s `graded_ci95` now pairs `wilson_ci` with
+    `graded_correct`, not `correct`, so the Wilson interval's numerator
+    matches a denominator an `image_pull` row may have shrunk.
+    `readout_run.py` computes no pass rate and needed no change. All of this
+    is backward compatible with a CSV that predates the `harness_failure`
+    column: `_val()`'s `.get()` already reads a missing key the same as an
+    empty one.
+
+  What #150 changed: `image_pull` used to mean a pod stuck pulling an image
+  that was specifically in this attempt's own pre-pull list. With no
+  pre-pull list to key off, `sregym/conductor/image_pull_detection.py`
+  inverts the rule to an exclude list instead of an allow list. At the start
+  of `_cleanup_sync`, before `recover_fault` runs,
+  `Conductor._detect_image_pull_harness_failure` lists pods across the app's
+  own namespace(s) (this also covers the wrk2 job pod, which runs in the
+  app's namespace) and flags the first container or init container waiting
+  on `ErrImagePull`/`ImagePullBackOff` whose image is not one of four named,
+  fixed exceptions: `inject_app.INCORRECT_IMAGE_DEFAULT`
+  (`"app-image:latest"`, a tag that resolves on no registry, the fault for
+  the incorrect_image family of problems), `workload_imbalance.
+  KUBE_PROXY_REPLACEMENT_IMAGE` (a real but degraded kube-proxy build, the
+  fault for `WorkloadImbalance`; injected into `kube-system`, outside any
+  app's own namespace, so today's namespace-scoped scan would not reach it
+  anyway, excluded in case that scope ever widens),
+  `inject_virtual.CUSTOM_SERVICE_HANG_INIT_IMAGE` (`"busybox:1.36"`, the
+  rolling_update_misconfigured fault's init container, which sleeps forever
+  by design and is not an image-pull problem even though it keeps the pod
+  pending), and `inject_operator.WRONG_OPERATOR_IMAGE`
+  (`"pingcap/tidb-operatorr:v1.6.3"`, typo in "operatorr", a tag that
+  resolves on no registry, the fault for `operator_wrong_operator_image`).
+  `sregym/conductor/image_pull_detection.py`'s own module docstring, not
+  this list, is the source of truth for the current count; it only grows
+  when a new fault needs it, so it is tracked where `FAULT_INTRODUCED_IMAGES`
+  is actually defined rather than copied here.
+
+  A stuck image also has to have been part of the app's deployed workload
+  before the agent's first stage got control, independent of the fixed
+  exceptions above: `Conductor._inject_fault` snapshots every container and
+  init-container image across the app's own namespace(s) right after the
+  fault runs, before any stage starts, and
+  `_detect_image_pull_harness_failure` only flags an image that was in that
+  snapshot (plus the image cache, see below). This closed a real gap: an
+  image the agent itself introduces
+  later, for example a bad tag it patches into a deployment during
+  mitigation, used to read as `image_pull`, which both mislabeled a bad
+  mitigation as a harness problem and, since `image_pull` is excluded from
+  `graded` (see `score_run.py` below), dropped that attempt from scoring
+  entirely, inflating the measured pass rate by removing a genuinely bad
+  outcome instead of counting it.
+
+  `Conductor._snapshot_namespace_images` (the method behind that snapshot)
+  reads two sources per namespace, not one: every live pod's own spec, and
+  the pod template of every Deployment, StatefulSet, DaemonSet, ReplicaSet,
+  Job and CronJob (a CronJob's template lives one level deeper, at
+  `spec.job_template.spec.template.spec`). Live pods alone missed anything
+  whose pod does not exist yet at snapshot time (a CronJob that has not
+  fired, or a controller whose pods were still being created): a stuck pull
+  on one of these read as agent-introduced for the same reason a bad
+  mitigation tag used to,
+  silently dropping a real harness failure from scoring instead of flagging
+  it. `_detect_image_pull_harness_failure` also unions in every image
+  `scripts/benchmark/image_cache.list` names (`Conductor._harness_cache_images`,
+  in both the fully-qualified form that file spells a `docker.io` path out in
+  and the short form this codebase's own source actually writes), since an
+  oracle or probe pod the harness deploys outside the app's own namespace(s)
+  is still harness-owned and the namespace-scoped snapshot can never see it,
+  no matter which object kinds it covers. When any part of the snapshot
+  fails (a listing call raises, or the problem has no `.app` to resolve
+  namespaces from), `self.results["pre_agent_snapshot"] = "failed"` is set,
+  and `_detect_image_pull_harness_failure` (`conductor.py`'s
+  `_harness_cache_images()` call) reads that back to fall back to the static
+  harness cache list alone, dropping the pre-agent snapshot's own images
+  from the union rather than widening to `known_images=None`. `None` used to
+  mean "every non-excluded image is eligible to be flagged", which does the
+  opposite of what a snapshot failure should do: it flags an agent's own bad
+  mitigation tag (a bad image patched into a deployment during mitigation)
+  as `harness_failure` too, which excuses it from scoring
+  (`score_run.py`'s `GRADED_EXCLUDING_HARNESS_FAILURES` drops it from
+  `graded`) instead of counting it as the agent's mistake. The static
+  harness cache is narrower than a real pre-agent snapshot (it cannot see an
+  oracle or probe pod's image that happens not to be statically listed), so
+  a snapshot failure can still occasionally miss a genuine harness failure,
+  but no longer manufactures a false one out of the agent's own choice.
+  `self.results["pre_agent_snapshot"]` is itself surfaced in the run results
+  (`main.py` writes `self.results` into the per-attempt CSV), so a run where
+  this happened is visible rather than silently indistinguishable from a
+  clean one.
+
+  Every other image a container is observed waiting on, that was already
+  part of the deployed workload before the agent started, is harness-owned
+  by construction: it is something the deploy itself needed, not a fault the
+  problem planted and not something the agent introduced. This also fixes a
+  gap the pre-pull-era detector had and documented rather than fixed: it
+  only read `container_statuses`, so a stuck init container was a false
+  negative; the exclude-list detector reads `init_container_statuses` too,
+  with the hang-init image's own exclusion keeping that addition from
+  producing a new false positive on the one init container that is expected
+  to hang.
+  `sregym/conductor/problems/base.py`'s `Problem.EXTRA_PREPULL_IMAGES` and
+  `sregym/service/kubectl.py`'s `list_docker_nodes()` (the pre-pull step's
+  only other caller) are both gone with the module that used them.
+- **Registry mirror and the S3 image cache (NOFireAI/sregym#150).** The
+  per-attempt pre-pull above (#145) warmed every kind node's cache before
+  every attempt, on every arm, and in the problem-validation workflow. This
+  was a fix for one symptom (a cold pull losing a race against a fixed timeout)
+  that created a worse one: putting every image on all 4 of a cluster's
+  nodes, 4x the disk a cluster actually needs, filled a GitHub Actions
+  runner's disk and killed a problem-validation run with "No space left on
+  device". It was also solving the wrong layer. A kind cluster is created
+  once per slot per run (`scripts/benchmark/run_shard.sh`, `kind/
+  setup_kind_cluster.sh`), so images already stay cached on its nodes across
+  every attempt after the first; the per-attempt pre-pull only ever mattered
+  for the first attempt of each cluster, and every benchmark run starts on
+  fresh EC2 boxes, so the real cost was 12 clusters per wave (4 boxes, 3
+  slots each) each separately re-pulling the whole image set from Docker
+  Hub, which is the suspected cause of the original `wrk2-client`
+  ImagePullBackOff (#145) in the first place.
+
+  The replacement moves the pull off the critical path entirely: every image
+  the benchmark needs is seeded into one persistent, account-wide S3 bucket
+  once, ahead of time, and every benchmark box serves its kind nodes from
+  that bucket read-only, never from Docker Hub, ghcr.io, quay.io, or
+  registry.k8s.io directly.
+
+  First-run order, per account: apply the NOFireAI/terraform change that
+  creates the cache bucket and grants the benchmark instance role read-only
+  access to it (`aws/sandbox/sregym`), run `seed_image_cache.sh` and
+  `seed_host_images.sh` once each from a developer machine with AWS
+  credentials for the bucket (the first needs `crane`; the second needs
+  `docker`), then launch a run as usual. `scripts/benchmark/image_cache.list`
+  is the single source of what the first script seeds; `terraform/README.md`
+  has the same order with the exact commands.
+
+  - The bucket (`sregym-bench-registry-cache-<account-id>`, same
+    account-derived naming as the results bucket and for the same reason: a
+    run-derived name is a rename on every plan, and a rename is a replace)
+    is managed in NOFireAI/terraform's `aws/sandbox/sregym`, not in this
+    repo's own `terraform/`. It used to be declared in `terraform/s3.tf`
+    directly; moved out because this repo's Terraform applies a fresh,
+    empty state on every single run (unlike the account-wide NOFireAI/
+    terraform state), so a fixed-name bucket declared there is recreated, or
+    fails to, on a second run whose empty state tries to create a bucket the
+    first run's state already owns. `terraform/variables.tf`'s
+    `registry_cache_bucket` (default `sregym-bench-registry-cache-
+    819709950457`) names it for a box; `terraform/iam.tf` grants the path
+    where this config creates its own role (`var.instance_profile_name ==
+    ""`, the default) read-only access, matching what the bring-your-own-role
+    path's external role grants. No
+    versioning or lifecycle expiry, unlike results: a registry blob is
+    content-addressed and immutable, and a moved tag is handled by
+    re-seeding, not by S3 object versions. A benchmark box only ever reads
+    it (see "read-only" below); seeding is done by a developer with their
+    own credentials, never through the box's own role.
+  - `scripts/benchmark/registry_mirror.sh` starts, stops, and addresses one
+    `registry:2` container per upstream host (`docker.io`, `ghcr.io`,
+    `quay.io`, `registry.k8s.io`, listed by the `hosts` subcommand), each its own fixed
+    local port (5000-5003) and its own S3 key prefix, so no two upstreams'
+    repository paths have to be proven never to collide in one shared
+    prefix. `start-plain` configures `registry:2` with no `proxy.remoteurl`
+    at all, so a cache miss 404s instead of reaching out to the real
+    registry, for serving a benchmark box and for `seed_image_cache.sh`'s
+    verification pass; `start-store` configures it writable, with no
+    `proxy.remoteurl` either, as `crane copy`'s push target when seeding.
+    There used to be a third, `start-proxy`, configuring `registry:2` as a
+    pull-through (`proxy.remoteurl`) cache over the bucket. Removed:
+    distribution 2.8.3, the version this
+    pulls, has no `proxy.ttl` config key at all, so a line that believed it
+    disabled the default 7-day proxy-cache eviction did nothing, silently,
+    and a seed left running or resumed past that window could have expired
+    and deleted content a benchmark run was reading mid-run. See the seed
+    script entry below for the replacement. Both remaining modes write a
+    full generated `config.yml` rather than relying on `registry:2`'s
+    env-var flattening for nested keys, which panics ("readonly config key
+    must contain additional keys") on
+    `REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=true` rather than doing
+    what it looks like it should.
+
+    `start-plain` takes an optional network argument, `bridge` (default) or
+    `host`. `run_shard.sh` always passes `host`; every other caller
+    (`seed_image_cache.sh`, a local smoke test) leaves it at `bridge`. This
+    matters because the box's IMDS hop limit
+    is 1 (`terraform/compute.tf`), so a registry container published the
+    ordinary way, on the docker bridge with `-p`, is one network hop further
+    from the metadata endpoint than a process on the host and never gets the
+    instance role's credentials. It still looked healthy, because the
+    readiness check only hit the registry's base route, which never touches
+    S3; the first pull that actually needed the storage backend then failed,
+    every time. `host` network mode puts the registry on the box's own
+    network namespace instead, the same one IMDS-reaching code on the host
+    itself runs in, and the readiness check now polls
+    `/v2/_catalog` (which walks the configured storage backend to list
+    repositories) rather than `/v2/`, so a credentials or connectivity
+    problem fails loudly at startup, with the registry's own log printed by
+    the caller, instead of silently inside a slot. Confirmed on a Mac
+    (`--network host` does not behave like a real Linux host under Docker
+    Desktop, so this part could not be proven end to end there): starting a
+    registry with `--network host` listening on a chosen port is unreachable
+    from the Mac side at all, which is itself the expected Docker-Desktop
+    caveat, not a bug in the script.
+  - `scripts/benchmark/seed_host_images.sh` caches every image a box's own
+    docker daemon pulls or builds directly, never through the in-cluster
+    containerd the mirror above covers: `registry:2` itself (the mirror
+    containers have to exist before anything can pull through them, so this
+    one pull cannot be moved behind itself), the kind node image
+    (`jacksonarthurclark/aiopslab-kind-x86`, box and kind node are always
+    amd64; the `-arm` variant is for an Apple Silicon developer's own local
+    cluster, a path a benchmark box never takes), and brain-go's own host
+    images: every compose
+    service with no `build` key (`postgres` -> `pgvector/pgvector`,
+    `localstack` -> `localstack/localstack`, `temporal` ->
+    `temporalio/auto-setup`, `temporal-ui` -> `temporalio/ui`, `dashboard`
+    -> `node`, `entry` -> `caddy`) plus the base images any build-keyed
+    service's Dockerfile resolves FROM (`golang`, the `GO_VERSION` build
+    stage; `alpine`, the `RUNTIME_IMAGE` runtime stage). This replaced a
+    fixed list pinned to whatever `origin/main`
+    looked like when this script was last edited with a derivation against
+    `--brain-go-ref` (`scripts/benchmark/brain_go_images.py`, reading
+    `docker compose config` and the Dockerfile's own ARG defaults from a
+    temporary, read-only `git worktree` of that ref): a pinned
+    `brain_go_ref` (what a benchmark box actually checks out) can set a
+    different `GO_VERSION`, and its compose file a different dashboard/entry
+    tag, than `origin/main` does at any later moment this script is read,
+    which is exactly what the earlier fixed list had already drifted into
+    (confirmed against `run.tfvars`/`smoke-pin.tfvars`'s pinned ref:
+    `GO_VERSION=1.26.6`, `node:22.9.0-alpine`, where the fixed list had
+    `golang:1.26.9` and no entry at all for `node` or `caddy`, so the
+    dashboard and entry images were a live, undocumented Docker Hub pull
+    this whole time). The first
+    two (`registry:2`, the kind node image) were a documented, deliberate
+    gap, pulled from Docker Hub once per box; the owner decided there is no
+    exception to "a benchmark run never touches Docker Hub", which the
+    brain-go compose stack (every arm runs it) was still violating until
+    that round, and, for `dashboard`/`entry`, until this one. Run once per
+    `--brain-go-ref`, pulls each image by tag, `docker save`s it, and
+    uploads the tarball to `s3://<bucket>/host-images/<name>-<image-id>.tar`
+    alongside a `host-images/<name>.digest` pointer holding that same local
+    image ID. That image ID is `docker inspect`'s `.Id` field, not a
+    registry digest (a registry digest is how a *pull* names an image and is
+    not reconstructable from a later `docker load`, while the image ID is),
+    but it is not a single fixed thing either: on the classic (graph-driver)
+    image store `.Id` is a hash of the image's config JSON, while on the
+    newer containerd image store (the default on recent Docker Desktop and
+    Docker Engine releases) `.Id` is the manifest/index digest instead. Both
+    are locally reproducible and both round-trip through `docker save`/
+    `docker load` unchanged, which is all `load_host_image`'s own check
+    needs, but neither is a full content-addressed lock of every layer byte;
+    a sha256 lock over the whole image is a known gap, not yet built (see
+    the `seed_image_cache.sh`/`crane` path above for the harder guarantee
+    that *is* built, which this host-image cache does not have).
+    `scripts/benchmark/host_image_lib.sh`'s `load_host_image`, shared by
+    `run_shard.sh` (the first two images) and `setup_brain_go.sh` (the rest,
+    loaded before `make up`), reads the pointer, downloads that exact
+    tarball, `docker load`s it, and checks the loaded image's own ID against
+    the pointer before either caller does anything with it, failing loudly
+    if the pointer, the tarball, or the loaded ID do not match. Every
+    benchmark box boots from a fresh EC2 instance, so that tag exists
+    locally only because of this load, and `registry_mirror.sh`'s `docker
+    run registry:2`, kind's own node creation, and brain-go's `docker
+    compose build`/`up` never have a reason to contact a registry for one
+    again. Done once per box, not once per slot: later `kind create cluster`
+    calls in the same shard reuse the same loaded image.
+  - `scripts/benchmark/image_cache.list` is every image, one per line as
+    `<host>/<path>:<tag>`. Built from `helm template` of every app's own
+    Helm chart (the same derivation the per-attempt pre-pull used to do at
+    deploy time, now run once here instead of once per attempt), the raw
+    manifests for the two apps that skip Helm (`hotel_reservation`,
+    `blueprint_hotel_reservation`), the always-on telemetry stack
+    (prometheus, loki, promtail charts; jaeger, otel-collector, khaos raw
+    manifests), the wrk2 load generator's own job template, the
+    custom-service fault's two hand-built images, the edge agent's pinned
+    release, the TidbCluster CR's operator-rendered pd/tikv/tidb images and
+    helper default (`SREGym-applications/FleetCast/tidb-operator/
+    tidb-cluster.yaml`, confirmed against tidb-operator v1.6.0's own
+    defaulting source, not a claim this list's own scanner can verify: that
+    submodule is outside `tests/benchmark/test_image_cache_completeness.py`'s
+    `sregym/`/`kind/` scan roots), and a grep of every fault injector and
+    problem file for a real (not `app-image:latest`-style fake) image
+    literal, including the images a fault swaps in on purpose
+    (`workload_imbalance`'s kube-proxy replacement, `faulty_image_correlated`'s
+    and `update_incompatible_correlated`'s bad-but-real versions), which
+    still have to pull successfully for the fault to inject at all. Not
+    generated by a script, so a missed image is plausible; the seed script's
+    own verification pass is what catches one before it reaches a benchmark
+    run, not a claim that this list is exhaustive by construction. `tests/
+    benchmark/test_image_cache_completeness.py`'s scan is a second,
+    independent check, verifying the lite problem set fully; it scans `.py`
+    files for an `--image=<ref>` shell flag inside an f-string and for
+    embedded YAML `image:` text (not just real Python dict/kwarg/constant
+    syntax), and allows a leading underscore on an `*_IMAGE` constant name.
+    `registry:2`
+    and the kind node image are cached too (see `seed_host_images.sh`
+    above), under a different S3 prefix, not as lines in this list: the HOST
+    pulls both directly, so neither is a `<host>/<path>:<tag>` line
+    `registry_mirror.sh` could route. The file's remaining documented,
+    deliberate gaps: train-ticket's own per-microservice images (applied by
+    a post-install Job, `ghcr.io/sregym/train-ticket-deploy`, whose own
+    image is cached but whose own `kubectl apply` calls are not visible to
+    `helm template`), `ghcr.io/sregym/sregym-mcp:latest` (never pulled
+    at all: `build_mcp_image.sh` builds this repo's MCP server locally and
+    `kind load`s it with `imagePullPolicy: Never`), and every chart or
+    manifest still fetched from a remote Helm repo or a raw GitHub URL at
+    deploy time rather than vendored: ingress-nginx (`sregym/observer/
+    ingress_nginx.py`, `sregym/service/apps/fleet_cast.py`), chaos-mesh
+    (`sregym/generators/noise/manager.py`, `sregym/generators/noise/impl/
+    stress_injector.py`), the pingcap Helm repo's own chart coordinates
+    (`sregym/service/apps/tidb_cluster_operator.py`'s
+    `install_operator_with_values`, including the CRDs and recovery CR it
+    applies), the fleetcast and
+    flight-ticket chart repos (`sregym/service/apps/fleet_cast.py`,
+    `sregym/service/apps/flight_ticket.py`), and the TidbCluster CR's own
+    `config_url` (`sregym/service/metadata/tidb_metadata.json`'s
+    `raw.githubusercontent.com` reference). None of these run under M2
+    (`noise=false`, no sregym-lite problem deploys them), so they are listed
+    here as a known gap rather than fixed this round: with the containerd
+    `_default` host mirror fail-closed (see above), enabling noise or
+    running a problem that reaches one of these apps fails with
+    ImagePullBackOff, or a `helm repo add` network error upstream of any
+    pull, rather than silently reaching the internet. They are also outside
+    `test_image_cache_completeness.py`'s own coverage, the same as the
+    train-ticket job's own manifests: none of these apps' charts live under
+    `sregym/` or `kind/` the way a vendored one does, so the scan cannot see
+    them. Caching them (vendoring each one, pointing the installer at a
+    local copy) is future work. `build_mcp_image.sh`'s
+    own build still used to reach Docker Hub for one thing: `mcp_server/
+    Dockerfile`'s `FROM python:3.12-slim` base, a plain `docker build` on the
+    box's own daemon, outside kind and outside the registry mirror's reach.
+    Fixed the same way as brain-go's
+    build-base images below: when `SREGYM_REGISTRY_MIRROR_ADDR` is set, the
+    script pulls `python:3.12-slim` through the already-seeded docker.io
+    mirror and `docker tag`s it to the bare name the Dockerfile asks for
+    before building, so `docker build` finds it already present. A no-op on
+    a developer machine with no mirror running.
+  - `scripts/benchmark/seed_image_cache.sh` is the one-time seed, run from a
+    developer machine with AWS credentials for the bucket, never from inside
+    a benchmark run. For each upstream with images in the list: start a
+    writable, non-proxying registry (`start-store`) over the bucket, `crane
+    copy --platform linux/amd64` every one of its images straight from the
+    real upstream into it, stop it. Then, as verification: start a *fresh*,
+    read-only registry (`start-plain`) over the same bucket and `crane
+    validate --remote` every image through that, which fetches the manifest
+    and every blob it references, not just the manifest. This replaced a
+    `docker pull`-based seed-then-reverify: `docker pull` skips a layer already present in the local docker
+    store, so a verification pull could report success while the bucket was
+    missing a blob a different image happened to share, and `docker rmi` of
+    one tag does not remove layers other images still reference. `crane`
+    never touches a local docker store at all, closing that gap, and needs
+    no `docker`: `brew install crane`, or see the script's own header for
+    why a container image was not used instead. Exits non-zero naming every
+    image that failed either pass. Idempotent: safe to re-run after
+    `image_cache.list` gains a line, and that is also when to re-run it.
+    There is no background job that keeps the bucket in sync with the list.
+    Credentials: on a benchmark box, none are passed to the registry
+    container at all, and its S3 client falls back to the instance role via
+    the EC2 metadata endpoint (only reachable because `run_shard.sh` starts
+    that registry in `host` network mode; see above). From a developer
+    machine with an SSO profile, that fallback does not reach
+    `~/.aws/sso/cache` the way the AWS CLI does, so `registry_mirror.sh`
+    resolves `$AWS_PROFILE` to temporary static keys with `aws configure
+    export-credentials` (the same thing the CLI already does internally for
+    an SSO profile) and passes those through as plain environment variables,
+    which every AWS SDK reads. Verified locally end to end with the
+    filesystem storage driver: `crane copy` into a `start-store` registry,
+    `crane validate --remote` against a fresh `start-plain` registry over
+    the same storage passing for a cached image and failing
+    (`MANIFEST_UNKNOWN`) for an uncached one.
+  - Path layout matters and is not automatic, which is why the verification
+    pass above exists. Confirmed with the filesystem-driver smoke this
+    change's own PR ran: a client pulling a Docker Hub "official" image
+    (`busybox`, `mongo`, ...) through a mirror whose hostname is not
+    literally `docker.io` does not get the implicit `library/` prefix the
+    real Docker Hub client applies: `docker pull <mirror>/busybox:1.36`
+    fails with `not found`, `docker pull <mirror>/library/busybox:1.36`
+    succeeds, and a plain registry started over the exact same storage
+    serves that same `library/busybox` path back with no proxy configured
+    at all. `containerd`'s own mirror redirection applies the same
+    normalization before substituting the endpoint, so this is also what a
+    kind node's containerd requests, but it is a real, documented gotcha,
+    not a safe assumption, which is why `image_cache.list` spells every
+    docker.io path out fully (`docker.io/library/busybox:1.36`, not
+    `docker.io/busybox:1.36`) rather than leaving the prefix implicit.
+  - `kind/setup_kind_cluster.sh` reads `SREGYM_REGISTRY_MIRROR_ADDR` and, when
+    it is set, patches every cluster it creates (all three arms, since all
+    three call this one script) two ways, on top of whatever `KIND_CONFIG`
+    this call already resolved to: the committed file for the MCP and edge
+    arms, or native's own `apiServerAddress`-patched copy for the native arm.
+
+    First, a `containerdConfigPatches` block setting
+    `[plugins."io.containerd.grpc.v1.cri".registry] config_path =
+    "/etc/containerd/certs.d"`, with no `registry.mirrors` entry at all.
+    This replaced an earlier version of this patch that set
+    `registry.mirrors."<host>".endpoint` instead (the shape upstream's own
+    commented-out `kind-config-*.yaml` block uses), which turned out to be
+    broken: containerd v2 (the
+    `kindest/node:v1.32.1` base image runs containerd v2.0.2) appends the
+    real upstream as a last fallback endpoint for a host configured through
+    `registry.mirrors` and silently falls through to it on a 404 instead of
+    failing the pull, which defeats the point of a benchmark run never
+    touching the public internet. Confirmed locally with two kind clusters
+    built from `kindest/node:v1.32.1` against the same local registry,
+    seeded with one real image and missing another real one: the
+    `registry.mirrors`-patched cluster pulled the missing image anyway, by
+    reaching real Docker Hub; the `config_path`-patched cluster failed that
+    same pull outright (`not found`), with no fallback attempted.
+
+    Second, a `/etc/containerd/certs.d/<host>/hosts.toml` for each of the
+    four upstream hosts, containing only `server = "http://<addr>:<port>"`
+    and no upstream `[host]` entry (a bare `server` line with no `[host]`
+    table is enough on its own, confirmed locally: containerd treats it as
+    the sole endpoint for that host, nothing to fall through to), plus a
+    fifth, `/etc/containerd/certs.d/_default/hosts.toml`, pointing at
+    `http://127.0.0.1:1` (a loopback port nothing listens on). `_default`
+    matters because with no per-host directory
+    for a given host, `config_path`'s own fallback is containerd's ordinary,
+    unmediated upstream resolution, i.e. a real pull, to the real internet.
+    The four hosts.toml files only cover the four upstreams this benchmark
+    mirrors; anything else (a fault that swaps in an image from a fifth
+    host, a typo, an `image_cache.list` addition that lands before its host
+    is wired up here) would otherwise pull from the internet with no failure
+    at all. Confirmed locally with `crictl pull` (the path kubelet actually
+    uses; `ctr images pull` does not consult this config and is not a valid
+    way to test it): removing just the `_default` file let a pull from an
+    unlisted host (`public.ecr.aws`) succeed for real; restoring it made
+    that same pull fail closed with "connection refused".
+
+    All five files are generated and written before `kind create cluster`
+    runs, then mounted onto every node's existing `extraMounts` list (the
+    same list `kind-config-*.yaml` already uses for `/run/udev`), not copied
+    in with `docker cp` after the cluster exists as an earlier version of
+    this patch did. A node starts serving pulls the instant its container
+    boots, before a post-create copy step would otherwise get a chance to
+    run, so an early pod (kube-proxy, a CNI daemon) scheduled in that window
+    pulled through whatever `config_path` resolved to at that moment (an
+    empty or absent `certs.d`), the same real-internet gap all over again.
+    Mounting removes that window instead of narrowing it. The mounted
+    directory is a live bind, not a one-time copy, so it is cleaned up on
+    the host side only if `kind create cluster` itself fails (a trap);
+    deleting it after a successful create would empty the very mount every
+    later pull on that node depends on (confirmed locally: killing the
+    script right after a successful create left `/etc/containerd/certs.d`
+    empty on the running node). Each slot creates exactly one cluster for
+    its whole lifetime (`run_shard.sh`'s `run_slot`, not once per attempt),
+    so the directory is reclaimed anyway when the box terminates at the end
+    of the shard, the same way the generated `MIRRORED_CONFIG` file already
+    is. If a future `KIND_CONFIG` ever has a node with no `extraMounts` key
+    to extend, the script fails loudly rather than silently mounting nothing
+    for that node.
+
+    Unset (any developer's own machine, with no mirror running), every
+    cluster is created byte-for-byte as before: no patch, no behavior
+    change, same as before #150.
+  - `scripts/benchmark/run_shard.sh` loads and verifies the two host images
+    (`seed_host_images.sh` above) first, before anything else in this
+    section: the registry mirror containers it starts next are themselves
+    one of those two images. It then resolves the box's own RFC1918 address
+    (`SREGYM_PRIVATE_IP`, now for every arm, not only native and edge: before
+    #150 only those two needed it) once, before any kind cluster. It is how
+    a kind node, itself a container on its own `kind` docker network,
+    reaches back out to the registry mirror containers the same way
+    brain-go's own container already reaches the kind API server through
+    this address (see `native_arm.sh`'s `kind-config`). It then starts all
+    four upstream registries in plain, `host`-network mode, bound to
+    `0.0.0.0` so both the
+    box's own loopback (the preflight below) and a kind node (through
+    `SREGYM_PRIVATE_IP`) can reach them, and exports
+    `SREGYM_REGISTRY_MIRROR_ADDR` for `setup_kind_cluster.sh` above. Before
+    any slot starts, it then preflights every image in `image_cache.list`
+    against these same registries with `scripts/benchmark/
+    registry_preflight.py`, not a plain `docker pull`: a GET of the
+    manifest (resolving a manifest list to its linux/amd64 child first) and
+    a HEAD of the config blob and every layer blob it names, the same two
+    requests a real pull makes short of writing the layer bytes to disk,
+    with none of the cost of filling the box's own docker image store for
+    images that store never otherwise touches (see that script's own
+    header). A plain registry has no
+    fallback to the real upstream, so a gap here would otherwise surface as
+    a cold ImagePullBackOff deep inside a slot, exactly the failure mode
+    #150 exists to remove, not reintroduce by a different path. A missing
+    image aborts the whole shard before it starts, naming what is missing,
+    rather than failing one attempt well into a run. An `image_cache.list`
+    line naming a host the mirror scripts do not recognize also aborts the
+    shard rather than being silently skipped: a typo'd host used to drop
+    that one image from the preflight check entirely. On a failure, the
+    preflight also prints the first failed check's own error output and the
+    last 50 lines of that host's registry container log, since a plain
+    "missing from the cache" message cannot by itself tell a genuinely
+    absent image apart from an S3 permission or
+    connectivity error on the registry's own backend.
+  - Read-only is enforced four ways, not one: a node's containerd has no
+    `registry.mirrors` fallback to reach for in the first place (`config_path`
+    and `registry.mirrors` are mutually exclusive, and only `config_path` is
+    set, per the `setup_kind_cluster.sh` entry above); `_default`'s loopback
+    endpoint fails closed any host not in that config at all; the plain
+    registries started on a benchmark box carry no `proxy.remoteurl`, so even
+    a request that somehow got past the hosts.toml layer would have nothing
+    to fall through to; and the preflight above means nothing should ever
+    actually miss in the first place. Between them, every CONTAINER IMAGE a
+    kind node pulls resolves against this box's own cache, seeded from the
+    one shared bucket, and the box itself never pulls `registry:2` or the
+    kind node image from Docker Hub either (`seed_host_images.sh` above).
+    Five remote YAML manifests are still fetched the other way, round trip,
+    on every run, a known gap this change does not close:
+    `kind/setup_kind_cluster.sh`'s Calico manifest (once per cluster),
+    `Conductor.deploy_app`'s metrics-server manifest and OpenEBS operator
+    manifest (once per attempt), and the TiDB-operator problem's CRDs and
+    fault-recovery CR (`raw.githubusercontent.com`, two files). None of
+    these go through kind's containerd or this box's own docker daemon, so
+    neither the registry mirror nor the host-image cache above covers them;
+    vendoring them is future work.
+  - The edge agent's image (`nofireai/edge:v3.6.0`, `native_arm.sh`) still
+    cannot be `kind load`ed (a known, unrelated limitation: kind's import
+    path requires `--all-platforms` and the image is a multi-arch manifest
+    list, so the node has to pull it itself either way) but is mirrored like
+    every other docker.io image since #150: the pull still happens, through
+    the box's own cache instead of Docker Hub directly. The effective image
+    (`SREGYM_EDGE_IMAGE`, when set, overrides the default) is also checked
+    by the registry-cache preflight, so an overridden image that is not
+    cached fails the shard before any slot starts rather than mid-run.
+  - Every arm (not only native and edge) runs brain-go beside the harness,
+    and `setup_brain_go.sh` brings it up with `make up` before `run_shard.sh`
+    exists: `make up` runs `docker compose --env-file deploy/.env up -d`
+    with no `--profile` flag, against the root `docker-compose.yml`
+    (`include:`s `deploy/docker-compose.yml` and
+    `deploy/docker-compose.clickstack.yml`) and no override file. Every
+    service with no `build` key pulls its own `image:` tag directly
+    (`postgres` -> `pgvector/pgvector`, `localstack` -> `localstack/
+    localstack`, `temporal` -> `temporalio/auto-setup`, `temporal-ui` ->
+    `temporalio/ui`, `dashboard` -> `node`, `entry` -> `caddy`); every
+    service with a `build` key (`api`, `chat`, `edge`, `mcp`, `migrate`,
+    `seed`, `tworker`) builds from `docker/Dockerfile`, `FROM
+    golang:<GO_VERSION>` (build stage) and `FROM alpine:<RUNTIME_IMAGE's
+    tag>` (runtime stage). `docker compose build`/`up -d`, on the box's own
+    daemon, bypasses kind and the registry mirror entirely, and was the one
+    host-level Docker Hub reach every arm still had (`dashboard` and
+    `entry` were a second, undocumented instance of the same gap, see
+    `seed_host_images.sh` above). `setup_brain_go.sh` derives the exact set with
+    `scripts/benchmark/brain_go_images.py` against the ref actually checked
+    out at `$BRAIN_GO_DIR` and loads every one of them from the S3
+    host-image cache (`seed_host_images.sh` above) before calling `make up`,
+    the same `load_host_image` step `run_shard.sh` uses for `registry:2` and
+    the kind node image; a gate right after re-checks every derived image
+    with `docker image inspect` and dies naming every one still absent,
+    together, rather than stopping at the first. Compose's own default
+    `pull_policy` ("missing": pull only if no matching local image exists)
+    then finds every one of them already present and never asks Docker Hub
+    for anything; a derivation failure, a load failure, or a gate miss fails
+    this script loudly, before `make up` runs, rather than partway through
+    it. brain-go's own Makefile and compose file are not ours to add a
+    `--pull never`/`pull_policy: never` to (confirmed against both pinned
+    tfvars refs and `origin/main`: neither sets one), so this relies on the
+    already-loaded exact tag satisfying the "missing" policy rather than
+    forcing the policy itself; the fail-loud load step before `make up`
+    is what actually guarantees no pull happens on a benchmark box.
+  - Remaining network fetches on a benchmark box's own path are package
+    installs, not image or manifest fetches, and are intentionally not
+    cached by any of the above: `uv sync` (PyPI, this repo's own Python
+    deps), `go mod download` and the private `nofire-code-miner` module over
+    ssh (brain-go's own build, `docker/Dockerfile`), `apt-get
+    install`/`curl`-installed `kubectl` and `uv` inside `mcp_server/
+    Dockerfile`'s build, and the dashboard's own `corepack prepare --activate
+    && pnpm install --frozen-lockfile` (npm registry, the `dashboard`
+    service's command in brain-go's root `docker-compose.yml`, which runs on
+    every `make up` since that service carries no `build` key to cache an
+    end result for). None of these are container image pulls, so none
+    belong in `image_cache.list` or the host-image cache; they are listed
+    here so "never pulls a container image from Docker Hub" is not read as
+    "makes no network calls at all".
 - `agents.yaml` — `brain` agent entry; `container_isolation: false` on
   host-run agents.
 - `main.py` — `SREGYM_SKIP_JUDGE_PREFLIGHT`, the per-attempt `arm-native.json`
@@ -82,7 +725,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   same host does not collide with the default name `kind`, and `KIND_CONFIG`,
   so the native benchmark arm can pass a copy of the committed config with the
   API server on the host's private address. Both candidates for upstreaming;
-  with neither set the behaviour is unchanged.
+  with neither set the behaviour is unchanged. `SREGYM_REGISTRY_MIRROR_ADDR`
+  (NOFireAI/sregym#150, see the registry mirror entry above) is mirror-specific
+  and not a candidate: with it unset, every cluster is still created
+  byte-for-byte as before.
 - `.github/workflows/smoke-test.yml`: before creating the kind cluster, the
   Integration Smoke Test reclaims about 24 GB on `/` by removing toolchains the
   job does not use (Android, .NET, GHC, CodeQL) and pruning Docker, printing

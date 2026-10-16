@@ -17,6 +17,11 @@ SHARD_COUNT="${shard_count}"
 REGION="${region}"
 BUCKET="${bucket}"
 S3_PREFIX="s3://${bucket}/${run_id}/shard-${shard_index}"
+# Read-only image cache (NOFireAI/sregym#150), seeded ahead of time by
+# scripts/benchmark/seed_image_cache.sh. run_shard.sh exports this so
+# registry_mirror.sh can start each upstream's registry:2 against it.
+REGISTRY_CACHE_BUCKET="${registry_cache_bucket}"
+export REGISTRY_CACHE_BUCKET
 
 # Keyed by instance, not by shard. A spot replacement boots as the same shard
 # and would otherwise overwrite the original's manifest under one fixed name,

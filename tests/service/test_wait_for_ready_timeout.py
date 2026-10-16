@@ -8,6 +8,7 @@ could say which pod or why, because the instances were gone before anyone
 looked (sregym#56).
 """
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -192,3 +193,36 @@ def test_a_state_object_without_a_message_field_does_not_break_the_report():
     assert "c=ImagePullBackOff" in message
     assert "1 not ready" in message
     assert "unreachable" not in message
+
+
+def test_the_timeout_logs_the_full_untruncated_pull_failure_message():
+    """wait_for_ready passes the last poll's pods to
+    _log_full_pull_failure_details at its own timeout (#145), which is what
+    actually lets a pull failure's full kubelet message reach the archived
+    log. The raised exception's own message above is truncated to 160
+    characters. This pins the wiring, not just _log_full_pull_failure_details
+    in isolation (already covered in test_kubectl_image_pull_logging.py)."""
+    long_message = 'Back-off pulling image "memcached:1.6-alpine": ' + ("detail " * 40)
+    pods = [
+        _pod(
+            "loki-results-cache-0",
+            containers=[("exporter", False, _waiting_with("ImagePullBackOff", long_message))],
+        )
+    ]
+
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger("all.infra.kubectl")
+    handler = _Collector()
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        _timeout_message([pods])
+    finally:
+        logger.removeHandler(handler)
+
+    assert any(long_message in record.getMessage() for record in records)

@@ -119,3 +119,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "results" {
     }
   }
 }
+
+# The S3-backed registry cache (NOFireAI/sregym#150) is not managed here.
+# It used to be: one more account-derived-name bucket, created the same way
+# as the results bucket above. That was wrong for a bucket this config does
+# not actually own the lifecycle of. Every run applies this config fresh
+# against a brand-new local state (unlike the results bucket, which is
+# imported or already tracked in state from a prior apply in the same
+# account), so a fixed-name bucket declared as a resource here is recreated,
+# or fails to, on every single run: a second run's empty state tries to
+# create a bucket the first run's state already owns.
+#
+# The cache is a single, permanent, pre-seeded resource (seeded once by
+# scripts/benchmark/seed_image_cache.sh, run by a developer with their own
+# AWS credentials, never by a benchmark box) that every run only reads from.
+# It belongs in the account's standing infrastructure, not a run's ephemeral
+# one: NOFireAI/terraform's aws/sandbox/sregym/main.tf owns the bucket and
+# the instance role's read grant (see that repo's own README and this
+# repo's terraform/README.md for the apply order). var.registry_cache_bucket
+# below names it for the box; iam.tf's grant for the path where this config
+# creates its own role (var.instance_profile_name == "", the default) is the
+# only read access this config still grants directly.

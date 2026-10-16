@@ -72,6 +72,29 @@ data "aws_iam_policy_document" "bench" {
     resources = ["arn:aws:s3:::${local.bucket}/${local.run_id}/*"]
   }
 
+  # The registry cache (NOFireAI/sregym#150), managed in NOFireAI/terraform's
+  # aws/sandbox/sregym, not here (see s3.tf). Read-only: run_shard.sh starts
+  # each upstream's registry:2 in plain mode with no proxy.remoteurl, so a
+  # benchmark box only ever GETs from this bucket, never writes to it.
+  # Seeding is scripts/benchmark/seed_image_cache.sh's job, run by a
+  # developer with their own AWS credentials against their own grant, not
+  # through this role at all. This statement only matters when this config
+  # creates its own role (var.instance_profile_name == "", the default):
+  # the bring-your-own-role path uses a profile this config does not create,
+  # whose own read grant lives in the external terraform alongside the
+  # bucket.
+  statement {
+    sid       = "RegistryCacheBucket"
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = ["arn:aws:s3:::${local.registry_cache_bucket}"]
+  }
+
+  statement {
+    sid       = "RegistryCacheObjects"
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::${local.registry_cache_bucket}/*"]
+  }
+
   statement {
     sid = "Bedrock"
     actions = [

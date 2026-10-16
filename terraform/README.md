@@ -43,6 +43,55 @@ document in `iam.tf` (`data.aws_iam_policy_document.bench`) verbatim, and the
 only permission the caller then needs is `iam:PassRole` scoped to that one
 role's ARN.
 
+### Image cache (one-time, per account)
+
+Every benchmark box reads its container images from a pre-seeded, read-only
+S3-backed registry cache (NOFireAI/sregym#150); a box never pulls from
+Docker Hub, ghcr.io, quay.io or registry.k8s.io directly. Before the first
+launch on a new account, in this order:
+
+1. Apply the NOFireAI/terraform change that creates the cache bucket
+   (`sregym-bench-registry-cache-<account-id>`) and grants the benchmark
+   instance role read-only access to it (`aws/sandbox/sregym`). This repo's
+   own Terraform does not create that bucket; see `s3.tf`'s own comment for
+   why.
+2. From a developer machine (needs `crane`: `brew install crane`; never
+   from a benchmark box), run `scripts/benchmark/seed_image_cache.sh
+   --bucket sregym-bench-registry-cache-<account-id>` once.
+   `scripts/benchmark/image_cache.list` is the single source of what gets
+   seeded; re-run the seed script whenever that file gains a line or an
+   existing tag changes meaning.
+3. From the same machine, run `scripts/benchmark/seed_host_images.sh
+   --bucket sregym-bench-registry-cache-<account-id> --brain-go-ref
+   <the brain_go_ref this run's tfvars pins>` once. This covers every image
+   a box's own docker daemon pulls or builds directly rather than through
+   the registry mirror: `registry:2`, the kind node image, and brain-go's
+   own compose-pulled and build-base images (derived from the exact
+   `--brain-go-ref` checkout, so a different ref can need a different set);
+   see that script's header for why these need a separate seed step.
+4. Launch a run as usual (`launch.sh`). `run_shard.sh` preflights every
+   image in the list against the cache before any slot starts, and loads
+   and verifies `registry:2` and the kind node image before that;
+   `setup_brain_go.sh` does the same for brain-go's own host images before
+   `make up`. Any of these abort loudly, naming what is missing, if step 2
+   or 3 was skipped, stale, or run for a different `--brain-go-ref` than
+   the one this launch pins.
+
+The image list (step 2) is seeded once per account. Brain-go's host images
+(step 3) are seeded once per `brain_go_ref`: a new ref needs its own
+`seed_host_images.sh --brain-go-ref` run before the first launch that pins
+it, even if step 2 and an earlier ref's step 3 already ran.
+
+See `NOFIRE.md`'s registry mirror section for the full design.
+
+`registry_cache_bucket` reaches the bootstrap template as a plain
+`var.registry_cache_bucket` passthrough (`main.tf`'s
+`local.registry_cache_bucket`, read by `compute.tf`), not a value this
+config derives or creates, so PR #151's planned `bootstrap_inputs.tf`
+refactor (`local.bootstrap_common`, merged into both `compute.tf`'s and the
+Auto Scaling group render's templatefile call) only needs one new line,
+`registry_cache_bucket = var.registry_cache_bucket`, in that map.
+
 ## Running
 
 Two named scenarios cover almost every launch. `smoke-pin.tfvars` is a third,

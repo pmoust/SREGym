@@ -37,6 +37,8 @@ _COLUMNS = [
     "tokens_cache_read",
     "tokens_cache_write",
     "tool_calls",
+    "harness_failure",
+    "pre_agent_snapshot",
 ]
 
 
@@ -53,7 +55,19 @@ def _run(tmp_path, rows):
     return tmp_path
 
 
-def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy_attempts="", tokens=None):
+def _row(
+    pid,
+    attempt=1,
+    diag="",
+    mitig="",
+    ttl="",
+    ttm="",
+    timed_out="",
+    deploy_attempts="",
+    tokens=None,
+    harness_failure="",
+    pre_agent_snapshot="",
+):
     tokens = tokens or {}
     return {
         "problem_id": pid,
@@ -70,6 +84,8 @@ def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", timed_out="", deploy
         "tokens_cache_read": tokens.get("cache_read", ""),
         "tokens_cache_write": tokens.get("cache_write", ""),
         "tool_calls": tokens.get("tool_calls", ""),
+        "harness_failure": harness_failure,
+        "pre_agent_snapshot": pre_agent_snapshot,
     }
 
 
@@ -815,6 +831,147 @@ def test_deploy_failed_is_reported_as_its_own_category_not_folded_into_a_rate(tm
     out = score_run.render(s, None)
     assert "deploy exhausted: 1 attempt(s)" in out
     assert "b attempt 1" in out
+
+
+# --- harness_failure: image_pull, deploy_failed, recovery_error (#145) ------
+#
+# A deploy_failed row never ran at all and is already excluded from every
+# rate because it never produces a run_N directory load() reads (same
+# mechanism as the plain deploy_failed marker above). image_pull and
+# recovery_error rows did run and do carry a real verdict, so they stay in
+# "rows" and in the strict rate. Only image_pull (score_run.
+# GRADED_EXCLUDING_HARNESS_FAILURES) is also taken out of graded:
+# recovery_error runs during cleanup, after grading, so it cannot have
+# affected either verdict and stays in graded's population too.
+
+
+def test_an_image_pull_harness_failure_is_excluded_from_graded_not_strict(tmp_path):
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="1", ttm="2"),
+        _row("b", diag="False", mitig="False", ttl="1", ttm="2", harness_failure="image_pull"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["attempts"] == 2
+    # strict still counts the contaminated attempt as a failure, same as before.
+    assert s["diagnosis"]["strict_pct"] == 50.0
+    # graded excludes it entirely: one clean attempt, which scored correct.
+    assert s["diagnosis"]["graded"] == 1
+    assert s["diagnosis"]["graded_correct"] == 1
+    assert s["diagnosis"]["graded_pct"] == 100.0
+
+
+def test_a_recovery_error_harness_failure_stays_in_graded(tmp_path):
+    """recovery_error runs in cleanup, after Diagnosis and Mitigation are
+    already graded, so it cannot have biased either verdict: unlike
+    image_pull, it must not shrink graded's denominator."""
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="1", ttm="2"),
+        _row("b", diag="False", mitig="False", ttl="1", ttm="2", harness_failure="recovery_error"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["diagnosis"]["graded"] == 2
+    assert s["diagnosis"]["graded_correct"] == 1
+    assert s["mitigation"]["graded"] == 2
+    assert s["mitigation"]["graded_correct"] == 1
+    assert s["e2e"]["graded"] == 2
+    assert s["e2e"]["graded_correct"] == 1
+    # Still surfaced in the harness-failures report, just not excluded.
+    assert s["harness_failures"]["count"] == 1
+    assert s["harness_failures"]["by_kind"] == {"recovery_error": 1}
+
+
+def test_a_deploy_failed_harness_failure_is_already_excluded_as_a_deploy_failed_row(tmp_path):
+    """deploy_failed rows never produce a run_N directory (main.py writes
+    the marker only into the _ALL_ rollup), so they are already outside
+    every rate the same way a plain deploy_failed marker is; this just
+    checks the harness_failure column on that marker round-trips."""
+    rows = [_row("a", diag="True", mitig="True", ttl="1", ttm="2")]
+    run = _run(tmp_path, rows)
+    _all_rollup(
+        tmp_path,
+        0,
+        "t0",
+        [{**_deploy_failed_row("b", 1), "harness_failure": "deploy_failed"}],
+    )
+
+    deploy_failed_rows = score_run.load_deploy_failed(run)
+    s = score_run.score(score_run.load(run), deploy_failed_rows)
+
+    assert s["deploy_failed"]["count"] == 1
+    assert deploy_failed_rows[0]["harness_failure"] == "deploy_failed"
+    # Not double-counted as a harness_failures row: it never reached "rows".
+    assert s["harness_failures"]["count"] == 0
+
+
+def test_harness_failures_are_counted_and_named_by_kind(tmp_path):
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="1", ttm="2", harness_failure="image_pull"),
+        _row("b", diag="False", mitig="False", ttl="1", ttm="2", harness_failure="recovery_error"),
+        _row("c", diag="True", mitig="True", ttl="1", ttm="2"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["harness_failures"]["count"] == 2
+    assert s["harness_failures"]["by_kind"] == {"image_pull": 1, "recovery_error": 1}
+    assert ("a", 1, "image_pull") in s["harness_failures"]["attempts"]
+    assert ("b", 1, "recovery_error") in s["harness_failures"]["attempts"]
+
+    out = score_run.render(s, None)
+    assert "harness failures: 2 completed attempt(s)" in out
+    assert "a attempt 1 (image_pull)" in out
+
+
+def test_pre_agent_snapshot_failures_are_counted_and_listed(tmp_path):
+    rows = [
+        _row("a", diag="True", mitig="True", ttl="1", ttm="2", pre_agent_snapshot="failed"),
+        _row("b", diag="False", mitig="False", ttl="1", ttm="2"),
+    ]
+    s = score_run.score(score_run.load(_run(tmp_path, rows)))
+
+    assert s["pre_agent_snapshot_failures"]["count"] == 1
+    assert s["pre_agent_snapshot_failures"]["attempts"] == [("a", 1)]
+
+    out = score_run.render(s, None)
+    assert "pre-agent snapshot failed: 1 attempt(s)" in out
+    assert "a attempt 1" in out
+
+
+def test_a_run_with_no_pre_agent_snapshot_column_reads_as_zero_not_unknown(tmp_path):
+    """Backward compatibility, same as harness_failure above: a CSV archived
+    before this column existed has no 'pre_agent_snapshot' key at all."""
+    d = tmp_path / "slots" / "0" / "results" / "t0" / "run_0"
+    d.mkdir(parents=True)
+    legacy_columns = ["problem_id", "attempt", "Diagnosis.success", "Mitigation.success"]
+    with (d / "brain_go_results.csv").open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=legacy_columns)
+        w.writeheader()
+        w.writerow({"problem_id": "a", "attempt": "1", "Diagnosis.success": "True", "Mitigation.success": "True"})
+
+    s = score_run.score(score_run.load(tmp_path))
+
+    assert s["pre_agent_snapshot_failures"]["count"] == 0
+
+
+def test_a_run_with_no_harness_failure_column_reads_as_zero_not_unknown(tmp_path):
+    """Backward compatibility: a CSV archived before this column existed has
+    no 'harness_failure' key at all, not an empty one. _val()'s .get()
+    already treats a missing key the same as an empty string, so this run
+    scores exactly as it would have before the column existed."""
+    d = tmp_path / "slots" / "0" / "results" / "t0" / "run_0"
+    d.mkdir(parents=True)
+    legacy_columns = ["problem_id", "attempt", "Diagnosis.success", "Mitigation.success"]
+    with (d / "brain_go_results.csv").open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=legacy_columns)
+        w.writeheader()
+        w.writerow({"problem_id": "a", "attempt": "1", "Diagnosis.success": "True", "Mitigation.success": "True"})
+
+    s = score_run.score(score_run.load(tmp_path))
+
+    assert s["harness_failures"]["count"] == 0
+    assert s["diagnosis"]["graded_pct"] == 100.0
+    assert s["diagnosis"]["graded_correct"] == s["diagnosis"]["correct"] == 1
 
 
 def test_coverage_is_none_without_a_manifest(tmp_path):

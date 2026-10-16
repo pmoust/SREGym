@@ -158,6 +158,171 @@ SREGYM_ARM=$(uv run --project "$WORKDIR" python "$WORKDIR/scripts/benchmark/arm.
 export SREGYM_ARM
 echo "[bootstrap] arm $SREGYM_ARM"
 
+# The box's own RFC1918 address, needed by every arm now, not only native and
+# edge: it is how a kind node (itself a container, on its own "kind" docker
+# network) reaches back out to the registry mirror containers started below,
+# the same way native/edge's brain-go container already reaches the kind API
+# server through this same address (see native_arm.sh's "kind-config" for
+# that precedent). Resolved once, here, rather than separately in the
+# native/edge block below, so both uses read one implementation and one
+# failure mode.
+SREGYM_PRIVATE_IP=$("$WORKDIR/scripts/benchmark/native_arm.sh" private-ip) || {
+  terminate "could not determine a private IPv4 address; the registry mirror and (for native/edge) the edge agent would have nowhere to publish"
+  exit 1
+}
+export SREGYM_PRIVATE_IP
+echo "[bootstrap] private address $SREGYM_PRIVATE_IP"
+
+# --- host images: registry:2, the kind node image ------------------------
+# Neither is ever pulled by a kind node's containerd, so neither is covered
+# by the registry mirror below or image_cache.list's preflight: both are
+# `docker run` directly by THIS host instead: registry:2 by
+# registry_mirror.sh just below, and the kind node image by `kind create
+# cluster` itself, once per slot. An earlier version of this benchmark left
+# both as a documented, deliberate gap, pulled from Docker Hub once per box.
+# The owner decided there is no exception to "a benchmark run never touches
+# Docker Hub", so both are cached in the registry cache bucket too
+# (scripts/benchmark/seed_host_images.sh, run once from a developer
+# machine), and loaded here, before either one can run.
+#
+# Keep this pair list in sync with seed_host_images.sh's HOST_IMAGES: this is
+# the box's half of that script's contract, reading exactly what it wrote.
+# load_host_image (scripts/benchmark/host_image_lib.sh) is the shared
+# "fetch, load, verify" step: setup_brain_go.sh uses the same function for
+# brain-go's own compose-pulled and build-base images, which hit this same
+# class of gap for the same reason.
+#
+# Once per box, not once per slot: the box's docker image store is shared by
+# every slot's kind cluster, so this load alone is what keeps every later
+# `kind create cluster` call in this shard from ever needing to pull
+# jacksonarthurclark/aiopslab-kind-x86 itself.
+# shellcheck source=scripts/benchmark/host_image_lib.sh
+. "$WORKDIR/scripts/benchmark/host_image_lib.sh"
+HOST_IMAGE_TMP="$WORKDIR/host-images"
+mkdir -p "$HOST_IMAGE_TMP"
+# Appended to the same manifest setup_brain_go.sh's gate writes brain-go's
+# own host images to (SREGYM_HOST_IMAGE_MANIFEST, same default path), so
+# write_run_manifest.sh's one read of that file states which bytes every
+# host image this run used actually were, registry:2 and the kind node
+# image included, not just brain-go's own.
+HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
+for pair in "registry2 registry:2" "kindnode-x86 jacksonarthurclark/aiopslab-kind-x86:latest"; do
+  hi_name="${pair%% *}"
+  hi_ref="${pair#* }"
+  load_host_image "$hi_name" "$hi_ref" "$REGISTRY_CACHE_BUCKET" "$REGION" "$HOST_IMAGE_TMP" || {
+    terminate "could not load host image $hi_name ($hi_ref); see the error above"
+    exit 1
+  }
+  hi_id=$(docker image inspect --format '{{.Id}}' "$hi_ref" 2>/dev/null) || hi_id=""
+  printf '%s\t%s\t%s\n' "$hi_name" "$hi_ref" "$hi_id" >>"$HOST_IMAGE_MANIFEST"
+done
+
+# --- registry mirror ---------------------------------------------------
+# Every arm's kind clusters pull through here instead of Docker Hub, ghcr.io,
+# quay.io or registry.k8s.io directly (NOFireAI/sregym#150): one read-only
+# registry:2 per upstream host, serving scripts/benchmark/image_cache.list's
+# images out of the pre-seeded S3 bucket (REGISTRY_CACHE_BUCKET, from the
+# bootstrap template). Always "plain" (read-only) here, never the writable
+# "store" mode: that one is scripts/benchmark/seed_image_cache.sh's job, run
+# ahead of time by a developer with their own AWS credentials, not this
+# box's.
+#
+# Started before any kind cluster (kind/setup_kind_cluster.sh reads
+# SREGYM_REGISTRY_MIRROR_ADDR below and, when it is set, patches the cluster
+# to read from these four ports instead of the public internet), and before
+# the preflight below, which needs them up to check against.
+#
+# 0.0.0.0, not 127.0.0.1: a kind node is a separate container on the "kind"
+# docker network, and reaches the host through the host's own address, not
+# its own loopback. Bound to all interfaces so both the host's localhost (the
+# preflight below) and the kind nodes (through SREGYM_PRIVATE_IP) can reach
+# the same container.
+#
+# "host" network mode (registry_mirror.sh's last argument), always, on this
+# box and nowhere else: the box's IMDS hop limit is 1 (terraform/compute.tf),
+# so a registry container published the ordinary way, on the docker bridge
+# with "-p", is one network hop further from the metadata endpoint than a
+# process on the host itself and never gets the instance role's credentials.
+# It used to still report healthy, because the old readiness check only hit
+# the registry's base route, which never touches S3; the first pull that
+# actually needed the storage backend then failed, every time. "host"
+# network mode puts the registry on the box's own network
+# namespace instead, the same one IMDS-reaching code on the host itself runs
+# in, and registry_mirror.sh's readiness check now reads the S3-backed
+# catalog, not just the base route, so a credentials problem fails loudly
+# here, at startup, instead of silently inside a slot.
+for h in $(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" hosts); do
+  bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" start-plain "$h" "$REGISTRY_CACHE_BUCKET" "$REGION" 0.0.0.0 host || {
+    terminate "could not start the $h registry mirror"
+    exit 1
+  }
+done
+export SREGYM_REGISTRY_MIRROR_ADDR="$SREGYM_PRIVATE_IP"
+echo "[bootstrap] registry mirror up on $SREGYM_REGISTRY_MIRROR_ADDR (ports: $(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" hosts | while read -r h; do bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" port "$h"; done | tr '\n' ' '))"
+
+# Preflight: every image this shard might need must already be in the bucket
+# before any slot starts, not discovered missing mid-run. A plain registry
+# has no fallback to the real upstream (that is the whole point: a benchmark
+# run never touches Docker Hub, ghcr.io, quay.io, or registry.k8s.io), so a
+# gap here would otherwise surface as a cold ImagePullBackOff deep inside a
+# slot, exactly the failure mode this change removes the per-attempt
+# pre-pull step to avoid reintroducing.
+#
+# scripts/benchmark/registry_preflight.py, not `docker pull`, through each
+# host's own mirror: a GET of the manifest (resolving a manifest list to its
+# linux/amd64 child first, the same platform selection containerd does) and
+# a HEAD of the config blob and every layer blob it names, which is the same
+# two requests a real pull makes short of writing the layer bytes to disk. A
+# plain `docker pull` here proved the path layout matches, but it also
+# pulled all ~108 images into the host's own docker image store on every
+# box, for images that store never otherwise needed: the HTTP check is the
+# same proof without that cost.
+missing=""
+first_failure_host=""
+first_failure_output=""
+image_list="$WORKDIR/scripts/benchmark/image_cache.list"
+if [ -f "$image_list" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    host=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" host-for "$line")
+    path=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" path-for "$line")
+    # A line whose host registry_mirror.sh does not recognize is a hard stop,
+    # not a silent skip: continuing past it used to drop that image from the
+    # preflight entirely, so a typo'd or new host in image_cache.list would
+    # never be checked and could still fail cold, deep inside a slot.
+    port=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" port "$host") || {
+      terminate "image_cache.list line '$line' names an upstream host registry_mirror.sh does not know; add it there first"
+      exit 1
+    }
+    pull_output=$(python3 "$WORKDIR/scripts/benchmark/registry_preflight.py" "$port" "$path" 2>&1) || {
+      missing="$missing $line"
+      if [ -z "$first_failure_output" ]; then
+        first_failure_host="$host"
+        first_failure_output="$pull_output"
+      fi
+    }
+  done <"$image_list"
+fi
+if [ -n "$missing" ]; then
+  echo "[bootstrap] missing from the registry cache:$missing"
+  # The first failure's own output, not just the generic "missing" summary
+  # above: a plain docker-pull error distinguishes a genuinely absent image
+  # (404, "manifest unknown") from an S3 permission or connectivity error on
+  # the registry's own backend, which reads identically as a pull failure
+  # from the client's side but means "re-check the bucket grant", not
+  # "re-run seed_image_cache.sh".
+  echo "[bootstrap] first failure ($first_failure_host):"
+  echo "$first_failure_output"
+  first_failure_container="sregym-registry-$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" slug "$first_failure_host")"
+  echo "[bootstrap] $first_failure_container logs (last 50 lines):"
+  docker logs --tail 50 "$first_failure_container" 2>&1 || true
+  terminate "registry cache preflight failed; re-run scripts/benchmark/seed_image_cache.sh for the images above"
+  exit 1
+fi
+echo "[bootstrap] registry cache preflight: every image in $image_list resolved"
+
 if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
   # Both arms run the edge agent and need everything in this block: the
   # pre-fault window, the private address the agent and the telemetry
@@ -184,20 +349,14 @@ if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
 
   # The address the in-cluster edge agent reaches brain-go's api service on,
   # and the address the native telemetry connections are registered against.
-  # Resolved through native_arm.sh so this, setup_brain_go.sh and the
-  # validation all read one implementation, and exported so seed_slot.sh
-  # takes the same answer.
-  SREGYM_PRIVATE_IP=$("$WORKDIR/scripts/benchmark/native_arm.sh" private-ip) || {
-    terminate "could not determine a private IPv4 address; the edge agent would have nowhere to publish"
-    exit 1
-  }
-  export SREGYM_PRIVATE_IP
+  # Resolved above for every arm, not just these two; kept here as a local
+  # name because that is what the rest of this block already calls it.
   EDGE_GRAPH_URL="http://${SREGYM_PRIVATE_IP}:8000/api/edge"
   echo "[bootstrap] edge graph endpoint $EDGE_GRAPH_URL"
 
-  # Not pre-pulled and not loaded into the node. Each kind node pulls the
-  # image itself, and the Helm release leaves the chart's own
-  # imagePullPolicy: Always in place.
+  # Not loaded into the node: each kind node still pulls this image itself,
+  # and the Helm release leaves the chart's own imagePullPolicy: Always in
+  # place.
   #
   # Two attempts to pre-load it failed the same way. kind runs
   # `ctr images import --all-platforms` for both `kind load docker-image` and
@@ -211,12 +370,61 @@ if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
   # run-20260928-0703. The MCP image does not hit it because it is built on
   # this box, so every blob it references is present.
   #
-  # What the pre-pull was for was Docker Hub's anonymous rate limit: one pull
-  # per box rather than one per slot. A full run is four boxes of three slots,
-  # so twelve pulls of one public image, which is not near the limit. Paying
-  # that is cheaper than carrying a platform-selection workaround for it.
+  # Still a real pull, but since #150 it is mirrored the same as every other
+  # docker.io image: the kind node's own containerd does the pulling, same as
+  # before, but against the box's own registry mirror (see the registry
+  # mirror section above) instead of Docker Hub directly. Before #150 this
+  # was a deliberate, accepted cost ("twelve pulls of one public image, four
+  # boxes of three slots, is not near Docker Hub's anonymous rate limit, and
+  # paying it was cheaper than a platform-selection workaround"); the mirror
+  # removes the cost rather than the workaround, which is still absent.
   EDGE_IMAGE=$("$WORKDIR/scripts/benchmark/native_arm.sh" edge-versions | cut -f1)
   echo "[bootstrap] edge agent image $EDGE_IMAGE, pulled by each kind node"
+
+  # The *effective* edge image, not just the default: SREGYM_EDGE_IMAGE can
+  # override native_arm.sh's "nofireai/edge:v3.6.0" default, and an override
+  # that is not in image_cache.list would otherwise only surface as a cold
+  # ImagePullBackOff deep inside the first slot that deploys the agent,
+  # exactly the failure mode the preflight above exists to catch for every
+  # other image. Checked the same way, with the same registry_preflight.py
+  # HTTP check: failing the whole shard loudly, before any slot starts, if
+  # it is missing.
+  #
+  # EDGE_IMAGE itself usually carries no registry host (native_arm.sh's
+  # default and every override seen so far are a plain
+  # "<org>/<image>:<tag>", which a real pull resolves against docker.io
+  # implicitly). Checking "*/*" first, before looking at the leading
+  # segment, matters: a single-segment override with a tag but no org (a
+  # bare "edge:v3.6.0") has no "/" at all, so its tag's own ":" must not be
+  # mistaken for a registry host's ":port". A ref with at least one "/" is
+  # checked for an explicit host the same way containerd and Docker do (a
+  # leading segment with a "." or ":", or "localhost"); a ref with no "/" at
+  # all is always a docker.io name, and docker.io's own convention for a
+  # single-segment name is the "library/" namespace. Either way this reuses
+  # registry_mirror.sh's host-for/path-for, the exact split the main
+  # preflight loop above uses, rather than a second, docker.io-only parser:
+  # a host registry_mirror.sh does not recognize fails the shard by name,
+  # the same as a typo'd host in image_cache.list does above.
+  case "$EDGE_IMAGE" in
+    */*)
+      case "${EDGE_IMAGE%%/*}" in
+        *.*|*:*|localhost) edge_ref="$EDGE_IMAGE" ;;
+        *) edge_ref="docker.io/$EDGE_IMAGE" ;;
+      esac
+      ;;
+    *) edge_ref="docker.io/library/$EDGE_IMAGE" ;;
+  esac
+  edge_host=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" host-for "$edge_ref")
+  edge_path=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" path-for "$edge_ref")
+  edge_port=$(bash "$WORKDIR/scripts/benchmark/registry_mirror.sh" port "$edge_host") || {
+    terminate "edge agent image $EDGE_IMAGE names registry host '$edge_host' that registry_mirror.sh does not know; add it there first"
+    exit 1
+  }
+  if ! python3 "$WORKDIR/scripts/benchmark/registry_preflight.py" "$edge_port" "$edge_path" >/dev/null 2>&1; then
+    terminate "edge agent image $EDGE_IMAGE is not in the registry cache; add $edge_ref to scripts/benchmark/image_cache.list and re-run scripts/benchmark/seed_image_cache.sh"
+    exit 1
+  fi
+  echo "[bootstrap] edge agent image $EDGE_IMAGE confirmed in the registry cache"
 
   # The chart, once per box and for the same reason. Slots run concurrently in
   # background subshells, so a per-slot download to one shared path lets one

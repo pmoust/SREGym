@@ -88,6 +88,9 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         # this checkout: run_shard.sh generates a real (gitignored) tasklist
         # at WORKDIR/sregym/conductor/tasklist.yml.
         f"SREGYM_TASKLIST={tmp_path / 'no-tasklist.yml'}\n"
+        # Pointed at a path that does not exist either, so this test cannot
+        # pick up a real benchmark box's leftover /tmp file.
+        f"SREGYM_HOST_IMAGE_MANIFEST={tmp_path / 'no-host-images.tsv'}\n"
         "BRAIN_GO_SHA=deadbeef\n"
         'BRAIN_ENV_EXTRA="CHAT_SERVICE_TURN_TIMEOUT=3600s"\n'
         f"MANIFEST={out}\n" + _manifest_block() + "\n"
@@ -129,6 +132,48 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
     assert set(fields["problems"].split()) == set(_VALUES["problems"].split())
     assert fields["stages"] == "diagnosis,mitigation"
     assert fields["problem_set"] == "sregym-lite"
+    # Empty here (no SREGYM_HOST_IMAGE_MANIFEST file, a developer-machine
+    # shape), but the key itself must always be present so a reader parses
+    # one manifest shape regardless of whether the host-image gate ran.
+    assert fields.get("brain_go_host_images") == ""
+
+
+def test_the_manifest_records_loaded_host_image_ids(tmp_path):
+    """setup_brain_go.sh's gate writes name/ref/loaded-id triples to
+    SREGYM_HOST_IMAGE_MANIFEST before write_run_manifest.sh runs, so a run
+    can state which bytes its host images actually were."""
+    out = tmp_path / "manifest.txt"
+    host_images = tmp_path / "host-images.tsv"
+    host_images.write_text(
+        "pgvector-pgvector\tpgvector/pgvector:pg16\tsha256:" + "a" * 64 + "\n"
+        "golang\tgolang:1.26.6\tsha256:" + "b" * 64 + "\n"
+    )
+    script = tmp_path / "run.sh"
+    script.write_text(
+        "set -u\n"
+        "RUN_ID=run-test\n"
+        "SHARD_INDEX=1\n"
+        "SHARD_COUNT=3\n"
+        f"WORKDIR={ROOT}\n"
+        f"SREGYM_TASKLIST={tmp_path / 'no-tasklist.yml'}\n"
+        # write_run_manifest.sh runs as its own child process (same as the
+        # real bootstrap's two separate invocations of setup_brain_go.sh and
+        # write_run_manifest.sh), so this has to be exported to reach it; a
+        # bare assignment would silently not (see SREGYM_TASKLIST above,
+        # which masks the same gap by happening to fall back to a path that
+        # also does not exist).
+        f"export SREGYM_HOST_IMAGE_MANIFEST={host_images}\n"
+        "BRAIN_GO_SHA=deadbeef\n"
+        'BRAIN_ENV_EXTRA="CHAT_SERVICE_TURN_TIMEOUT=3600s"\n'
+        f"MANIFEST={out}\n" + _manifest_block() + "\n"
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    fields = dict(line.split("=", 1) for line in out.read_text().strip().split("\n") if "=" in line)
+    assert fields["brain_go_host_images"] == (
+        "pgvector-pgvector:pgvector/pgvector:pg16@sha256:" + "a" * 64 + ",golang:golang:1.26.6@sha256:" + "b" * 64
+    )
 
 
 def _registered_problem_ids() -> set[str]:

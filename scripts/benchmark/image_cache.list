@@ -1,0 +1,245 @@
+# Every image a benchmark box needs to pull from a public registry, fully
+# qualified with its upstream host so scripts/benchmark/registry_mirror.sh
+# and seed_image_cache.sh can route each one to the right proxy/registry
+# without guessing (NOFireAI/sregym#150). One per line, "<host>/<path>:<tag>".
+# Blank lines and "#" comments are ignored.
+#
+# Covers sregym-lite only: the images below are what lite's current 21
+# problems pull. A problem outside lite is not covered here; see
+# NOFireAI/sregym#152 for extending this list to every problem set and
+# #153 for a periodic check that these pinned tags still match what each
+# chart or manifest resolves to upstream.
+#
+# Adding an image is one line here, then `scripts/benchmark/seed_image_cache.sh`.
+# Re-seed whenever this file gains a line or an existing tag changes meaning
+# (a ":latest"-style tag that moved upstream). See NOFIRE.md's registry
+# mirror section for the full seeding/re-seeding story.
+#
+# How this list was built: `helm template` of every app's own Helm chart
+# (sregym/service/metadata/*.json's chart_path, the same derivation the old
+# per-attempt pre-pull step used to do at deploy time, now run once here
+# instead of once per attempt), the raw manifests for the two apps
+# that skip Helm (hotel-reservation, blueprint-hotel-reservation,
+# helm_deploy=False), the always-on telemetry stack's charts (prometheus,
+# loki, promtail) and raw manifests (jaeger, otel-collector, khaos), the
+# wrk2 load generator's own job template, the custom-service fault's two
+# hand-built images, the edge agent's pinned release, and a grep of every
+# fault injector and problem file for an image literal with a real (not
+# "app-image:latest"-style fake) tag. Not derived by a script, so a missed
+# image is plausible; the seed script's own verification pass (`crane
+# validate --remote` against a fresh registry pointed at the same bucket) is
+# what catches one before it reaches a benchmark run. tests/benchmark/
+# test_image_cache_completeness.py is a second, independent check: it scans
+# sregym/ and kind/ for image literals and fails if one is missing from this
+# list, so a new fault or chart file cannot drift this list silently. That
+# scan verifies the lite problem set fully (every lite image literal lives
+# under sregym/ or kind/, nothing in the SREGym-applications submodule). The
+# non-lite TidbCluster images below (pingcap/pd, pingcap/tikv, pingcap/tidb,
+# the busybox helper default) are verified only by a static read of the
+# operator's own defaulting source and the submodule's CR, not by this scan:
+# they are rendered from SREGym-applications/FleetCast/tidb-operator/
+# tidb-cluster.yaml, outside both SCAN_DIRS and this list's own "known,
+# deliberate gaps" reasoning below, so a future change to that CR or that
+# operator version will not be caught here automatically.
+#
+# metrics-server, the OpenEBS operator, Calico, and the tidb-operator CRDs
+# and fault-recovery CR used to be fetched from their upstream URLs at
+# deploy time; they are now vendored under sregym/resources/vendored/ and
+# kind/manifests/ (see that directory's README for source URL, version, and
+# refresh steps) and applied from the local file instead. Because those
+# vendored files live under sregym/ and kind/, the completeness scan above
+# covers their "image:" keys and env "value:" fields the same as any other
+# raw manifest in this tree; nothing extra to maintain here for them.
+#
+# registry:2 and the kind node image (jacksonarthurclark/aiopslab-kind-x86)
+# are cached too, under scripts/benchmark/seed_host_images.sh's
+# "host-images/" prefix in the same bucket, not as lines in this list: the
+# HOST pulls both directly (`docker run registry:2`, `kind create cluster`),
+# never through the in-cluster containerd this list's mirror covers, so
+# neither one is a "<host>/<path>:<tag>" line registry_mirror.sh could route.
+# See that script's header for the caching mechanism.
+#
+# Known, deliberate gaps, not in this list and not mirrored:
+#   - train-ticket's own per-microservice images. Its chart's job
+#     (ghcr.io/sregym/train-ticket-deploy, listed below) applies the rest of
+#     train-ticket's manifests itself at install time, so `helm template`
+#     never renders their `image:` fields. That job's own image is cached;
+#     what it pulls when it runs is not.
+#   - ghcr.io/sregym/sregym-mcp:latest. The benchmark never pulls it:
+#     build_mcp_image.sh builds this repo's MCP server locally and
+#     `kind load`s it with imagePullPolicy: Never (see NOFIRE.md).
+#   - Anything astronomy-shop's own extra_args disable at real deploy time
+#     (the chart's bundled quay.io/prometheus/prometheus:v3.9.0, the
+#     flagd-ui sidecar). Harmless to cache anyway, so left in rather than
+#     hand-pruned; a chart version bump will not silently break seeding over
+#     an image that was never going to be pulled.
+#   - Every chart or manifest still fetched from a remote helm repo or a raw
+#     GitHub URL at deploy time, for an app no sregym-lite problem deploys
+#     today (noise=false, M2 never reaches it): ingress-nginx, chaos-mesh,
+#     the pingcap Helm repo's own `pingcap/tidb-operator` chart coordinates
+#     (the CRDs and recovery CR it applies ARE vendored; the chart itself is
+#     still a live `helm repo add`), the fleetcast and flight-ticket chart
+#     repos, and the TidbCluster CR's own `config_url`. With kind's
+#     containerd `_default` host mirror fail-closed (NOFIRE.md's registry
+#     mirror section), enabling noise or running a problem that deploys one
+#     of these apps fails closed (ImagePullBackOff, or a `helm repo add`
+#     network error upstream of any image pull) rather than silently
+#     reaching the internet. Out of scope here; NOFireAI/sregym#152 covers
+#     extending this vendoring and caching to every problem set, not just
+#     lite.
+
+# --- docker.io ---------------------------------------------------------
+docker.io/library/busybox:1.36
+# init_container_dependency_hang's dep-wait init container pins this exact
+# tag: a newer busybox regressed the nslookup exit code this fault's wait
+# loop depends on (kubernetes/website#12050).
+docker.io/library/busybox:1.28
+docker.io/library/busybox:latest
+# tidb-operator's default helper image (pd/tikv/tidb's init container) when
+# a TidbCluster CR sets no helper.image of its own, which
+# SREGym-applications/FleetCast/tidb-operator/tidb-cluster.yaml does not:
+# confirmed from tidb-operator v1.6.0's own source
+# (pkg/apis/pingcap/v1alpha1/tidbcluster.go's defaultHelperImage). This is a
+# different CR from inject_operator.py's fault-recovery CR below, which does
+# set helper.image explicitly (to alpine:3.16.0).
+docker.io/library/busybox:1.26.2
+docker.io/library/redis:6.2.4
+docker.io/library/memcached:1.6.7
+docker.io/library/memcached:1.6.39-alpine
+docker.io/library/memcached:latest
+docker.io/library/mongo:4.4.6
+docker.io/library/mongo:8.0.14-rc0
+docker.io/library/mongo:latest
+docker.io/library/postgres:17.6
+docker.io/library/python:3.9-slim
+docker.io/library/python:3.10-slim
+docker.io/library/python:3.12-alpine
+docker.io/library/python:3.12-slim
+docker.io/library/ubuntu:22.04
+# inject_operator.py's inject_wrong_operator_image/recover_fault vendored
+# recovery CR (sregym/resources/vendored/tidb-cluster-recovery-v1.6.0.yaml)
+# sets helper.image to this explicitly, overriding the operator's own
+# busybox:1.26.2 default above.
+docker.io/library/alpine:3.16.0
+docker.io/alpine/git:latest
+docker.io/alpine/k8s:1.28.3
+docker.io/polinux/stress
+docker.io/locustio/locust:2.14.2
+docker.io/deathstarbench/social-network-microservices:latest
+docker.io/deathstarbench/wrk2-client:latest
+docker.io/jaegertracing/all-in-one:1.57
+docker.io/jaegertracing/all-in-one:latest
+docker.io/jaegertracing/jaeger:2.14.1
+# otel-collector.yaml's own raw manifest (every run) and astronomy-shop's
+# bundled collector (astronomy-shop chart, deployed only with that app).
+docker.io/otel/opentelemetry-collector-contrib:0.104.0
+docker.io/otel/opentelemetry-collector-contrib:0.142.0
+docker.io/yg397/media-frontend:xenial
+docker.io/yg397/openresty-thrift:xenial
+docker.io/hashicorp/consul:1.22.3
+docker.io/grafana/loki-canary:3.6.12
+docker.io/grafana/loki:3.6.11
+docker.io/grafana/promtail:3.5.1
+docker.io/grafana/grafana:12.3.1
+docker.io/kiwigrid/k8s-sidecar:2.5.0
+docker.io/nginxinc/nginx-unprivileged:1.29-alpine
+docker.io/prom/memcached-exporter:v0.15.4
+docker.io/containersol/locust_exporter:v0.5.0
+docker.io/valkey/valkey:9.0.1-alpine3.23
+docker.io/opensearchproject/opensearch:3.4.0
+docker.io/bitnami/kubectl:latest
+docker.io/jacksonarthurclark/flight-ticket-ow-action-deployer:latest
+docker.io/jacksonarthurclark/flight-ticket-load-generator:latest
+docker.io/jacksonarthurclark/flight-ticket-populate-redis:latest
+docker.io/lilygniedz/satellite-backend:latest
+docker.io/lilygniedz/orbital-frontend:latest
+docker.io/777lefty/docker-frontend-service-container:latest
+docker.io/777lefty/docker-geo-service-container:latest
+docker.io/777lefty/docker-profile-service-container:latest
+docker.io/777lefty/docker-rate-service-container:latest
+docker.io/777lefty/docker-recomd-service-container:latest
+docker.io/777lefty/docker-reserv-service-container:latest
+docker.io/777lefty/docker-search-service-container:latest
+docker.io/777lefty/docker-user-service-container:latest
+# Real, pullable images a fault injector swaps in, not fake tags like
+# inject_app.py's "app-image:latest" or inject_operator.py's
+# "pingcap/tidb-operatorr:v1.6.3" (typo in "operatorr"), which must never be
+# seeded: the whole point of those two is that they resolve nowhere.
+docker.io/jackcuii/kube-proxy:v1.31.12
+docker.io/jackcuii/hotel-reservation:latest
+docker.io/yinfangchen/geo:app3
+# Also the TiDB Operator Helm chart's real operatorImage
+# (SREGym-applications/FleetCast/tidb-operator/values.yaml overrides the
+# chart default v1.6.0 to this same v1.6.3), so this one line covers both
+# inject_operator.py's fault-recovery target and tidb_cluster_operator.py's
+# real `helm install` of the operator and its per-cluster discovery
+# Deployment (which shares the operator's own image).
+docker.io/pingcap/tidb-operator:v1.6.3
+# pd/tikv/tidb images a TidbCluster CR renders once tidb-operator defaults
+# its unset baseImage fields (pingcap/pd, pingcap/tikv, pingcap/tidb) and
+# applies spec.version: confirmed from tidb-operator v1.6.0's own source
+# (pkg/apis/pingcap/v1alpha1/defaulting/tidbcluster.go) against
+# SREGym-applications/FleetCast/tidb-operator/tidb-cluster.yaml's
+# "version: v8.1.0" with no baseImage overrides of its own. tidb_cluster_
+# operator.py's own mysql-client probe pod is the fourth: a plain,
+# off-the-shelf image, not operator-rendered.
+docker.io/pingcap/pd:v8.1.0
+docker.io/pingcap/tikv:v8.1.0
+docker.io/pingcap/tidb:v8.1.0
+docker.io/library/mysql:8
+docker.io/calico/cni:v3.27.0
+docker.io/calico/kube-controllers:v3.27.0
+docker.io/calico/node:v3.27.0
+docker.io/openebs/node-disk-exporter:2.1.0
+docker.io/openebs/node-disk-manager:2.1.0
+docker.io/openebs/node-disk-operator:2.1.0
+docker.io/openebs/provisioner-localpv:3.4.0
+# The vendored OpenEBS operator manifest's own OPENEBS_IO_HELPER_IMAGE and
+# CLEANUP_JOB_IMAGE env values (sregym/resources/vendored/openebs-operator-
+# v3.5.0.yaml): every PVC provisioned by openebs-hostpath runs a pod with
+# this image, so without it in the cache no PVC using that StorageClass
+# (Loki's, Prometheus's) ever binds.
+docker.io/openebs/linux-utils:3.5.0
+docker.io/nofireai/edge:v3.6.0
+
+# --- ghcr.io -------------------------------------------------------------
+ghcr.io/open-telemetry/demo:2.2.0-accounting
+ghcr.io/open-telemetry/demo:2.2.0-ad
+ghcr.io/open-telemetry/demo:2.2.0-cart
+ghcr.io/open-telemetry/demo:2.2.0-checkout
+ghcr.io/open-telemetry/demo:2.2.0-currency
+ghcr.io/open-telemetry/demo:2.2.0-email
+ghcr.io/open-telemetry/demo:2.2.0-flagd-ui
+ghcr.io/open-telemetry/demo:2.2.0-fraud-detection
+ghcr.io/open-telemetry/demo:2.2.0-frontend
+ghcr.io/open-telemetry/demo:2.2.0-frontend-proxy
+ghcr.io/open-telemetry/demo:2.2.0-image-provider
+ghcr.io/open-telemetry/demo:2.2.0-kafka
+ghcr.io/open-telemetry/demo:2.2.0-llm
+ghcr.io/open-telemetry/demo:2.2.0-load-generator
+ghcr.io/open-telemetry/demo:2.2.0-payment
+ghcr.io/open-telemetry/demo:2.2.0-product-catalog
+ghcr.io/open-telemetry/demo:2.2.0-product-reviews
+ghcr.io/open-telemetry/demo:2.2.0-quote
+ghcr.io/open-telemetry/demo:2.2.0-recommendation
+ghcr.io/open-telemetry/demo:2.2.0-shipping
+ghcr.io/open-feature/flagd:v0.11.1
+ghcr.io/open-feature/flagd:v0.12.9
+ghcr.io/sregym/train-ticket-deploy:latest
+ghcr.io/sregym/hotel-reservation:latest
+ghcr.io/sregym/khaos:latest
+
+# --- quay.io ---------------------------------------------------------------
+quay.io/kiwigrid/k8s-sidecar:2.2.1
+quay.io/prometheus/prometheus:v3.9.0
+quay.io/prometheus/prometheus:v2.47.2
+quay.io/prometheus/node-exporter:v1.6.1
+quay.io/prometheus/blackbox-exporter:v0.24.0
+quay.io/prometheus/pushgateway:v1.6.2
+quay.io/prometheus/alertmanager:v0.26.0
+quay.io/prometheus-operator/prometheus-config-reloader:v0.67.0
+
+# --- registry.k8s.io ---------------------------------------------------
+registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.9.2
+registry.k8s.io/metrics-server/metrics-server:v0.9.0
+registry.k8s.io/pause:3.9

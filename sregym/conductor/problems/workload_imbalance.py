@@ -8,6 +8,13 @@ from sregym.service.apps.astronomy_shop import AstronomyShop
 from sregym.service.kubectl import KubeCtl
 from sregym.utils.decorators import mark_fault_injected
 
+# The kube-proxy image this fault swaps in, a real but degraded version, not
+# a nonexistent tag like inject_app.py's INCORRECT_IMAGE_DEFAULT. Named here,
+# once, so the harness's own image-pull detection can exclude this exact
+# value: it is the fault under test (replayed cluster-wide onto kube-system,
+# not this problem's own app namespace), not a harness failure.
+KUBE_PROXY_REPLACEMENT_IMAGE = "docker.io/jackcuii/kube-proxy:v1.31.12"
+
 
 class WorkloadImbalance(Problem):
     def __init__(self):
@@ -36,7 +43,7 @@ class WorkloadImbalance(Problem):
     def inject_fault(self):
         print("== Fault Injection ==")
         self.injector.inject_daemon_set_image_replacement(
-            daemon_set_name="kube-proxy", new_image="docker.io/jackcuii/kube-proxy:v1.31.12"
+            daemon_set_name="kube-proxy", new_image=KUBE_PROXY_REPLACEMENT_IMAGE
         )
         print(f"Service: {self.faulty_service[0]} | Namespace: {self.namespace}\n")
         self.injector_for_scale.scale_pods_to(replicas=5, microservices=self.faulty_service)

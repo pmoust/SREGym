@@ -345,6 +345,108 @@ else
   log "WARNING: no instance role via IMDS; leaving whatever credentials deploy/.env already has"
 fi
 
+# --- host images: brain-go's own compose and build-base images --------------
+# brain-go's deploy/docker-compose.yml names pgvector/pgvector, localstack/
+# localstack and temporalio/auto-setup+ui directly, the root docker-
+# compose.yml `make up` also reads names node (dashboard) and caddy (entry)
+# directly, and its docker/Dockerfile builds brain-go's own image FROM
+# golang:<GO_VERSION> (a build stage) and alpine:<RUNTIME_IMAGE's tag> (the
+# runtime stage). `make up` below runs `docker compose build`/`up -d`
+# against all of them, on this box's own docker daemon, which bypasses kind
+# and the registry mirror entirely and would otherwise be this arm's one
+# remaining path to Docker Hub.
+#
+# The set below is DERIVED from the exact ref checked out at $BRAIN_GO_DIR
+# right now (scripts/benchmark/brain_go_images.py: every compose service
+# with no "build" key, plus the Dockerfile FROM images any build-keyed
+# service resolves to), not a fixed list of tags copied from whatever
+# origin/main looked like when this script was last edited. A pinned
+# brain_go_ref's docker/Dockerfile can set a different
+# GO_VERSION, and its compose file a different dashboard/entry tag, than
+# main does today; deriving from the checked-out tree is what keeps the two
+# from drifting apart silently. Loaded here, under their exact resolved
+# tags, so `docker compose`'s default "pull only if missing" policy finds
+# every one of them already present and never asks Docker Hub for anything.
+#
+# The load loop below does not die on the first miss: it collects every
+# name that failed to load, then the gate that follows re-checks every
+# derived image with `docker image inspect` and dies naming every one still
+# absent, together, rather than stopping at the first. This is the actual
+# guarantee: brain-go's own Makefile and compose file are not ours to add a
+# `--pull never`/`pull_policy: never` to (confirmed against both pinned refs
+# and origin/main: neither sets one), so nothing here can force compose to
+# refuse a pull outright. What this gate forces instead is that the pull
+# never has anything to do, because the exact tag it would ask for is
+# already present; a miss here fails loudly before `make up` runs rather
+# than silently inside it.
+#
+# REGISTRY_CACHE_BUCKET is exported by the bootstrap before this script runs;
+# AWS_DEFAULT_REGION is passed on this script's own invocation. See
+# scripts/benchmark/seed_host_images.sh for how these tarballs are built and
+# scripts/benchmark/host_image_lib.sh for the shared load step run_shard.sh
+# also uses for registry:2 and the kind node image.
+if [ -n "${REGISTRY_CACHE_BUCKET:-}" ]; then
+  # shellcheck source=scripts/benchmark/host_image_lib.sh
+  . "$SREGYM_SCRIPT_DIR/host_image_lib.sh"
+  BRAIN_GO_HOST_IMAGE_TMP="$(mktemp -d -t sregym-brain-go-host-images.XXXXXX)"
+  trap 'rm -rf "$BRAIN_GO_HOST_IMAGE_TMP"' EXIT
+
+  REQUIRED_IMAGES=$(python3 "$SREGYM_SCRIPT_DIR/brain_go_images.py") \
+    || die "could not derive brain-go's required host images from the checked-out ref; see the error above"
+  [ -n "$REQUIRED_IMAGES" ] || die "brain_go_images.py derived zero required images; docker-compose.yml or docker/Dockerfile changed shape in a way the derivation does not understand"
+
+  load_failures=""
+  while IFS="$(printf '\t')" read -r bg_name bg_ref; do
+    [ -n "$bg_name" ] || continue
+    load_host_image "$bg_name" "$bg_ref" "$REGISTRY_CACHE_BUCKET" "${AWS_DEFAULT_REGION:-us-east-2}" "$BRAIN_GO_HOST_IMAGE_TMP" \
+      || load_failures="$load_failures $bg_ref"
+  done <<EOF
+$REQUIRED_IMAGES
+EOF
+
+  # The gate: every image the derivation named must be docker-image-
+  # inspect-able before make up runs, named all together. Also records each
+  # one's loaded image ID (name, tag, loaded ID) to SREGYM_HOST_IMAGE_MANIFEST
+  # so write_run_manifest.sh can state which bytes this run actually used:
+  # the image ID alone does not say that on its
+  # own, since it means a different thing on the classic image store (a hash
+  # of the image config) than on the newer containerd image store (the
+  # manifest/index digest), see seed_host_images.sh's header for which. A
+  # full sha256 layer lock is a known gap, not built here; this only records
+  # what was actually loaded, under whichever store this box uses.
+  gate_missing=""
+  HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
+  : >"$HOST_IMAGE_MANIFEST"
+  while IFS="$(printf '\t')" read -r bg_name bg_ref; do
+    [ -n "$bg_ref" ] || continue
+    loaded_id=$(docker image inspect --format '{{.Id}}' "$bg_ref" 2>/dev/null) || {
+      gate_missing="$gate_missing $bg_ref"
+      continue
+    }
+    printf '%s\t%s\t%s\n' "$bg_name" "$bg_ref" "$loaded_id" >>"$HOST_IMAGE_MANIFEST"
+  done <<EOF
+$REQUIRED_IMAGES
+EOF
+  if [ -n "$gate_missing" ]; then
+    bg_head_sha=$(git -C "$BRAIN_GO_DIR" rev-parse HEAD 2>/dev/null) || bg_head_sha="<could not read $BRAIN_GO_DIR's checked-out commit>"
+    die "brain-go needs these images loaded before 'make up' and they are still absent after the load step above:$gate_missing (load failures:${load_failures:- none}); re-run scripts/benchmark/seed_host_images.sh --bucket $REGISTRY_CACHE_BUCKET --brain-go-ref $bg_head_sha"
+  fi
+  log "brain-go's required host images are all present: $(printf '%s' "$REQUIRED_IMAGES" | cut -f2 | tr '\n' ' ')"
+  log "loaded host-image IDs recorded in $HOST_IMAGE_MANIFEST for write_run_manifest.sh"
+else
+  # IMDS_TOKEN (set above, for the instance-role credentials step) is
+  # already this script's own test for "is this an EC2 instance": a
+  # developer machine gets no token back. REGISTRY_CACHE_BUCKET empty on a
+  # real instance means the bootstrap failed to export it, not that this is
+  # a developer machine, and silently falling through to a live Docker Hub
+  # pull is exactly what the host-image cache exists to prevent, so that
+  # case dies instead of logging a skip.
+  if [ -n "$IMDS_TOKEN" ]; then
+    die "REGISTRY_CACHE_BUCKET is unset on an EC2 instance (IMDS answered); the bootstrap must export it before this script runs, or brain-go's compose pull reaches Docker Hub directly"
+  fi
+  log "REGISTRY_CACHE_BUCKET is unset; skipping the host-image cache (no IMDS token, so this looks like a developer machine) and letting docker compose pull normally"
+fi
+
 # --- bring up the stack ------------------------------------------------------
 # Temporal is not optional. buildWorkflowChat is called unconditionally in
 # chatsvc/wiring.go and errors if the Temporal client cannot be built, so the

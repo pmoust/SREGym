@@ -65,6 +65,10 @@ FIXED = {
     "reasoning_effort": "medium",
     "sregym_ref": "0" * 40,
     "brain_go_ref": "0" * 40,
+    # Account-derived, not run-derived (terraform/s3.tf), so unlike `bucket`
+    # this is the same length in every real deployment and belongs in FIXED
+    # rather than SCENARIOS.
+    "registry_cache_bucket": "sregym-bench-registry-cache-819709950457",
 }
 
 # The values that actually vary in length, at both ends of what is plausible.

@@ -481,6 +481,26 @@ variable "results_bucket" {
   default     = ""
 }
 
+variable "registry_cache_bucket" {
+  description = <<-EOT
+    The S3 bucket every benchmark box's registry mirror reads the pre-seeded
+    image cache from (NOFireAI/sregym#150). Unlike results_bucket above, this
+    is not a bring-your-own override of an otherwise-managed default: this
+    config never creates this bucket itself. It is permanent, account-wide
+    infrastructure managed in NOFireAI/terraform's aws/sandbox/sregym, seeded
+    once by scripts/benchmark/seed_image_cache.sh from a developer machine,
+    and only ever read by a box, never written to. See terraform/README.md
+    for the apply and seed order.
+  EOT
+  type        = string
+  default     = "sregym-bench-registry-cache-819709950457"
+
+  validation {
+    condition     = length(var.registry_cache_bucket) > 0
+    error_message = "registry_cache_bucket must not be empty: setup_brain_go.sh's host-image gate treats an empty value as \"no bucket was ever configured\" and fails the box rather than silently falling back to Docker Hub."
+  }
+}
+
 variable "instance_profile_name" {
   description = <<-EOT
     Existing instance profile name to launch instances with. Empty creates a

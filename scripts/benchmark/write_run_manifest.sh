@@ -247,6 +247,23 @@ if [ -f "$BRAIN_GO_DIR/deploy/.env" ]; then
   [ -n "$effective_reasoning_effort" ] && EFFECTIVE_REASONING_EFFORT="$effective_reasoning_effort"
 fi
 
+# Which bytes this run's host images actually were: setup_brain_go.sh's own
+# gate records "<name>\t<ref>\t<loaded id>" per brain-go image to this file
+# once every one of them passed `docker image inspect`, and run_shard.sh
+# appends the same three columns for registry:2 and the kind node image once
+# it loads them. Empty when REGISTRY_CACHE_BUCKET was unset (a developer
+# machine) or neither script has run yet (write_run_manifest.sh --stages,
+# which only rewrites the stage lines of a manifest this block already
+# wrote).
+# "<name>:<ref>@<id>" per image, comma-joined, not a second JSON file: every
+# other per-image field in this manifest already uses that shape (see
+# seeded_connection_buckets above).
+HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
+BRAIN_GO_HOST_IMAGES=""
+if [ -f "$HOST_IMAGE_MANIFEST" ]; then
+  BRAIN_GO_HOST_IMAGES=$(awk -F'\t' '{printf "%s%s:%s@%s", (NR>1?",":""), $1, $2, $3}' "$HOST_IMAGE_MANIFEST")
+fi
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -303,6 +320,9 @@ fi
   # kind:value for the kubernetes connection's configmap_values setting,
   # native arm only. See the comment above SEEDED_CONFIGMAP_VALUES.
   echo "seeded_configmap_values=$SEEDED_CONFIGMAP_VALUES"
+  # name:ref@loaded-id per brain-go host image this run actually loaded from
+  # the S3 cache. See the comment above HOST_IMAGE_MANIFEST.
+  echo "brain_go_host_images=$BRAIN_GO_HOST_IMAGES"
 
   # Which stages ran. See emit_stages above; run_shard.sh calls this script a
   # second time with --stages once it has generated the tasklist, because at

@@ -31,6 +31,14 @@
 #
 # Separately, a grep that legitimately matches nothing fails its whole pipeline
 # under pipefail. Both cases are handled explicitly below.
+#
+# Image caches this does NOT seed, and does not check are seeded: see
+# terraform/README.md's "Image cache" section. scripts/benchmark/
+# image_cache.list is seeded once per account; brain-go's own host images
+# (scripts/benchmark/seed_host_images.sh --brain-go-ref) are seeded once per
+# brain_go_ref, so a ref this script resolves here for the first time needs
+# its own seed run before the apply below, or setup_brain_go.sh's gate aborts
+# the box naming every image still missing.
 
 set -euo pipefail
 

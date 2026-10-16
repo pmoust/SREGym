@@ -44,6 +44,54 @@ def _detail(message: str | None, limit: int = 160) -> str:
     return f" ({flat})"
 
 
+def _log_full_pull_failure_details(pods) -> None:
+    """At a readiness timeout, write each blocked container's full kubelet
+    message once, untruncated.
+
+    ``blocking_reason``'s one-line summary truncates the message to 160
+    characters for readability, and a pull failure's actual cause (a
+    registry rate limit, a full disk, a network timeout, a bad credential)
+    sits past that cut, so the summary alone cannot say why any pull failed
+    (run-20260903-0822 lost 61 of 63 problem-runs to deploy failures, 39 of
+    them ImagePullBackOff, and the archive could not say why any one of them
+    pulled). This runs once, at the timeout, rather than once per poll, so a
+    600s wait does not write the same message a few hundred times.
+
+    Best effort: this runs at the very end of wait_for_ready's timeout path,
+    right before it raises the real TimeoutError, and getattr's own except
+    arm in the poll loop above it does not cover this function. A diagnostic
+    that itself raised here would replace that real error with a less useful
+    one, so every field read is defended rather than assumed present.
+    """
+    try:
+        for pod in pods or []:
+            for status in pod.status.container_statuses or []:
+                if status.ready:
+                    continue
+
+                state = status.state
+                reason = None
+                message = None
+                if state and state.waiting and state.waiting.reason:
+                    reason = state.waiting.reason
+                    message = getattr(state.waiting, "message", None)
+                elif state and state.terminated and state.terminated.reason:
+                    reason = state.terminated.reason
+                    message = getattr(state.terminated, "message", None)
+
+                if message:
+                    logger.warning(
+                        "%s/%s container %s stuck on %s: %s",
+                        getattr(pod.metadata, "namespace", "?"),
+                        getattr(pod.metadata, "name", "?"),
+                        getattr(status, "name", "?"),
+                        reason,
+                        message,
+                    )
+    except Exception as e:
+        logger.warning("Could not log full pull-failure details: %r", e)
+
+
 class KubeCtl:
     def __init__(self):
         """Initialize the KubeCtl object and load the Kubernetes configuration."""
@@ -54,6 +102,7 @@ class KubeCtl:
             exit(1)
         self.core_v1_api = client.CoreV1Api()
         self.apps_v1_api = client.AppsV1Api()
+        self.batch_v1_api = client.BatchV1Api()
 
     def list_namespaces(self):
         """Return a list of all namespaces in the cluster."""
@@ -94,6 +143,31 @@ class KubeCtl:
         """Return a list of all deployments within a specified namespace."""
         kwargs = {"_request_timeout": timeout} if timeout is not None else {}
         return self.apps_v1_api.list_namespaced_deployment(namespace, **kwargs)
+
+    def list_stateful_sets(self, namespace, timeout: float | None = None):
+        """Return a list of all StatefulSets within a specified namespace."""
+        kwargs = {"_request_timeout": timeout} if timeout is not None else {}
+        return self.apps_v1_api.list_namespaced_stateful_set(namespace, **kwargs)
+
+    def list_daemon_sets(self, namespace, timeout: float | None = None):
+        """Return a list of all DaemonSets within a specified namespace."""
+        kwargs = {"_request_timeout": timeout} if timeout is not None else {}
+        return self.apps_v1_api.list_namespaced_daemon_set(namespace, **kwargs)
+
+    def list_replica_sets(self, namespace, timeout: float | None = None):
+        """Return a list of all ReplicaSets within a specified namespace."""
+        kwargs = {"_request_timeout": timeout} if timeout is not None else {}
+        return self.apps_v1_api.list_namespaced_replica_set(namespace, **kwargs)
+
+    def list_jobs(self, namespace, timeout: float | None = None):
+        """Return a list of all Jobs within a specified namespace."""
+        kwargs = {"_request_timeout": timeout} if timeout is not None else {}
+        return self.batch_v1_api.list_namespaced_job(namespace, **kwargs)
+
+    def list_cron_jobs(self, namespace, timeout: float | None = None):
+        """Return a list of all CronJobs within a specified namespace."""
+        kwargs = {"_request_timeout": timeout} if timeout is not None else {}
+        return self.batch_v1_api.list_namespaced_cron_job(namespace, **kwargs)
 
     def get_cluster_ip(self, service_name, namespace):
         """Retrieve the cluster IP address of a specified service within a namespace."""
@@ -273,6 +347,10 @@ class KubeCtl:
         # no poll ever returned, which is a different failure from pods that
         # returned and stayed unready, so the two must not read alike.
         last_not_ready: list[str] | None = None
+        # The raw pod objects behind the last poll's last_not_ready summary,
+        # so the timeout path below can log each blocked container's full
+        # kubelet message once the truncated one-line summary isn't enough.
+        last_pods: list | None = None
 
         while time.monotonic() < deadline:
             try:
@@ -306,8 +384,10 @@ class KubeCtl:
                     last_not_ready = [
                         self.blocking_reason(pod) for pod in all_pods if pod.metadata.name not in ready_names
                     ]
+                    last_pods = all_pods
                 else:
                     last_not_ready = []
+                    last_pods = []
 
             except Exception as e:
                 console.log(f"[red]Error checking pod statuses: {e}")
@@ -326,6 +406,7 @@ class KubeCtl:
             detail = "the namespace held no pods at all"
         else:
             detail = f"{len(last_not_ready)} not ready: " + "; ".join(last_not_ready)
+            _log_full_pull_failure_details(last_pods)
 
         raise Exception(
             f"[red]Timeout: Not all pods in {display_name} reached the Ready state within {max_wait} seconds. {detail}"

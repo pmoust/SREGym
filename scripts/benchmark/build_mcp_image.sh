@@ -44,6 +44,33 @@ if [ "${1:-}" = "--print-name" ]; then
   exit 0
 fi
 
+# mcp_server/Dockerfile's own FROM line. A plain `docker build` with no local
+# copy of this tag pulls it from Docker Hub itself, which is the one Docker
+# Hub reach a benchmark box would otherwise have outside kind. On a
+# benchmark box
+# (SREGYM_REGISTRY_MIRROR_ADDR set by run_shard.sh once the registry mirror
+# containers are up) this image is pulled through that mirror instead and
+# retagged to the bare name the Dockerfile asks for, so the build below finds
+# it already present and never contacts Docker Hub. On a developer machine
+# (no mirror running) this is a no-op and `docker build` pulls the base image
+# normally, same as before.
+BASE_IMAGE="python:3.12-slim"
+if [ -n "${SREGYM_REGISTRY_MIRROR_ADDR:-}" ]; then
+  port="$("$REPO_ROOT/scripts/benchmark/registry_mirror.sh" port docker.io)" || {
+    echo "build_mcp_image.sh: could not resolve the docker.io registry mirror port" >&2
+    exit 1
+  }
+  mirror_ref="127.0.0.1:${port}/library/${BASE_IMAGE}"
+  if ! docker pull "$mirror_ref" >&2; then
+    echo "build_mcp_image.sh: could not pull $BASE_IMAGE through the registry mirror ($mirror_ref); re-run scripts/benchmark/seed_image_cache.sh" >&2
+    exit 1
+  fi
+  if ! docker tag "$mirror_ref" "$BASE_IMAGE" >&2; then
+    echo "build_mcp_image.sh: could not tag $mirror_ref as $BASE_IMAGE" >&2
+    exit 1
+  fi
+fi
+
 # The build context is the repo root, not mcp_server/: the Dockerfile copies
 # pyproject.toml, uv.lock, sregym/, clients/, scripts/, llm_backend/ and
 # logger/ alongside mcp_server/.

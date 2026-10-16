@@ -63,3 +63,33 @@ def test_the_literal_string_false_is_not_mistaken_for_exhaustion():
 
 def test_no_rows_means_no_exhausted_problem():
     assert main_mod._deploy_exhausted_problems([]) == set()
+
+
+# --- _deploy_failed_snapshot: harness_failure="deploy_failed" (#145) --------
+#
+# Exhausting every deploy retry means start_problem() never got through to a
+# real attempt, for any of several reasons (a readiness-wait timeout, a
+# Helm.install RuntimeError, the native arm's own gate abort, or
+# inject_fault() itself raising). The row is a harness failure either way,
+# not an agent one: nothing ran, so there is no verdict the agent could have
+# gotten wrong.
+
+
+def test_an_exhausted_deploy_is_marked_as_a_deploy_failed_harness_failure():
+    snapshot = main_mod._deploy_failed_snapshot("p1", 2, 3, TimeoutError("did not complete its healthy rollout"))
+
+    assert snapshot["problem_id"] == "p1"
+    assert snapshot["attempt"] == 2
+    assert snapshot["deploy_failed"] is True
+    assert snapshot["deploy_attempts"] == 3
+    assert snapshot["harness_failure"] == "deploy_failed"
+    assert "did not complete" in snapshot["harness_failure_detail"]
+
+
+def test_a_deploy_failed_snapshot_with_no_captured_error_still_names_the_kind():
+    """Defensive: every real call site always has an exception by the time
+    all retries are exhausted, but the helper must not crash if one isn't."""
+    snapshot = main_mod._deploy_failed_snapshot("p1", 1, 3, None)
+
+    assert snapshot["harness_failure"] == "deploy_failed"
+    assert "harness_failure_detail" not in snapshot

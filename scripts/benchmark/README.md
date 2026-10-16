@@ -271,6 +271,55 @@ actually observed, how often did the agent reason correctly"). The gap
 between them is usually small, but it can be large when timeouts are
 common — the tool prints both specifically so nobody has to pick blind.
 
+**Harness failures are reported separately, not folded into either rate**
+(NOFireAI/sregym#145). An attempt can fail three different ways that have
+nothing to do with the agent's reasoning: `deploy_failed` (every deploy
+retry exhausted, for any reason, so the attempt never ran at all; these rows
+never even reach `score_run.py`'s per-attempt population, the same way an
+attempt with no verdict already didn't), `image_pull` (observed pod state
+shows a container or init container, for an image the harness did not plant
+as a fault on purpose, stuck on `ErrImagePull`/`ImagePullBackOff`; the wrk2
+load generator is the common case; `rolling_update_misconfigured`'s
+standalone `custom-service` baseline deployment is not an example of this:
+a cold pull of `python:3.9-slim` there makes `_wait_for_deployment_rollout`
+raise inside `inject_fault`, which `mark_fault_injected` re-raises, so that
+attempt ends as `deploy_failed` instead), and `recovery_error` (cleanup's
+`recover_fault` raised, usually because an earlier step in the same attempt
+never finished what `recover_fault` expected to find). Since NOFireAI/
+sregym#150, cold pulls are cut down by mirroring every benchmark image
+through a per-box, S3-backed registry cache instead of by a per-attempt
+pre-pull (see NOFIRE.md's registry mirror section), and `image_pull`'s rule
+changed to match: `sregym/conductor/image_pull_detection.py` flags a stuck
+container whose image is not one of four named, fixed fault images (the
+`incorrect_image` family's fake tag, `workload_imbalance`'s kube-proxy
+replacement, rolling_update's hang-init busybox, and
+`operator_wrong_operator_image`'s typo'd tag) and was already part of the
+app's deployed workload before the agent's first stage got control. An
+image the agent itself introduces after that point (for example a bad
+mitigation tag) is excluded the same as a fault image: a stuck pull on it is
+the agent's own mistake, not a harness problem.
+
+A `harness_failure` row still ran and still produced a real verdict (unlike
+`deploy_failed`), so `score_run.py` keeps counting every kind toward
+**strict**: strict already charges the system for every way it failed to
+deliver a clean result, harness included. Only `image_pull` is also excluded
+from **graded**, the same treatment an absent verdict already gets.
+`recovery_error` is reported but stays in graded: `recover_fault` runs
+during cleanup, after both Diagnosis and Mitigation are already graded, so
+it cannot have affected either verdict, and excluding it would bias the
+remaining pool toward attempts the agent never mitigated (a mitigated
+attempt is more likely to have a recovery failure, since the agent's own
+change is what `recover_fault` now has to work around). The printed report
+names each one by problem, attempt and kind under its own "harness
+failures" line, and `--json`'s `harness_failures` key carries the full
+breakdown. A CSV archived before this column existed reads as zero harness
+failures, not as unknown: the column's absence is indistinguishable from
+every attempt having an empty value in it, which is the correct reading for
+a run that predates the column. `run_stats.py` needed a small fix to match:
+`group_report()`'s `graded_ci95` now pairs `wilson_ci` with
+`graded_correct`, not `correct`, since an `image_pull` row can leave them
+different. `readout_run.py` computes no pass rate and needed no change.
+
 It also prints the judge's **continuous score** beside the binary rate.
 `Diagnosis.success` is `composite >= 0.70`, where the composite is
 `0.33*D1 + 0.33*D2 + 0.34*D3` from `rca_checklists.yaml`, so the binary

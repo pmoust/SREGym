@@ -5,6 +5,14 @@ import yaml
 from sregym.generators.fault.base import FaultInjector
 from sregym.service.kubectl import KubeCtl
 
+# A tag that never resolves on any registry, used by
+# inject_wrong_operator_image's fault pod. Named here, once, so the harness's
+# own image-pull detection (sregym/conductor/image_pull_detection.py) can
+# exclude this exact value rather than carry a second copy of the literal: a
+# pod stuck pulling this image is the fault under test, not a harness
+# failure.
+WRONG_OPERATOR_IMAGE = "pingcap/tidb-operatorr:v1.6.3"  # Typo in "operatorr"
+
 
 class K8SOperatorFaultInjector(FaultInjector):
     def __init__(self, namespace: str):
@@ -294,7 +302,7 @@ class K8SOperatorFaultInjector(FaultInjector):
                 "containers": [
                     {
                         "name": container_name,
-                        "image": "pingcap/tidb-operatorr:v1.6.3",  # Typo in 'operatorr'
+                        "image": WRONG_OPERATOR_IMAGE,
                     }
                 ]
             },

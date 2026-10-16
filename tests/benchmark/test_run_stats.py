@@ -42,6 +42,7 @@ _COLUMNS = [
     "tokens_cache_read",
     "tokens_cache_write",
     "tool_calls",
+    "harness_failure",
 ]
 
 
@@ -56,7 +57,7 @@ def _run(tmp_path, rows):
     return tmp_path
 
 
-def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", **tokens):
+def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", harness_failure="", **tokens):
     return {
         "problem_id": pid,
         "attempt": str(attempt),
@@ -67,6 +68,7 @@ def _row(pid, attempt=1, diag="", mitig="", ttl="", ttm="", **tokens):
         **{f"tokens_{k}": v for k, v in tokens.items() if k in ("input", "output", "cache_read", "cache_write")},
         "llm_calls": tokens.get("llm_calls", ""),
         "tool_calls": tokens.get("tool_calls", ""),
+        "harness_failure": harness_failure,
     }
 
 
@@ -223,6 +225,36 @@ def test_overall_report_matches_score_run_exactly(tmp_path):
     assert enriched["mitigation"]["graded_pct"] == plain["mitigation"]["graded_pct"]
     assert enriched["e2e"]["strict_pct"] == plain["e2e"]["strict_pct"]
     assert enriched["attempts"] == plain["attempts"] == 3
+
+
+def test_graded_ci95_pairs_graded_correct_with_graded_not_correct(tmp_path):
+    """Regression guard for #145: an image_pull harness failure can leave
+    "correct" (strict) and "graded_correct" different (a contaminated
+    attempt that scored True counts toward correct but is excluded from the
+    clean graded pool). If group_report ever reverts to pairing wilson_ci
+    with "correct" again, this fails immediately instead of only showing up
+    as a slightly-wrong confidence interval nobody double-checks by hand.
+    """
+    rows_in = [
+        _row("a", diag="True", mitig="True", ttl="100", ttm="200"),
+        _row("b", diag="True", mitig="True", ttl="100", ttm="200", harness_failure="image_pull"),
+    ]
+    rows = score_run.load(_run(tmp_path, rows_in))
+
+    plain = score_run.score(rows)
+    enriched = run_stats.group_report(rows)
+
+    assert plain["diagnosis"]["correct"] == 2
+    assert plain["diagnosis"]["graded_correct"] == 1
+    assert plain["diagnosis"]["graded"] == 1
+
+    # Pairing graded_correct (1) with graded (1) is a valid Wilson interval.
+    # Pairing "correct" (2, strict's numerator) with graded (1) would call
+    # wilson_ci(2, 1): successes exceeding n, which makes phat > 1 and
+    # takes a negative number's square root inside wilson_ci. That a revert
+    # back to "correct" would crash, not just read wrong, is exactly why
+    # this is worth pinning.
+    assert enriched["diagnosis"]["graded_ci95"] == run_stats.wilson_ci(1, 1)
 
 
 def test_per_category_attempt_counts_sum_to_the_overall_count(tmp_path):

@@ -316,18 +316,23 @@ def group_report(rows: list[dict]) -> dict:
         "diagnosis": {
             **s["diagnosis"],
             "strict_ci95": wilson_ci(s["diagnosis"]["correct"], s["attempts"]),
-            "graded_ci95": wilson_ci(s["diagnosis"]["correct"], s["diagnosis"]["graded"]),
+            # graded_correct, not correct: a harness-contaminated attempt
+            # counted in "correct" (strict) can be excluded from "graded"'s
+            # denominator, and pairing that numerator with this denominator
+            # would otherwise let correct > graded.
+            "graded_ci95": wilson_ci(s["diagnosis"]["graded_correct"], s["diagnosis"]["graded"]),
         },
         "mitigation": {
             **s["mitigation"],
             "strict_ci95": wilson_ci(s["mitigation"]["correct"], s["attempts"]),
-            "graded_ci95": wilson_ci(s["mitigation"]["correct"], s["mitigation"]["graded"]),
+            "graded_ci95": wilson_ci(s["mitigation"]["graded_correct"], s["mitigation"]["graded"]),
         },
         "e2e": {
             **s["e2e"],
             "strict_ci95": wilson_ci(s["e2e"]["correct"], s["attempts"]),
-            "graded_ci95": wilson_ci(s["e2e"]["correct"], s["e2e"]["graded"]),
+            "graded_ci95": wilson_ci(s["e2e"]["graded_correct"], s["e2e"]["graded"]),
         },
+        "harness_failures": s.get("harness_failures"),
         "censored": s["censored"],
     }
     for label, column in _CONTINUOUS_COLUMNS.items():

@@ -7,13 +7,16 @@ import shlex
 import shutil
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
 from sregym.conductor.constants import StartProblemResult
+from sregym.conductor.image_pull_detection import detect_image_pull_failures
 from sregym.conductor.oracles.detection import DetectionOracle
 from sregym.conductor.oracles.diagnosis_oracle import DiagnosisOracle
+from sregym.conductor.problems.base import fold_harness_failure
 from sregym.conductor.problems.registry import ProblemRegistry
 from sregym.conductor.utils import is_ordered_subset
 from sregym.generators.fault.inject_remote_os import RemoteOSFaultInjector
@@ -21,7 +24,7 @@ from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.generators.noise.manager import get_noise_manager
 from sregym.observer.jaeger import Jaeger
 from sregym.observer.otel_collector import OtelCollector
-from sregym.paths import CLUSTER_BASELINE_STATE_FILE
+from sregym.paths import BASE_PARENT_DIR, CLUSTER_BASELINE_STATE_FILE
 from sregym.service.apps.app_registry import AppRegistry
 from sregym.service.cluster_state import ClusterStateManager
 from sregym.service.dm_flakey_manager import DmFlakeyManager
@@ -31,6 +34,76 @@ from sregym.service.kubectl import KubeCtl
 from sregym.service.mcp_server import MCPServer
 from sregym.service.telemetry.loki import Loki
 from sregym.service.telemetry.prometheus import Prometheus
+
+_IMAGE_CACHE_LIST = BASE_PARENT_DIR / "scripts" / "benchmark" / "image_cache.list"
+
+
+def _container_images(pod_spec) -> list[str]:
+    """Every container and init-container image a PodSpec-shaped object
+    names: a live pod's own ``pod.spec``, or a workload controller's
+    ``spec.template.spec``. Reads the spec, not a status, so it names an
+    image whether or not anything has started pulling it yet."""
+    containers = list(getattr(pod_spec, "init_containers", None) or []) + list(
+        getattr(pod_spec, "containers", None) or []
+    )
+    return [image for c in containers if (image := getattr(c, "image", None))]
+
+
+def _pod_template_spec(obj, *, nested_job_template: bool = False):
+    """The PodSpec a workload-controller object's own pod template declares.
+
+    Deployment, StatefulSet, DaemonSet, ReplicaSet and Job all expose it at
+    ``spec.template.spec``. A CronJob nests one job template deeper, at
+    ``spec.job_template.spec.template.spec``.
+    """
+    spec = getattr(obj, "spec", None)
+    if nested_job_template:
+        spec = getattr(getattr(spec, "job_template", None), "spec", None)
+    return getattr(getattr(spec, "template", None), "spec", None)
+
+
+@lru_cache(maxsize=1)
+def _harness_cache_images() -> frozenset[str]:
+    """Every image scripts/benchmark/seed_image_cache.sh seeds for this
+    benchmark, in both the fully-qualified form image_cache.list spells a
+    docker.io path out in (NOFIRE.md's registry mirror section has why) and
+    the short form this codebase's own source actually writes in a pod spec
+    ("busybox:1.36", not "docker.io/library/busybox:1.36").
+
+    Conductor._detect_image_pull_harness_failure adds this to the pre-agent
+    namespace snapshot, not in place of it: an oracle or probe pod the
+    harness deploys outside the app's own namespace(s) is still
+    harness-owned, not something the agent introduced, and the
+    namespace-scoped snapshot never sees it no matter which Kubernetes
+    object kinds that scan covers.
+
+    Cached: the file does not change during a run, and every attempt would
+    otherwise re-read and re-parse it at least once.
+    """
+    try:
+        lines = _IMAGE_CACHE_LIST.read_text().splitlines()
+    except OSError:
+        return frozenset()
+
+    images: set[str] = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        images.add(line)
+        if line.startswith("docker.io/"):
+            short = line[len("docker.io/") :]
+            images.add(short)
+            if short.startswith("library/"):
+                images.add(short[len("library/") :])
+
+    # Docker's own implicit-tag rule: a reference with no tag at all means
+    # ":latest". A pod spec that writes the untagged form would otherwise
+    # miss every ":latest" entry above, since
+    # none of the forms added so far drop the tag entirely.
+    for image in [i for i in images if i.endswith(":latest")]:
+        images.add(image[: -len(":latest")])
+    return frozenset(images)
 
 
 @dataclass
@@ -103,6 +176,16 @@ class Conductor:
         # What the native arm's pre-fault gate found, or {"arm": "mcp"}. Read
         # by main.py, which writes it beside the attempt's other artifacts.
         self.native_arm_evidence: dict = {}
+
+        # Every container/init-container image observed in the app's own
+        # namespace(s) right after the fault is injected, before the agent's
+        # first stage gets control. _detect_image_pull_harness_failure uses
+        # this as the "harness-owned" baseline: an image the agent itself
+        # later introduces (a bad mitigation tag) is not in this set and so
+        # is never mistaken for a harness failure. Empty until _inject_fault
+        # populates it; empty also means "no snapshot taken", which falls
+        # back to the pre-snapshot behavior (see that method).
+        self._pre_agent_images: frozenset[str] = frozenset()
 
     @property
     def current_problem(self):
@@ -193,6 +276,7 @@ class Conductor:
         self.fault_injected_at = None
         self.fault_spec = None
         self.native_arm_evidence = {}
+        self._pre_agent_images = frozenset()
 
         if not self.tasklist:
             self.logger.warning("Empty tasklist; no stages configured for this problem.")
@@ -293,6 +377,7 @@ class Conductor:
         }
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
+        self._pre_agent_images = self._snapshot_namespace_images(problem)
 
         # The native arm only: hold the diagnosis stage until brain-go has a
         # publish from after the fault, so the investigation does not open on
@@ -417,9 +502,30 @@ class Conductor:
 
         # Recover fault using the captured problem reference
         if problem:
+            # Check observed pod state for a genuine image-pull failure
+            # before recover_fault runs: recovery can delete/replace the
+            # pods this needs to see, and this is a snapshot of how the
+            # attempt actually ran, not of cleanup's own aftermath.
+            self._detect_image_pull_harness_failure(problem)
+
             self.logger.info("[CLEANUP] Recovering fault...")
             problem.recover_fault()
             self.logger.info("[CLEANUP] Fault recovered")
+
+            # mark_fault_injected sets problem.harness_failure when
+            # recover_fault raised and was swallowed. Fold it into this
+            # attempt's own results here, before submission_stage flips to
+            # "done" and main.py reads self.results to build the row, so
+            # score_run.py's harness-failures report surfaces it. This does
+            # not remove the attempt from graded (score_run.py's
+            # GRADED_EXCLUDING_HARNESS_FAILURES is image_pull only):
+            # recover_fault runs after both Diagnosis and Mitigation are
+            # already graded, so a recovery error cannot have affected
+            # either verdict, and excluding it would bias the remaining
+            # pool, since a recovery is more likely to fail after the
+            # agent's own mitigation changed the deployment (a mitigated
+            # attempt), not before.
+            fold_harness_failure(problem, self.results)
 
         # Undeploy app using the captured problem reference
         self.logger.info("[CLEANUP] Undeploying app...")
@@ -969,6 +1075,161 @@ class Conductor:
         """Teardown problem.app and, if no other apps running, OpenEBS/Prometheus."""
         if self.problem:
             self.problem.app.cleanup()
+
+    # (lister attribute name, whether its pod template nests under a Job
+    # template). Deployment, StatefulSet, DaemonSet, ReplicaSet and Job all
+    # carry their pod template at spec.template; CronJob nests one job
+    # template deeper. A lister KubeCtl does not define (a test stub that
+    # only implements list_pods) is skipped, not treated as a failure: that
+    # is a smaller duck type choosing not to exercise this part of the scan,
+    # not a real cluster call that failed.
+    _WORKLOAD_LISTERS = (
+        ("list_deployments", False),
+        ("list_stateful_sets", False),
+        ("list_daemon_sets", False),
+        ("list_replica_sets", False),
+        ("list_jobs", False),
+        ("list_cron_jobs", True),
+    )
+
+    def _snapshot_namespace_images(self, problem) -> frozenset[str]:
+        """Every container and init-container image declared in the app's
+        own namespace(s): each live pod's own spec, plus the pod template of
+        every Deployment, StatefulSet, DaemonSet, ReplicaSet, Job and
+        CronJob, read right after the fault is injected and before the
+        agent's first stage gets control.
+
+        This is the "pre-agent" baseline _detect_image_pull_harness_failure
+        checks a stuck image against: an image the agent itself introduces
+        later (for example a bad tag it patches in during mitigation) is
+        never part of this set, so a pull stuck on it is scored as the
+        agent's own mistake, not folded into harness_failure and excluded
+        from graded.
+
+        Live pods alone used to miss anything whose pod does not exist yet at
+        snapshot time: a CronJob that has not fired, or a controller whose
+        pods were not yet created.
+        Reading the controller's own pod template catches these the same way
+        reading a live pod's spec rather than its container_statuses does:
+        both name a container's intended image whether or not anything has
+        started pulling it yet.
+
+        Never raises: a listing failure here, or a problem with no .app
+        namespaces to resolve, must not block fault injection. On any
+        failure, self.results["pre_agent_snapshot"] is set to "failed" (when
+        self.results exists; a bare test double need not have one) so
+        scoring can see the baseline was incomplete, rather than silently
+        trusting a partial snapshot. _detect_image_pull_harness_failure reads
+        that field back to decide whether it can still narrow known_images
+        safely.
+        """
+
+        def _mark_failed():
+            results = getattr(self, "results", None)
+            if isinstance(results, dict):
+                results["pre_agent_snapshot"] = "failed"
+
+        try:
+            app_namespaces = getattr(problem.app, "namespaces", None) or [problem.app.namespace]
+        except Exception as e:
+            self.logger.warning(f"[ENV] Could not resolve app namespaces for the pre-agent image snapshot: {e!r}")
+            _mark_failed()
+            return frozenset()
+
+        images: set[str] = set()
+        for ns in app_namespaces:
+            try:
+                pods = self.kubectl.list_pods(ns, timeout=30).items
+            except Exception as e:
+                self.logger.warning(f"[ENV] Could not list pods in {ns} for the pre-agent image snapshot: {e!r}")
+                _mark_failed()
+                continue
+            for pod in pods:
+                images.update(_container_images(getattr(pod, "spec", None)))
+
+            for lister_name, nested_job_template in self._WORKLOAD_LISTERS:
+                lister = getattr(self.kubectl, lister_name, None)
+                if lister is None:
+                    continue
+                try:
+                    objs = lister(ns, timeout=30).items
+                except Exception as e:
+                    self.logger.warning(
+                        f"[ENV] Could not list {lister_name} in {ns} for the pre-agent image snapshot: {e!r}"
+                    )
+                    _mark_failed()
+                    continue
+                for obj in objs:
+                    images.update(_container_images(_pod_template_spec(obj, nested_job_template=nested_job_template)))
+        return frozenset(images)
+
+    def _detect_image_pull_harness_failure(self, problem) -> None:
+        """At the start of cleanup, check observed pod state for a genuine
+        image-pull failure: a container in the app's own namespace(s) stuck
+        on ErrImagePull/ImagePullBackOff for an image the harness did not
+        plant as a fault.
+
+        A thin call onto
+        sregym.conductor.image_pull_detection.detect_image_pull_failures,
+        which does the actual matching (against a fixed, named exclude set,
+        not a pre-pull list, the benchmark no longer pre-pulls) and is
+        unit-tested directly against duck-typed pods; this method only
+        supplies the live pod list and known_images, and writes the result
+        into self.results.
+
+        known_images is self._pre_agent_images unioned with
+        _harness_cache_images() (every image scripts/benchmark/
+        seed_image_cache.sh seeds, which also covers an oracle or probe pod
+        running outside the app's own namespace(s), never visible to the
+        namespace-scoped snapshot): together they keep a pull stuck on an
+        image the agent itself introduced after the fault (not part of
+        either set) from being flagged as a harness failure.
+
+        When self.results["pre_agent_snapshot"] == "failed" (the snapshot
+        itself could not be trusted; see _snapshot_namespace_images),
+        known_images falls back to _harness_cache_images() alone (no
+        pre_agent_images to union it with) rather than None. None used to
+        mean "every non-excluded image is eligible to be flagged", which
+        does the opposite of what a snapshot failure should do: it flags an
+        agent's own bad mitigation tag as harness_failure too, which excuses
+        it from scoring (score_run.py's GRADED_EXCLUDING_HARNESS_FAILURES
+        drops it from graded) instead of counting it as the agent's mistake.
+        The static harness cache is
+        narrower than a real pre-agent snapshot (it cannot see an oracle or
+        probe pod's image that happens not to be statically listed), so a
+        snapshot failure can still occasionally miss a genuine harness
+        failure, but no longer manufactures a false one out of the agent's
+        own choice. self.results["pre_agent_snapshot"] is itself surfaced in
+        the run results (main.py writes self.results into the per-attempt
+        CSV), so a run where this happened is visible rather than silently
+        indistinguishable from a clean one.
+
+        Scoped to the app's own namespace(s) (the same app_namespaces
+        deploy_app() builds), which also covers the wrk2 load generator's job
+        pod: it runs in the app's namespace, not a separate one. Each
+        list_pods call is bounded to 30s, since this runs before the real
+        cleanup and must not let a slow or wedged API server stall it. Never
+        raises: a pod-listing failure here must not replace the real cleanup
+        (recover_fault, undeploy) with an exception of its own.
+        """
+        app_namespaces = getattr(problem.app, "namespaces", None) or [problem.app.namespace]
+        pods = []
+        for ns in app_namespaces:
+            try:
+                pods.extend(self.kubectl.list_pods(ns, timeout=30).items)
+            except Exception as e:
+                self.logger.warning(f"[CLEANUP] Could not list pods in {ns} for image-pull detection: {e!r}")
+
+        if self.results.get("pre_agent_snapshot") == "failed":
+            known_images = _harness_cache_images()
+        else:
+            pre_agent_images = getattr(self, "_pre_agent_images", frozenset())
+            known_images = (pre_agent_images | _harness_cache_images()) or None
+        detail = detect_image_pull_failures(pods, known_images=known_images)
+        if detail and "harness_failure" not in self.results:
+            self.logger.warning(f"[CLEANUP] Observed image-pull failure: {detail}")
+            self.results["harness_failure"] = "image_pull"
+            self.results["harness_failure_detail"] = detail
 
     def _preflight_openebs_udev_mount(self) -> None:
         if shutil.which("docker") is None:

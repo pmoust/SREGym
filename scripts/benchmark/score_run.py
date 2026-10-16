@@ -535,12 +535,67 @@ def _rate(correct: int, total: int) -> float | None:
     return None if total == 0 else round(100.0 * correct / total, 1)
 
 
+# harness_failure kinds that remove a completed attempt from the *_clean
+# graded pools (score()'s diag_graded_clean, mitig_graded_clean,
+# both_graded_clean). Only image_pull: a background workload image that
+# never finished pulling can starve the fault's own pod of scheduling or
+# readiness before diagnosis or mitigation ever ran, so the verdict is not a
+# clean read on the agent.
+#
+# recovery_error is deliberately not in this set. recover_fault runs during
+# cleanup, after both Diagnosis and Mitigation are already graded, so it
+# cannot have affected either verdict. There is nothing for it to have
+# tainted. Excluding it would also bias the remaining pool in the wrong
+# direction: a recovery is more likely to fail after the agent's own
+# mitigation already changed the deployment (i.e. on an attempt the agent
+# mitigated), not before, so dropping those rows would preferentially drop
+# mitigated attempts. recovery_error still shows up in the harness_failures
+# report below; it just does not shrink graded's denominator.
+GRADED_EXCLUDING_HARNESS_FAILURES = {"image_pull"}
+
+
+def _excluded_from_graded(row: dict) -> bool:
+    return _val(row, "harness_failure") in GRADED_EXCLUDING_HARNESS_FAILURES
+
+
 def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dict:
     attempts = len(rows)
     deploy_failed_rows = deploy_failed_rows or []
 
+    # An attempt the harness itself contaminated: a pod observed waiting on
+    # ErrImagePull/ImagePullBackOff for an image the harness owns (not one a
+    # fault planted on purpose), at the start of cleanup, or a recovery step
+    # that raised during cleanup. Unlike deploy_failed, the attempt here did
+    # run and did get a real verdict. The verdict just answers "did the
+    # harness stay out of the way" as much as "did the agent reason
+    # correctly". Absent on a CSV
+    # from before this column existed, which reads as "no harness failures",
+    # the same backward-compatible default every other optional column here
+    # already gets (NOFireAI/sregym#145).
+    harness_failed = [r for r in rows if _val(r, "harness_failure")]
+
+    # An attempt whose pre-agent image snapshot itself could not be taken
+    # (Conductor._snapshot_namespace_images: a pod-listing failure, or no
+    # app namespace to resolve). Not a harness_failure on its own: the
+    # attempt still ran and still got graded normally. Reported here because
+    # it narrows image-pull detection to the static harness cache instead of
+    # a real pre-agent snapshot for that one attempt (conductor.py's
+    # _detect_image_pull_harness_failure), which is the one window where a
+    # genuine image-pull harness failure could be missed. Empty on a CSV
+    # predating this column, same as harness_failures above.
+    pre_agent_snapshot_failed = [r for r in rows if _val(r, "pre_agent_snapshot") == "failed"]
+
     diag_graded = [r for r in rows if _val(r, "Diagnosis.success")]
     diag_ok = [r for r in diag_graded if _val(r, "Diagnosis.success") == "True"]
+    # The same two pools with GRADED_EXCLUDING_HARNESS_FAILURES attempts also
+    # taken out, used for graded_pct only. strict_pct keeps using
+    # diag_graded/diag_ok unfiltered: strict already charges the system for
+    # every verdict it could not reach, and a harness failure that still
+    # produced a real True/False verdict should not change what strict
+    # reports for that verdict, only what graded excludes from its own
+    # narrower population.
+    diag_graded_clean = [r for r in diag_graded if not _excluded_from_graded(r)]
+    diag_ok_clean = [r for r in diag_graded_clean if _val(r, "Diagnosis.success") == "True"]
 
     # Attempts the judge never scored. Split by whether the run's own rows
     # already keep them out of the rates: the current judge leaves
@@ -552,6 +607,8 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
     judge_failed_attempts = sorted((_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in judge_failed)
     mitig_graded = [r for r in rows if _val(r, "Mitigation.success")]
     mitig_ok = [r for r in mitig_graded if _val(r, "Mitigation.success") == "True"]
+    mitig_graded_clean = [r for r in mitig_graded if not _excluded_from_graded(r)]
+    mitig_ok_clean = [r for r in mitig_graded_clean if _val(r, "Mitigation.success") == "True"]
     # Anything neither True nor False was counted as a graded failure, silently
     # moving the rate. Collected so the reader is told rather than left guessing.
     odd_verdicts = sorted(
@@ -568,6 +625,12 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
     # denominator.
     e2e_ok = [r for r in rows if _val(r, "Diagnosis.success") == "True" and _val(r, "Mitigation.success") == "True"]
     both_graded = [r for r in rows if _val(r, "Diagnosis.success") and _val(r, "Mitigation.success")]
+    both_graded_clean = [r for r in both_graded if not _excluded_from_graded(r)]
+    e2e_ok_clean = [
+        r
+        for r in both_graded_clean
+        if _val(r, "Diagnosis.success") == "True" and _val(r, "Mitigation.success") == "True"
+    ]
 
     censored = [r for r in rows if _val(r, "timed_out") == "True"]
 
@@ -659,21 +722,64 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
         (_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in deploy_failed_rows if _val(r, "problem_id")
     )
 
+    harness_failed_attempts = sorted(
+        (_val(r, "problem_id"), _int(_val(r, "attempt")), _val(r, "harness_failure")) for r in harness_failed
+    )
+    harness_failed_by_kind: dict[str, int] = {}
+    for r in harness_failed:
+        kind = _val(r, "harness_failure")
+        harness_failed_by_kind[kind] = harness_failed_by_kind.get(kind, 0) + 1
+
+    pre_agent_snapshot_failed_attempts = sorted(
+        (_val(r, "problem_id"), _int(_val(r, "attempt"))) for r in pre_agent_snapshot_failed
+    )
+
+    # judge_failed_as_zero with the harness-contaminated attempts also taken
+    # out, so judge_scored_pct's denominator matches diag_graded_clean's
+    # population rather than mixing a clean numerator with an unclean one.
+    judge_failed_as_zero_clean = [r for r in judge_failed_as_zero if not _excluded_from_graded(r)]
+
     return {
         "attempts": attempts,
         "problems": len(problems),
         "deploy_failed": {"count": len(deploy_failed), "attempts": deploy_failed},
+        # Completed attempts the harness flagged (image_pull, recovery_error):
+        # ran and got a verdict, reported here for visibility regardless of
+        # kind. Distinct from deploy_failed, which never ran at all. Only
+        # image_pull actually narrows the *_clean graded pools below
+        # (GRADED_EXCLUDING_HARNESS_FAILURES); recovery_error is reported but
+        # does not remove the attempt from graded, since it runs after
+        # grading and cannot have affected either verdict. Empty on a CSV
+        # predating this column, which is the correct reading for a run that
+        # cannot have recorded one.
+        "harness_failures": {
+            "count": len(harness_failed),
+            "by_kind": harness_failed_by_kind,
+            "attempts": harness_failed_attempts,
+        },
+        "pre_agent_snapshot_failures": {
+            "count": len(pre_agent_snapshot_failed),
+            "attempts": pre_agent_snapshot_failed_attempts,
+        },
         "diagnosis": {
             "correct": len(diag_ok),
-            "graded": len(diag_graded),
+            # The graded numerator, which an image_pull harness failure can
+            # shrink below "correct": such an attempt that happened to score
+            # True still counts toward "correct" (strict), but is excluded
+            # here along with the rest of its population, so a caller pairing
+            # a rate with a Wilson interval (run_stats.py) does not
+            # accidentally divide a filtered denominator into an unfiltered
+            # numerator.
+            "graded_correct": len(diag_ok_clean),
+            "graded": len(diag_graded_clean),
             "strict_pct": _rate(len(diag_ok), attempts),
-            "graded_pct": _rate(len(diag_ok), len(diag_graded)),
+            "graded_pct": _rate(len(diag_ok_clean), len(diag_graded_clean)),
             "ungraded": attempts - len(diag_graded),
             # graded_pct with the judge's own failures taken out of the
             # denominator too. Equal to graded_pct on a run whose rows already
             # leave them ungraded; higher on an archived run that recorded
             # them as False.
-            "judge_scored_pct": _rate(len(diag_ok), len(diag_graded) - len(judge_failed_as_zero)),
+            "judge_scored_pct": _rate(len(diag_ok_clean), len(diag_graded_clean) - len(judge_failed_as_zero_clean)),
         },
         # The continuous endpoint, beside the binary one rather than instead
         # of it.
@@ -699,21 +805,28 @@ def score(rows: list[dict], deploy_failed_rows: list[dict] | None = None) -> dic
         "judge_parse_failures": {
             "count": len(judge_failed),
             "counted_as_failures": len(judge_failed_as_zero),
+            # The same count with harness-contaminated attempts also taken
+            # out, matching diagnosis.graded_correct/graded's population so
+            # the "excluding them" line below stays arithmetically
+            # consistent with judge_scored_pct.
+            "counted_as_failures_clean": len(judge_failed_as_zero_clean),
             "attempts": judge_failed_attempts,
         },
         "mitigation": {
             "correct": len(mitig_ok),
-            "graded": len(mitig_graded),
+            "graded_correct": len(mitig_ok_clean),
+            "graded": len(mitig_graded_clean),
             "strict_pct": _rate(len(mitig_ok), attempts),
-            "graded_pct": _rate(len(mitig_ok), len(mitig_graded)),
+            "graded_pct": _rate(len(mitig_ok_clean), len(mitig_graded_clean)),
             "absent": len(absent_mitig),
             "absent_all_censored": (None if not absent_mitig else len(absent_mitig) == len(absent_and_censored)),
         },
         "e2e": {
             "correct": len(e2e_ok),
+            "graded_correct": len(e2e_ok_clean),
             "strict_pct": _rate(len(e2e_ok), attempts),
-            "graded_pct": _rate(len(e2e_ok), len(both_graded)),
-            "graded": len(both_graded),
+            "graded_pct": _rate(len(e2e_ok_clean), len(both_graded_clean)),
+            "graded": len(both_graded_clean),
         },
         "censored": len(censored),
         "per_problem_tokens": _per_problem_tokens(rows),
@@ -1029,6 +1142,25 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
         for pid, attempt in dep_failed["attempts"]:
             out.append(f"    {pid} attempt {attempt}")
 
+    hf = s.get("harness_failures") or {"count": 0, "by_kind": {}, "attempts": []}
+    if hf["count"]:
+        by_kind = ", ".join(f"{kind}: {n}" for kind, n in sorted(hf["by_kind"].items()))
+        out.append(
+            f"  harness failures: {hf['count']} completed attempt(s) the harness flagged ({by_kind});"
+            " image_pull is excluded from graded (not strict), recovery_error is reported only:"
+        )
+        for pid, attempt, kind in hf["attempts"]:
+            out.append(f"    {pid} attempt {attempt} ({kind})")
+
+    pasf = s.get("pre_agent_snapshot_failures") or {"count": 0, "attempts": []}
+    if pasf["count"]:
+        out.append(
+            f"  pre-agent snapshot failed: {pasf['count']} attempt(s) could not take a real pre-agent image"
+            " snapshot, so image-pull detection fell back to the static harness cache for them:"
+        )
+        for pid, attempt in pasf["attempts"]:
+            out.append(f"    {pid} attempt {attempt}")
+
     if cov is not None:
         out.append(
             f"  coverage: {cov['found']}/{cov['expected']} expected attempts on record"
@@ -1042,17 +1174,17 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
     out.append("                 strict          graded          note")
     out.append(
         f"  Diagnosis      {_pct(d['strict_pct'])}  {d['correct']}/{s['attempts']}"
-        f"    {_pct(d['graded_pct'])}  {d['correct']}/{d['graded']}"
+        f"    {_pct(d['graded_pct'])}  {d['graded_correct']}/{d['graded']}"
         f"    {d['ungraded']} attempt(s) never graded"
     )
     out.append(
         f"  Mitigation     {_pct(m['strict_pct'])}  {m['correct']}/{s['attempts']}"
-        f"    {_pct(m['graded_pct'])}  {m['correct']}/{m['graded']}"
+        f"    {_pct(m['graded_pct'])}  {m['graded_correct']}/{m['graded']}"
         f"    {m['absent']} absent" + (", all censored" if m["absent_all_censored"] and m["absent"] else "")
     )
     out.append(
         f"  End to end     {_pct(e['strict_pct'])}  {e['correct']}/{s['attempts']}"
-        f"    {_pct(e['graded_pct'])}  {e['correct']}/{e['graded']}"
+        f"    {_pct(e['graded_pct'])}  {e['graded_correct']}/{e['graded']}"
     )
     jpf = s.get("judge_parse_failures") or {"count": 0, "counted_as_failures": 0, "attempts": []}
     if jpf["count"]:
@@ -1069,7 +1201,8 @@ def render(s: dict, tok: dict | None, cov: dict | None = None, model_id: str | N
             )
             out.append(
                 f"  rates above count them as wrong answers. Excluding them the graded rate is "
-                f"{_pct(d['judge_scored_pct'])} ({d['correct']}/{d['graded'] - jpf['counted_as_failures']})."
+                f"{_pct(d['judge_scored_pct'])} "
+                f"({d['graded_correct']}/{d['graded'] - jpf['counted_as_failures_clean']})."
             )
         else:
             out.append("  They are already out of the graded rate; strict still counts them as failures.")

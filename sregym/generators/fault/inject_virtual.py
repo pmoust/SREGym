@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,14 @@ from sregym.service.helm import Helm
 from sregym.service.kubectl import KubeCtl
 
 DAEMON_SET_RECOVERY_STATE_DIR = CACHE_DIR / "daemon_set_recovery"
+
+# rolling-update-misconfigured's fault init container, standalone (not part
+# of any app's Helm chart). Named here, once, rather than left as a literal
+# at the one call site below, because the harness's own image-pull detection
+# (sregym/conductor/conductor.py) imports this exact value to exclude it: a
+# pod stuck pulling it is the fault under test (it sleeps forever by design;
+# see inject_rolling_update_misconfigured below), not a harness failure.
+CUSTOM_SERVICE_HANG_INIT_IMAGE = "busybox:1.36"
 
 
 class VirtualizationFaultInjector(FaultInjector):
@@ -1917,13 +1926,59 @@ class VirtualizationFaultInjector(FaultInjector):
 
             time.sleep(sleep)
 
+        self._log_rollout_timeout_diagnostics(service)
         raise TimeoutError(f"Deployment '{service}' did not complete its healthy baseline rollout within {timeout}s")
+
+    def _log_rollout_timeout_diagnostics(self, service: str) -> None:
+        """Best-effort dump of rollout status and pod events for a
+        deployment that did not reach a healthy baseline in time.
+
+        The bare timeout message above names no pod and no reason, which
+        cost a full investigation when this read as an agent failure rather
+        than an image that never finished pulling. `kubectl describe pod`
+        carries its own full, untruncated Events section, so this needs no
+        separate truncation handling the way kubectl.py's blocking_reason
+        does. Never raises: a diagnostics failure must not replace the real
+        TimeoutError with a less useful one.
+        """
+        try:
+            status = self.kubectl.exec_command(
+                f"kubectl rollout status deployment/{service} -n {self.namespace} --timeout=1s"
+            )
+            print(f"[rollout-timeout] rollout status for {service}:\n{status.strip()}")
+        except Exception as e:
+            print(f"[rollout-timeout] could not read rollout status for {service}: {e!r}")
+
+        try:
+            pods_out = self.kubectl.exec_command(
+                f"kubectl get pods -n {self.namespace} -l app={service} "
+                "-o jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'"
+            )
+            pod_names = [p.strip() for p in pods_out.splitlines() if p.strip()]
+            if not pod_names:
+                print(f"[rollout-timeout] no pods found for deployment/{service} in {self.namespace}")
+            for pod_name in pod_names:
+                describe = self.kubectl.exec_command(f"kubectl describe pod {pod_name} -n {self.namespace}")
+                print(f"[rollout-timeout] pod describe for {pod_name}:\n{describe}")
+        except Exception as e:
+            print(f"[rollout-timeout] could not read pod events for deployment/{service}: {e!r}")
 
     # Inject Rolling Update Misconfiguration
     def inject_rolling_update_misconfigured(self, microservices: list[str]):
         import tempfile
 
         for service in microservices:
+            # A stale file from an earlier attempt (a different namespace, a
+            # different baseline) must not be mistaken for this attempt's
+            # own baseline: recover_rolling_update_misconfigured's own
+            # FileNotFoundError guard only checks that *some* file exists at
+            # this path, so a leftover here would pass it and get applied
+            # against the wrong cluster state (NOFireAI/sregym#145). Cleared
+            # before the baseline rollout below, so a timeout here correctly
+            # leaves no file at all, not the previous attempt's one.
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(f"/tmp/{service}-orig.yaml")
+
             base_dep = {
                 "apiVersion": "apps/v1",
                 "kind": "Deployment",
@@ -1969,7 +2024,7 @@ class VirtualizationFaultInjector(FaultInjector):
             }
             init = {
                 "name": "hang-init",
-                "image": "busybox:1.36",
+                "image": CUSTOM_SERVICE_HANG_INIT_IMAGE,
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["/bin/sh", "-c", "sleep infinity"],
             }
@@ -1992,6 +2047,22 @@ class VirtualizationFaultInjector(FaultInjector):
             delete_command = f"kubectl delete deployment {service} -n {self.namespace}"
             delete_result = self.kubectl.exec_command(delete_command)
             print(f"Deleted faulty deployment {service}: {delete_result}")
+
+            if not os.path.exists(original_yaml_path):
+                # inject_rolling_update_misconfigured only writes this file after
+                # the baseline rollout succeeds. If injection never got that far
+                # (the baseline timed out, NOFireAI/sregym#145), there is nothing
+                # to restore. Applying a nonexistent file would just produce a
+                # kubectl "the path ... does not exist" error with no indication
+                # of why: exec_command() logs that as a returned string, not an
+                # exception, so it would otherwise pass silently. Raise instead so
+                # the caller's mark_fault_injected decorator records this as a
+                # harness_failure ("recovery_error") rather than losing it. The
+                # faulty deployment is still deleted above either way.
+                raise FileNotFoundError(
+                    f"No baseline manifest at {original_yaml_path} for '{service}': the baseline "
+                    "rollout never completed, so there is nothing to restore."
+                )
 
             apply_command = f"kubectl apply -f {original_yaml_path} -n {self.namespace}"
             apply_result = self.kubectl.exec_command(apply_command)

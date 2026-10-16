@@ -29,6 +29,11 @@ locals {
 
   bucket = var.results_bucket != "" ? var.results_bucket : aws_s3_bucket.results[0].id
 
+  # Always var.registry_cache_bucket, never a resource this config creates:
+  # see s3.tf for why the cache bucket moved to NOFireAI/terraform's standing
+  # infrastructure instead of being declared per-run here.
+  registry_cache_bucket = var.registry_cache_bucket
+
   instance_profile_name = var.instance_profile_name != "" ? var.instance_profile_name : aws_iam_instance_profile.bench[0].name
 
   # brain-go bounds one chat turn at CHAT_SERVICE_TURN_TIMEOUT, defaulting to

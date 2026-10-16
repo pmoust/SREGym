@@ -558,6 +558,31 @@ def _deploy_exhausted_problems(agent_results: list[dict]) -> set[str]:
     }
 
 
+def _deploy_failed_snapshot(pid: str, attempt: int, deploy_attempts: int, last_error: Exception | None) -> dict:
+    """The result row for an attempt that exhausted every deploy retry.
+
+    Not only a readiness-wait timeout: start_problem() (which this retry loop
+    calls) can also exhaust its retries on a Helm.install RuntimeError
+    (app.deploy()), the native arm's own gate abort (native_arm_check(), run
+    from _inject_fault()), or problem.inject_fault() itself raising. Every one
+    of them means the attempt never ran: no diagnosis, no mitigation, nothing
+    for the oracle to grade. harness_failure="deploy_failed" marks that
+    distinction for scoring, which otherwise has no way to tell "the harness
+    never got this far" apart from "the agent reasoned badly" once this row
+    sits next to a real result in the same CSV (NOFireAI/sregym#145).
+    """
+    snapshot = {
+        "problem_id": pid,
+        "attempt": attempt,
+        "deploy_failed": True,
+        "deploy_attempts": deploy_attempts,
+        "harness_failure": "deploy_failed",
+    }
+    if last_error is not None:
+        snapshot["harness_failure_detail"] = str(last_error)
+    return snapshot
+
+
 def driver_loop(
     conductor: Conductor,
     problem_selection: Sequence[str] | None = None,
@@ -701,12 +726,14 @@ def driver_loop(
                 # clock. run-20260902-0606 spent 12 of them and scored the same
                 # as a run that spent none (#53).
                 deploy_attempts = 0
+                last_deploy_error: Exception | None = None
                 for deploy_attempt in range(1, max_deploy_retries + 1):
                     deploy_attempts = deploy_attempt
                     try:
                         result = await conductor.start_problem()
                         break  # Success — exit retry loop
                     except Exception as e:
+                        last_deploy_error = e
                         console.log(
                             f"❌ start_problem failed for '{pid}' "
                             f"(deploy attempt {deploy_attempt}/{max_deploy_retries}): {e}"
@@ -732,12 +759,7 @@ def driver_loop(
                         conductor._finish_problem()
                     except Exception as cleanup_err:
                         console.log(f"⚠️  Cleanup after exhausted deploy retries failed (non-fatal): {cleanup_err}")
-                    snapshot = {
-                        "problem_id": pid,
-                        "attempt": attempt,
-                        "deploy_failed": True,
-                        "deploy_attempts": deploy_attempts,
-                    }
+                    snapshot = _deploy_failed_snapshot(pid, attempt, deploy_attempts, last_deploy_error)
                     all_results_for_agent.append(snapshot)
                     fieldnames = sorted({key for row in all_results_for_agent for key in row})
                     with open(tmp_path, "w", newline="") as csvfile:

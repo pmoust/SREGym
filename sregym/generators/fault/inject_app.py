@@ -12,6 +12,13 @@ from sregym.service.kubectl import KubeCtl
 
 FEATURE_FLAG_EXPERIMENTAL_ROUTING_IMAGE = HOTEL_RESERVATION_APPLICATION_IMAGE
 
+# A tag that never resolves on any registry, used by inject_incorrect_image's
+# default bad_image. Named here, once, so the harness's own image-pull
+# detection (sregym/conductor/conductor.py) can exclude this exact value
+# rather than carry a second copy of the literal: a pod stuck pulling this
+# image is the fault under test, not a harness failure.
+INCORRECT_IMAGE_DEFAULT = "app-image:latest"
+
 
 class ApplicationFaultInjector(FaultInjector):
     def __init__(self, namespace: str):
@@ -374,7 +381,7 @@ class ApplicationFaultInjector(FaultInjector):
         print(f"Recovered {env_var} in {deployment_name} to use port {correct_port}.")
 
     # A.6 incorrect_image: checkout service is updated to use a bad image
-    def inject_incorrect_image(self, deployment_name: str, namespace: str, bad_image: str = "app-image:latest"):
+    def inject_incorrect_image(self, deployment_name: str, namespace: str, bad_image: str = INCORRECT_IMAGE_DEFAULT):
         # Get current deployment for container name
         deployment = self.kubectl.get_deployment(deployment_name, namespace)
         container_name = deployment.spec.template.spec.containers[0].name

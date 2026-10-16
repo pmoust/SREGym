@@ -115,6 +115,7 @@ resource "aws_instance" "bench" {
     shard_count           = var.instance_count
     region                = var.region
     bucket                = local.bucket
+    registry_cache_bucket = local.registry_cache_bucket
     sregym_ref            = var.sregym_ref
     brain_go_ref          = var.brain_go_ref
     github_token_ssm_path = var.github_token_ssm_path
