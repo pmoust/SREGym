@@ -72,8 +72,31 @@ def test_does_not_flag_the_kube_proxy_replacement_fault():
     assert detect_image_pull_failures([pod]) is None
 
 
-def test_does_not_flag_the_rolling_update_hang_init_image():
-    pod = _pod("social-network", "custom-service-abc", CUSTOM_SERVICE_HANG_INIT_IMAGE)
+def test_flags_a_missing_busybox_probe_image():
+    """busybox:1.36 is both the hang-init fault's image and the probe image
+    many oracles use. A pull stuck on it is a cache or registry miss, so it
+    is a harness failure, not a fault working as designed."""
+    pod = _pod("hotel-reservation", "probe-abc", CUSTOM_SERVICE_HANG_INIT_IMAGE)
+
+    detail = detect_image_pull_failures([pod])
+
+    assert detail is not None
+    assert CUSTOM_SERVICE_HANG_INIT_IMAGE in detail
+
+
+def test_does_not_flag_the_running_hang_init_container():
+    """The hang-init fault's container runs sleep infinity once its image is
+    present, so it is never in an image-pull waiting reason."""
+    pod = _pod(
+        "social-network",
+        "custom-service-abc",
+        "harmless:latest",
+        reason="Pending",
+        init_images=[CUSTOM_SERVICE_HANG_INIT_IMAGE],
+        # Any reason outside ErrImagePull and ImagePullBackOff; the helper
+        # cannot express a running container, which reads the same way.
+        init_reason="PodInitializing",
+    )
 
     assert detect_image_pull_failures([pod]) is None
 
@@ -102,7 +125,7 @@ def test_an_excluded_image_in_an_init_container_is_still_not_flagged():
         "custom-service-abc",
         "harmless:latest",
         reason="Pending",
-        init_images=[CUSTOM_SERVICE_HANG_INIT_IMAGE],
+        init_images=[INCORRECT_IMAGE_DEFAULT],
     )
 
     assert detect_image_pull_failures([pod]) is None
@@ -125,11 +148,10 @@ def test_does_not_flag_the_wrong_operator_image_fault():
     assert detect_image_pull_failures([pod]) is None
 
 
-def test_fault_introduced_images_has_exactly_the_four_known_faults():
+def test_fault_introduced_images_has_exactly_the_three_known_faults():
     assert {
         INCORRECT_IMAGE_DEFAULT,
         "docker.io/jackcuii/kube-proxy:v1.31.12",
-        CUSTOM_SERVICE_HANG_INIT_IMAGE,
         WRONG_OPERATOR_IMAGE,
     } == FAULT_INTRODUCED_IMAGES
 

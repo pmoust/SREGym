@@ -22,15 +22,17 @@ namespace(s) is waiting on", with two things subtracted out:
     injected into kube-system, outside any app's own namespace, so today's
     namespace-scoped scan would not see it anyway; excluded for the same
     reason the others are, in case that scope ever widens.
-  - ``inject_virtual.CUSTOM_SERVICE_HANG_INIT_IMAGE`` ("busybox:1.36"): the
-    rolling_update_misconfigured fault's init container, which sleeps
-    forever by design (``sleep infinity``) and is not an image-pull problem
-    even though it keeps the pod pending.
   - ``inject_operator.WRONG_OPERATOR_IMAGE`` ("pingcap/tidb-operatorr:v1.6.3",
     typo in "operatorr"): a tag that exists on no registry, the fault under
     test for operator_wrong_operator_image.
 
-  Four images today; see FAULT_INTRODUCED_IMAGES for the current set rather
+  The rolling_update_misconfigured fault's hang-init container
+  (``inject_virtual.CUSTOM_SERVICE_HANG_INIT_IMAGE``, "busybox:1.36") needs
+  no exclusion: once its image is present it runs ``sleep infinity`` and
+  never enters an image-pull waiting reason. Excluding it would also hide a
+  real cache miss on busybox:1.36, the probe image many oracles use.
+
+  Three images today; see FAULT_INTRODUCED_IMAGES for the current set rather
   than trusting a number in this docstring to stay in sync.
 
 - Any image not present in the caller's ``known_images`` (the set of images
@@ -55,7 +57,6 @@ from __future__ import annotations
 from sregym.conductor.problems.workload_imbalance import KUBE_PROXY_REPLACEMENT_IMAGE
 from sregym.generators.fault.inject_app import INCORRECT_IMAGE_DEFAULT
 from sregym.generators.fault.inject_operator import WRONG_OPERATOR_IMAGE
-from sregym.generators.fault.inject_virtual import CUSTOM_SERVICE_HANG_INIT_IMAGE
 
 # A container waiting on one of these is a fault working as designed, never
 # a harness failure. See the module docstring for what each one is and why.
@@ -63,7 +64,6 @@ FAULT_INTRODUCED_IMAGES = frozenset(
     {
         INCORRECT_IMAGE_DEFAULT,
         KUBE_PROXY_REPLACEMENT_IMAGE,
-        CUSTOM_SERVICE_HANG_INIT_IMAGE,
         WRONG_OPERATOR_IMAGE,
     }
 )

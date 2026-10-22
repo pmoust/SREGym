@@ -197,10 +197,12 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   problem planted and not something the agent introduced. This also fixes a
   gap the pre-pull-era detector had and documented rather than fixed: it
   only read `container_statuses`, so a stuck init container was a false
-  negative; the exclude-list detector reads `init_container_statuses` too,
-  with the hang-init image's own exclusion keeping that addition from
-  producing a new false positive on the one init container that is expected
-  to hang.
+  negative; the exclude-list detector reads `init_container_statuses` too.
+  The one init container expected to hang (rolling_update_misconfigured's
+  `busybox:1.36`, running `sleep infinity`) needs no exclusion: once its
+  image is present it is running, never in an image-pull waiting reason.
+  Excluding it would also hide a real cache miss on `busybox:1.36`, the
+  probe image many oracles use.
   `sregym/conductor/problems/base.py`'s `Problem.EXTRA_PREPULL_IMAGES` and
   `sregym/service/kubectl.py`'s `list_docker_nodes()` (the pre-pull step's
   only other caller) are both gone with the module that used them.
