@@ -64,12 +64,24 @@ def _resolve_local_chart(chart_path: str) -> tuple[str, tempfile.TemporaryDirect
     exact version the chart declares. A dependency missing from both raises
     before any `helm` subprocess runs, naming the chart and the dependency.
 
+    A chart_path with no Chart.yaml at that path is not a local chart
+    directory: it is a Helm repo coordinate such as "chaos-mesh/chaos-mesh"
+    (a caller that sets remote_chart=True never reaches this function, but
+    one that omits the flag and passes a coordinate anyway, like
+    ChaosInjector, still needs to work). It is returned unmodified, with no
+    dependency resolution, matching this repo's pre-vendoring behavior for
+    a repo coordinate.
+
     Returns (path_to_pass_to_helm, tmp_dir). tmp_dir is None when
     chart_path can be used unmodified; otherwise the caller must keep it
     alive until the helm command has run and then call tmp_dir.cleanup().
     """
     chart_dir = Path(chart_path)
-    with open(chart_dir / "Chart.yaml") as f:
+    chart_yaml_path = chart_dir / "Chart.yaml"
+    if not chart_yaml_path.is_file():
+        return chart_path, None
+
+    with open(chart_yaml_path) as f:
         chart_yaml = yaml.safe_load(f) or {}
 
     dependencies = chart_yaml.get("dependencies") or []

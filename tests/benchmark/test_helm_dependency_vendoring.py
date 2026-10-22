@@ -54,6 +54,18 @@ class TestResolveLocalChart:
         assert resolved_path == str(chart_dir)
         assert tmp_dir is None
 
+    def test_repo_coordinate_chart_path_passed_through_unmodified(self, tmp_path):
+        """A Helm repo coordinate such as "chaos-mesh/chaos-mesh" has no
+        Chart.yaml at that path: ChaosInjector passes exactly this shape,
+        with no remote_chart flag set
+        (sregym/generators/noise/impl/stress_injector.py). It must reach
+        `helm install` unresolved rather than raising FileNotFoundError
+        trying to open a Chart.yaml that was never there."""
+        resolved_path, tmp_dir = helm_module._resolve_local_chart("chaos-mesh/chaos-mesh")
+
+        assert resolved_path == "chaos-mesh/chaos-mesh"
+        assert tmp_dir is None
+
     def test_dependency_already_present_as_tgz_needs_no_copy(self, tmp_path):
         chart_dir = tmp_path / "chart-with-tgz-dep"
         _write_chart(chart_dir, "chart-with-tgz-dep", [{"name": "dep", "version": "1.2.3"}])
@@ -166,6 +178,30 @@ class TestResolveLocalChart:
         assert len(commands) == 1
         assert "dependency update" not in commands[0]
         assert "helm install" in commands[0]
+
+    def test_install_repo_coordinate_with_no_remote_chart_flag_does_not_crash(self, monkeypatch):
+        """Regression test for the ChaosInjector caller shape: a repo
+        coordinate chart_path with no remote_chart flag set must still
+        reach `helm install`, not raise FileNotFoundError before any
+        subprocess runs."""
+        commands = []
+
+        class _FakeProcess:
+            returncode = 0
+
+            def communicate(self):
+                return b"", b""
+
+        def fake_popen(command, **kwargs):
+            commands.append(command)
+            return _FakeProcess()
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        Helm.install(release_name="chaos-mesh", chart_path="chaos-mesh/chaos-mesh", namespace="ns")
+
+        assert len(commands) == 1
+        assert "chaos-mesh/chaos-mesh" in commands[0]
 
 
 @pytest.mark.skipif(

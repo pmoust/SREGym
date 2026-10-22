@@ -99,3 +99,31 @@ def test_full_pull_failure_detail_is_silent_without_a_message():
         kubectl_module._log_full_pull_failure_details([pod])
 
     assert records == []
+
+
+def test_full_pull_failure_detail_covers_init_containers():
+    # A pod blocked on an init container's image pull has no main container
+    # statuses yet, so this must look at init_container_statuses too, the
+    # same as detect_image_pull_failures already does
+    # (sregym/conductor/image_pull_detection.py).
+    long_message = 'Back-off pulling image "chaos-mesh/wait-for-dep:latest": ' + ("detail " * 40)
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(namespace="ns", name="init-blocked-pod"),
+        status=SimpleNamespace(
+            init_container_statuses=[
+                SimpleNamespace(
+                    name="init-wait",
+                    ready=False,
+                    state=SimpleNamespace(
+                        waiting=SimpleNamespace(reason="ImagePullBackOff", message=long_message), terminated=None
+                    ),
+                )
+            ],
+            container_statuses=[],
+        ),
+    )
+
+    with _collect_records() as records:
+        kubectl_module._log_full_pull_failure_details([pod])
+
+    assert any(long_message in record.getMessage() for record in records)

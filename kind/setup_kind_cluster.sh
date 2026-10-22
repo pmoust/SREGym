@@ -203,7 +203,10 @@ if [ -n "${SREGYM_REGISTRY_MIRROR_ADDR:-}" ]; then
     # worse outcome than stopping here and asking for an "extraMounts:" key
     # to be added to that node.
     nodes_total=$(grep -c '^  - role:' "${MIRRORED_CONFIG}")
-    nodes_mounted=$(grep -c '^        containerPath: /etc/containerd/certs.d$' "${MIRRORED_CONFIG}")
+    # || true: grep -c exits 1 when the count is zero, which under
+    # set -euo pipefail would kill the script at this assignment before
+    # the diagnostic below can report the exact failure it exists for.
+    nodes_mounted=$(grep -c '^        containerPath: /etc/containerd/certs.d$' "${MIRRORED_CONFIG}" || true)
     if [ "${nodes_mounted}" -lt "${nodes_total}" ]; then
         echo "❌ ${nodes_mounted}/${nodes_total} nodes in ${KIND_CONFIG} have an 'extraMounts:' key to extend; add one to every node (see kind-config-x86.yaml) before using SREGYM_REGISTRY_MIRROR_ADDR"
         exit 1

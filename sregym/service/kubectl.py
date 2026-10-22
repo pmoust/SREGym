@@ -48,6 +48,11 @@ def _log_full_pull_failure_details(pods) -> None:
     """At a readiness timeout, write each blocked container's full kubelet
     message once, untruncated.
 
+    Covers init containers as well as main containers, the same as
+    ``detect_image_pull_failures``: a pod blocked on an init container's
+    image pull has no main container statuses yet, so skipping init
+    containers here would log nothing for the one container actually stuck.
+
     ``blocking_reason``'s one-line summary truncates the message to 160
     characters for readability, and a pull failure's actual cause (a
     registry rate limit, a full disk, a network timeout, a bad credential)
@@ -65,7 +70,10 @@ def _log_full_pull_failure_details(pods) -> None:
     """
     try:
         for pod in pods or []:
-            for status in pod.status.container_statuses or []:
+            statuses = list(getattr(pod.status, "init_container_statuses", None) or []) + list(
+                getattr(pod.status, "container_statuses", None) or []
+            )
+            for status in statuses:
                 if status.ready:
                     continue
 
