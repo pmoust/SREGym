@@ -201,10 +201,12 @@ echo "[bootstrap] private address $SREGYM_PRIVATE_IP"
 HOST_IMAGE_TMP="$WORKDIR/host-images"
 mkdir -p "$HOST_IMAGE_TMP"
 # Appended to the same manifest setup_brain_go.sh's gate writes brain-go's
-# own host images to (SREGYM_HOST_IMAGE_MANIFEST, same default path), so
-# write_run_manifest.sh's one read of that file states which bytes every
-# host image this run used actually were, registry:2 and the kind node
-# image included, not just brain-go's own.
+# own host images to (SREGYM_HOST_IMAGE_MANIFEST, same default path). The
+# bootstrap's one call to write_run_manifest.sh already ran before this file
+# was sourced, the same ordering problem --stages solves for the tasklist
+# below, so the refresh right after this loop is what makes
+# brain_go_host_images name registry:2 and the kind node image, not just
+# brain-go's own.
 HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
 for pair in "registry2 registry:2" "kindnode-x86 jacksonarthurclark/aiopslab-kind-x86:latest"; do
   hi_name="${pair%% *}"
@@ -216,6 +218,13 @@ for pair in "registry2 registry:2" "kindnode-x86 jacksonarthurclark/aiopslab-kin
   hi_id=$(docker image inspect --format '{{.Id}}' "$hi_ref" 2>/dev/null) || hi_id=""
   printf '%s\t%s\t%s\n' "$hi_name" "$hi_ref" "$hi_id" >>"$HOST_IMAGE_MANIFEST"
 done
+# Refreshed from the same file the first write read, not a second copy of
+# the derivation: see write_run_manifest.sh's emit_host_images. Best effort,
+# like the --stages refresh above: the manifest is provenance, and losing
+# it must not end a run that is otherwise ready to go.
+if [ -n "${MANIFEST:-}" ] && [ -f "${MANIFEST:-}" ]; then
+  bash "$WORKDIR/scripts/benchmark/write_run_manifest.sh" --host-images "$MANIFEST" || true
+fi
 
 # --- registry mirror ---------------------------------------------------
 # Every arm's kind clusters pull through here instead of Docker Hub, ghcr.io,

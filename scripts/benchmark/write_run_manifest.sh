@@ -19,23 +19,28 @@
 #
 # Usage: write_run_manifest.sh <output-path>
 #        write_run_manifest.sh --stages <output-path>
+#        write_run_manifest.sh --host-images <output-path>
 #
 # Reads its content from the environment, so the caller decides what is known.
-# The second form rewrites only the stage lines of a manifest this script
-# already wrote, for the one field that is not knowable when the rest is: the
+# --stages and --host-images each rewrite one field of a manifest this script
+# already wrote, for a value that is not knowable when the rest is: the
 # bootstrap writes the manifest and only then sources run_shard.sh, which is
-# where the tasklist gets generated. Same derivation either way, called from
-# one place, so the two forms cannot read a tasklist two different ways.
+# where the tasklist gets generated (--stages) and where registry:2 and the
+# kind node image get appended to the host-image TSV (--host-images). Same
+# derivation either way, called from the place that produced the new bytes,
+# so a refresh cannot read its source two different ways from the first
+# write.
 
 set -uo pipefail
 
 STAGES_ONLY=0
-if [ "${1:-}" = "--stages" ]; then
-  STAGES_ONLY=1
-  shift
-fi
+HOST_IMAGES_ONLY=0
+case "${1:-}" in
+  --stages) STAGES_ONLY=1; shift ;;
+  --host-images) HOST_IMAGES_ONLY=1; shift ;;
+esac
 
-OUT="${1:?usage: write_run_manifest.sh [--stages] <output-path>}"
+OUT="${1:?usage: write_run_manifest.sh [--stages|--host-images] <output-path>}"
 
 # Which stages ran, derived rather than asserted. sregym/conductor/tasklist.yml
 # selects stages per problem (diagnosis, mitigation, in that order); with no
@@ -77,6 +82,38 @@ if [ "$STAGES_ONLY" = "1" ]; then
   {
     grep -v -E '^(stages|stages_source|tasklist_sha256)=' "$OUT"
     emit_stages
+  } >"$TMP" && mv "$TMP" "$OUT"
+  exit $?
+fi
+
+# "<name>:<ref>@<id>" per image, comma-joined, not a second JSON file: every
+# other per-image field in this manifest already uses that shape (see
+# seeded_connection_buckets below). Reads SREGYM_HOST_IMAGE_MANIFEST fresh
+# each call rather than caching a value, because the two callers (the first
+# write below, and the --host-images refresh) read it at two different
+# points in the TSV's life: setup_brain_go.sh has written brain-go's own
+# rows by the first call, and run_shard.sh has appended registry:2 and the
+# kind node image by the second.
+emit_host_images() {
+  local manifest="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
+  local images=""
+  if [ -f "$manifest" ]; then
+    images=$(awk -F'\t' '{printf "%s%s:%s@%s", (NR>1?",":""), $1, $2, $3}' "$manifest")
+  fi
+  echo "brain_go_host_images=$images"
+}
+
+if [ "$HOST_IMAGES_ONLY" = "1" ]; then
+  if [ ! -f "$OUT" ]; then
+    echo "write_run_manifest.sh --host-images: $OUT does not exist" >&2
+    exit 1
+  fi
+  # Same written-to-a-sibling-and-moved shape as --stages above, for the same
+  # reason: a failure halfway through must not leave a truncated manifest.
+  TMP="$OUT.host-images.$$"
+  {
+    grep -v -E '^brain_go_host_images=' "$OUT"
+    emit_host_images
   } >"$TMP" && mv "$TMP" "$OUT"
   exit $?
 fi
@@ -247,23 +284,6 @@ if [ -f "$BRAIN_GO_DIR/deploy/.env" ]; then
   [ -n "$effective_reasoning_effort" ] && EFFECTIVE_REASONING_EFFORT="$effective_reasoning_effort"
 fi
 
-# Which bytes this run's host images actually were: setup_brain_go.sh's own
-# gate records "<name>\t<ref>\t<loaded id>" per brain-go image to this file
-# once every one of them passed `docker image inspect`, and run_shard.sh
-# appends the same three columns for registry:2 and the kind node image once
-# it loads them. Empty when REGISTRY_CACHE_BUCKET was unset (a developer
-# machine) or neither script has run yet (write_run_manifest.sh --stages,
-# which only rewrites the stage lines of a manifest this block already
-# wrote).
-# "<name>:<ref>@<id>" per image, comma-joined, not a second JSON file: every
-# other per-image field in this manifest already uses that shape (see
-# seeded_connection_buckets above).
-HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
-BRAIN_GO_HOST_IMAGES=""
-if [ -f "$HOST_IMAGE_MANIFEST" ]; then
-  BRAIN_GO_HOST_IMAGES=$(awk -F'\t' '{printf "%s%s:%s@%s", (NR>1?",":""), $1, $2, $3}' "$HOST_IMAGE_MANIFEST")
-fi
-
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -320,9 +340,16 @@ fi
   # kind:value for the kubernetes connection's configmap_values setting,
   # native arm only. See the comment above SEEDED_CONFIGMAP_VALUES.
   echo "seeded_configmap_values=$SEEDED_CONFIGMAP_VALUES"
-  # name:ref@loaded-id per brain-go host image this run actually loaded from
-  # the S3 cache. See the comment above HOST_IMAGE_MANIFEST.
-  echo "brain_go_host_images=$BRAIN_GO_HOST_IMAGES"
+  # Which bytes this run's host images actually were, read back from
+  # SREGYM_HOST_IMAGE_MANIFEST: setup_brain_go.sh's own gate has written
+  # brain-go's own rows there by this point, but run_shard.sh has not yet
+  # appended registry:2 and the kind node image, since the bootstrap calls
+  # this script before it sources run_shard.sh. Empty when
+  # REGISTRY_CACHE_BUCKET was unset (a developer machine) or
+  # setup_brain_go.sh has not run yet. See emit_host_images above for the
+  # "<name>:<ref>@<id>" shape and the --host-images refresh that adds the
+  # pair this first write cannot see.
+  emit_host_images
 
   # Which stages ran. See emit_stages above; run_shard.sh calls this script a
   # second time with --stages once it has generated the tasklist, because at
