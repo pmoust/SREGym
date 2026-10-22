@@ -32,12 +32,14 @@
 # us.anthropic.claude-sonnet-4-6 and us.anthropic.claude-sonnet-5 are the
 # exact ids run-20260908-0739-4fc0249e's own manifest recorded as agent_model
 # and judge_model (judge_model there was "bedrock/us.anthropic.claude-sonnet-5",
-# the prefix this file's lookup strips). The remaining four rows below use the
-# same "us.anthropic.claude-<name>" shape by inference, not by having seen
-# them in a manifest -- confirm the exact id against Bedrock's console (it
-# sometimes carries a date/version suffix, the way terraform/variables.tf's
-# stale agent_model default still does) the first time a run actually uses
-# one, and correct the key here if it differs.
+# the prefix this file's lookup strips). The Sonnet 4.5 row's id is
+# terraform/variables.tf's agent_model default, date suffix included. The
+# Sonnet 5.5 row's id is a Bedrock inference profile; its prices are
+# provisional (see its own comment). The other rows use the same
+# "us.anthropic.claude-<name>" shape by inference, not by having seen them in
+# a manifest -- confirm the exact id against Bedrock's console (it sometimes
+# carries a date/version suffix) the first time a run actually uses one, and
+# correct the key here if it differs.
 models:
   us.anthropic.claude-sonnet-4-6: # the agent model this run used
     input: 3.00
