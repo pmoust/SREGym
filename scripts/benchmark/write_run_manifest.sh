@@ -233,6 +233,20 @@ if [ -f "$BRAIN_GO_DIR/deploy/.env" ]; then
   [ -n "$effective_k8s_tools" ] && KUBERNETES_TOOLS_ENABLED="$effective_k8s_tools"
 fi
 
+# The LLM_EFFORT brain-go actually starts with, read back the same way:
+# setup_brain_go.sh writes it from REASONING_EFFORT and then applies
+# BRAIN_ENV_EXTRA, whose set_env_key deletes-then-appends, so a brain_env
+# entry for LLM_EFFORT wins over REASONING_EFFORT silently. Re-deriving from
+# REASONING_EFFORT alone would disagree with a box where it did. Empty, not
+# "medium", when the key is absent: that still means the run left it unset
+# and brain-go answered at its own default, not at a value this script can
+# name.
+EFFECTIVE_REASONING_EFFORT=""
+if [ -f "$BRAIN_GO_DIR/deploy/.env" ]; then
+  effective_reasoning_effort=$(grep '^LLM_EFFORT=' "$BRAIN_GO_DIR/deploy/.env" | tail -1 | cut -d= -f2-)
+  [ -n "$effective_reasoning_effort" ] && EFFECTIVE_REASONING_EFFORT="$effective_reasoning_effort"
+fi
+
 {
   echo "run_id=${RUN_ID:-}"
   echo "shard_index=${SHARD_INDEX:-}"
@@ -259,9 +273,9 @@ fi
   echo "results_bucket=${RESULTS_BUCKET:-}"
   echo "agent_model=${AGENT_MODEL:-}"
   echo "judge_model=${JUDGE_MODEL:-}"
-  # Empty means the run left reasoning_effort unset, so brain-go answered at
-  # its own default (medium) rather than at a value this script can name.
-  echo "reasoning_effort=${REASONING_EFFORT:-}"
+  # Read back from the box's own deploy/.env. See the comment above
+  # EFFECTIVE_REASONING_EFFORT for why REASONING_EFFORT alone is not enough.
+  echo "reasoning_effort=$EFFECTIVE_REASONING_EFFORT"
   echo "sregym_ref=${SREGYM_REF:-}"
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"

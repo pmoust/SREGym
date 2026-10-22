@@ -127,9 +127,13 @@ path:
   brain-go's own default (medium, brain-go#4093). `setup_brain_go.sh` rejects
   anything other than low, medium or high itself, not only at the terraform
   variable's own plan-time validation, since the script is also the
-  local-iteration path this doc's "iterate locally first" section calls
-  directly, which never goes through terraform. `write_run_manifest.sh`
-  records the value actually used as `reasoning_effort`, empty when unset.
+  local-iteration path `scripts/benchmark/README.md`'s "iterate locally
+  first" section calls directly, which never goes through terraform.
+  `write_run_manifest.sh` records `reasoning_effort` by reading `LLM_EFFORT`
+  back from the box's own `deploy/.env` rather than from the terraform
+  variable, so a `BRAIN_ENV_EXTRA` override of `LLM_EFFORT` (set_env_key
+  deletes-then-appends) is what the manifest reports; empty when the key is
+  absent from `deploy/.env`.
   It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
   resolves the flag, `seed_native_connections.py` registers brain-go's own
   Kubernetes, Prometheus, Loki and Jaeger connections in place of the four

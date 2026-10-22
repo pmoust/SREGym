@@ -67,12 +67,22 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
     """Runs it. An unexported assignment reads as empty, not as an error."""
     out = tmp_path / "manifest.txt"
     script = tmp_path / "run.sh"
+    # reasoning_effort is read back from deploy/.env, not from an env var the
+    # manifest invocation's own prefix carries, so it needs a fake checkout
+    # of its own rather than falling out of the other interpolated values.
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("LLM_EFFORT=high\n")
     script.write_text(
         "set -u\n"
         "RUN_ID=run-test\n"
         "SHARD_INDEX=1\n"
         "SHARD_COUNT=3\n"
         f"WORKDIR={ROOT}\n"
+        # Exported: write_run_manifest.sh runs as a separate process below and
+        # only an exported variable, or one in the invocation's own env
+        # prefix, reaches it.
+        f"export BRAIN_GO_DIR={brain_go_dir}\n"
         # Pointed at a path that does not exist, so the assertion below reads
         # the no-tasklist branch whether or not somebody has run a shard in
         # this checkout: run_shard.sh generates a real (gitignored) tasklist
@@ -319,15 +329,40 @@ def test_the_manifest_records_the_signals_seed_connections_actually_seeds(tmp_pa
 
 
 def test_the_manifest_records_reasoning_effort_when_set(tmp_path):
-    fields = _write_manifest(tmp_path, "sregym-lite", extra_env={"REASONING_EFFORT": "high"})
+    """Read back from the box's own deploy/.env, the way setup_brain_go.sh
+    leaves it after writing LLM_EFFORT from REASONING_EFFORT, not from the
+    REASONING_EFFORT variable itself: see the override case below for why
+    those two can disagree."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("LLM_EFFORT=high\n")
+
+    fields = _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_GO_DIR": str(brain_go_dir)})
     assert fields["reasoning_effort"] == "high"
 
 
 def test_the_manifest_leaves_reasoning_effort_empty_when_unset(tmp_path):
     """Unset means the run left brain-go at its own default (medium), which
     this field must say by being empty, not by guessing a value nobody set."""
-    fields = _write_manifest(tmp_path, "sregym-lite")
+    fields = _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_GO_DIR": str(tmp_path / "no-brain-go")})
     assert fields.get("reasoning_effort", "") == ""
+
+
+def test_the_manifest_records_the_effective_effort_over_a_stale_terraform_variable(tmp_path):
+    """REASONING_EFFORT=low plus BRAIN_ENV_EXTRA=LLM_EFFORT=high must record
+    high, not low: setup_brain_go.sh writes LLM_EFFORT from REASONING_EFFORT
+    and then applies BRAIN_ENV_EXTRA, whose set_env_key deletes-then-appends,
+    so a brain_env entry for LLM_EFFORT wins and deploy/.env ends with high.
+    Before this test the manifest read REASONING_EFFORT directly and reported
+    the terraform variable (low) while the box ran at high."""
+    brain_go_dir = tmp_path / "brain-go"
+    (brain_go_dir / "deploy").mkdir(parents=True)
+    (brain_go_dir / "deploy" / ".env").write_text("LLM_EFFORT=high\n")
+
+    fields = _write_manifest(
+        tmp_path, "sregym-lite", extra_env={"REASONING_EFFORT": "low", "BRAIN_GO_DIR": str(brain_go_dir)}
+    )
+    assert fields["reasoning_effort"] == "high"
 
 
 def test_the_shard_handoff_is_declared_once():

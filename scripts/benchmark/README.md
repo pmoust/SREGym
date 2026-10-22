@@ -111,8 +111,9 @@ experiment: bedrock      tokens ~199.8M, ~$166.00 (us.anthropic.claude-sonnet-4-
 this exact preview shape actually ran with was `us.anthropic.claude-sonnet-4-6`,
 not the Sonnet 4.5 default shown here. Both now have a `terraform/rates.yml`
 entry and print a real dollar figure; a model with no entry there still
-prints "dollar cost unknown", which is what every id in this file read before
-sregym#149 priced Sonnet 4.5 and 5.5.)
+prints "dollar cost unknown". Sonnet 4.6 has had a `terraform/rates.yml` entry
+since before this PR; Sonnet 4.5 and 5.5 did not, and read "dollar cost
+unknown" until sregym#149 priced them.)
 
 **Reading it:**
 
