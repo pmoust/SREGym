@@ -104,13 +104,15 @@ experiment: shape        instance_count = ceil(21/3) = 7, depth 1, 3 attempt(s) 
 experiment: resolution   63 paired attempts, resolves ~20pp at 80% power
 experiment: wall clock   ~0.9 h  (setup ~30 min expected [9-68 min range, 14% per-slot retry chance], then 3 x 8.4 min)
 experiment: ec2          ~$10.84  (7 instance(s) @ $1.6934/h x 0.9h, m8i.8xlarge, us-east-2)
-experiment: bedrock      tokens ~199.8M (63 attempts x ~3.17M), dollar cost unknown (no rate configured for 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'; see terraform/rates.yml)
+experiment: bedrock      tokens ~199.8M, ~$166.00 (us.anthropic.claude-sonnet-4-5-20250929-v1:0)
 ```
 
 (`terraform/variables.tf`'s `agent_model` default above is stale -- the model
-this exact preview shape actually ran with, `us.anthropic.claude-sonnet-4-6`,
-does have a rate in `terraform/rates.yml` and would print a real dollar
-figure; this is what the unpatched default still prints.)
+this exact preview shape actually ran with was `us.anthropic.claude-sonnet-4-6`,
+not the Sonnet 4.5 default shown here. Both now have a `terraform/rates.yml`
+entry and print a real dollar figure; a model with no entry there still
+prints "dollar cost unknown", which is what every id in this file read before
+sregym#149 priced Sonnet 4.5 and 5.5.)
 
 **Reading it:**
 

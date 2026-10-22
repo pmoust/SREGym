@@ -247,6 +247,11 @@ def test_resolvable_effect_rejects_bad_inputs():
 
 
 def test_render_preview_covers_every_line():
+    """terraform/variables.tf's agent_model default (Sonnet 4.5) now has a
+    rates.yml entry (sregym#149), so the preview prints a real dollar figure
+    rather than "unknown". bedrock_estimate's own unknown-model path is
+    covered directly by test_bedrock_cost_is_unknown_for_a_model_with_no_rates_entry
+    above; this test only has to prove every section of the preview renders."""
     text = cost_model.render_preview(problem_count=24, attempts=3)
     assert "shape" in text
     assert "resolution" in text
@@ -254,7 +259,7 @@ def test_render_preview_covers_every_line():
     assert "wall clock" in text
     assert "ec2" in text
     assert "bedrock" in text
-    assert "dollar cost unknown" in text
+    assert "~$" in text.split("bedrock")[-1], "expected a priced dollar figure, not 'dollar cost unknown'"
 
 
 def test_main_cli_reports_bad_input_without_a_traceback(capsys):

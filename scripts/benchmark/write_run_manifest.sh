@@ -259,6 +259,9 @@ fi
   echo "results_bucket=${RESULTS_BUCKET:-}"
   echo "agent_model=${AGENT_MODEL:-}"
   echo "judge_model=${JUDGE_MODEL:-}"
+  # Empty means the run left reasoning_effort unset, so brain-go answered at
+  # its own default (medium) rather than at a value this script can name.
+  echo "reasoning_effort=${REASONING_EFFORT:-}"
   echo "sregym_ref=${SREGYM_REF:-}"
   echo "sregym_sha=${SREGYM_SHA:-}"
   echo "brain_go_ref=${BRAIN_GO_REF:-}"

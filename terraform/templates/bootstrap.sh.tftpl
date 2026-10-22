@@ -458,6 +458,7 @@ echo "[bootstrap] arm $SREGYM_ARM"
 BRAIN_GO_DIR="$BRAIN_GO_DIR" \
 SREGYM_MCP_PORT="9954" \
 AGENT_MODEL_ID="${agent_model}" \
+REASONING_EFFORT="${reasoning_effort}" \
 AWS_DEFAULT_REGION="${region}" \
 MINER_REPO_PULL_TOKEN="$GH_TOKEN" \
 BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \
@@ -470,7 +471,7 @@ PROBLEM_SET="${problem_set}" N_ATTEMPTS="${n_attempts}" NOISE="${noise}" \
 PROBLEMS_OVERRIDE="${problems}" \
 AGENT_TIMEOUT_SECONDS="${agent_timeout_seconds}" RUNS_PER_INSTANCE="${runs_per_instance}" \
 INSTANCE_TYPE="${instance_type}" RESULTS_BUCKET="${bucket}" \
-AGENT_MODEL="${agent_model}" JUDGE_MODEL="${judge_model}" \
+AGENT_MODEL="${agent_model}" JUDGE_MODEL="${judge_model}" REASONING_EFFORT="${reasoning_effort}" \
 SREGYM_REF="${sregym_ref}" SREGYM_SHA="$(git -C "$WORKDIR" rev-parse HEAD 2>/dev/null || echo unknown)" \
 BRAIN_GO_REF="${brain_go_ref}" BRAIN_GO_SHA="$BRAIN_GO_SHA" \
 BRAIN_ENV_EXTRA="$BRAIN_ENV_EXTRA" \

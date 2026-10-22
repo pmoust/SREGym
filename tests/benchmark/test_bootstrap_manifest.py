@@ -38,6 +38,7 @@ _VALUES = {
     "bucket": "sregym-bench-results-123456789012",
     "agent_model": "test-agent-model",
     "judge_model": "test-judge-model",
+    "reasoning_effort": "high",
     "sregym_ref": "a" * 40,
     "brain_go_ref": "b" * 40,
 }
@@ -99,6 +100,7 @@ def test_the_manifest_is_written_with_every_value_populated(tmp_path):
         "results_bucket",
         "agent_model",
         "judge_model",
+        "reasoning_effort",
         "sregym_ref",
         "brain_go_ref",
         # Which MCP server image the run deployed. No run before this field
@@ -210,7 +212,9 @@ def test_resolve_problems_hard_stops_on_an_empty_selection(spec):
         resolve_problems(spec)
 
 
-def _write_manifest(tmp_path, problem_set: str, problems_override: str = "") -> dict[str, str]:
+def _write_manifest(
+    tmp_path, problem_set: str, problems_override: str = "", extra_env: dict[str, str] | None = None
+) -> dict[str, str]:
     """Run write_run_manifest.sh directly, bypassing the template entirely.
 
     _manifest_block() above exists to protect the template's
@@ -224,6 +228,11 @@ def _write_manifest(tmp_path, problem_set: str, problems_override: str = "") -> 
     # Same reason as above: a tasklist left in the checkout by a local shard
     # run must not change what these cases measure.
     env["SREGYM_TASKLIST"] = str(tmp_path / "no-tasklist.yml")
+    # REASONING_EFFORT is unset by default here: the calling shell's own
+    # environment must not leak a value into a case that means to test the
+    # unset path.
+    env.pop("REASONING_EFFORT", None)
+    env.update(extra_env or {})
     proc = subprocess.run(
         ["bash", str(WRITE_MANIFEST), str(out)],
         cwd=ROOT,
@@ -307,6 +316,18 @@ def test_the_manifest_records_the_signals_seed_connections_actually_seeds(tmp_pa
     expected = ",".join(f"{path}:{'+'.join(SIGNALS.get(path) or ['-'])}" for _, path, _, _ in ENDPOINTS)
     assert fields["seeded_connection_signals"] == expected
     assert fields["seeded_connection_signals"] == "kubectl:-,prometheus:metrics,jaeger:traces,loki:logs"
+
+
+def test_the_manifest_records_reasoning_effort_when_set(tmp_path):
+    fields = _write_manifest(tmp_path, "sregym-lite", extra_env={"REASONING_EFFORT": "high"})
+    assert fields["reasoning_effort"] == "high"
+
+
+def test_the_manifest_leaves_reasoning_effort_empty_when_unset(tmp_path):
+    """Unset means the run left brain-go at its own default (medium), which
+    this field must say by being empty, not by guessing a value nobody set."""
+    fields = _write_manifest(tmp_path, "sregym-lite")
+    assert fields.get("reasoning_effort", "") == ""
 
 
 def test_the_shard_handoff_is_declared_once():

@@ -62,6 +62,7 @@ FIXED = {
     "run_id": "run-20260901-1200-a4d231c1",
     "agent_model": "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0",
     "judge_model": "bedrock/anthropic.claude-sonnet-5-20260101-v1:0",
+    "reasoning_effort": "medium",
     "sregym_ref": "0" * 40,
     "brain_go_ref": "0" * 40,
 }

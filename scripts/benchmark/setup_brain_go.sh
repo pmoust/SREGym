@@ -104,6 +104,29 @@ set_env_key LLM_MODEL "${AGENT_MODEL_ID}"
 set_env_key BEDROCK_REGION "${AWS_DEFAULT_REGION:-us-east-1}"
 log "answering model: $AGENT_MODEL_ID (bedrock, region ${AWS_DEFAULT_REGION:-us-east-1})"
 
+# Reasoning effort, optional. brain-go reads LLM_EFFORT directly
+# (NOFireAI/brain-go#4093) and accepts only low, medium or high. Empty means
+# the run left it unset, and the key is not written at all, so brain-go keeps
+# its own default of medium -- writing LLM_EFFORT="" would instead hand it an
+# empty string, which is a fourth value brain-go was never asked to handle.
+#
+# Validated here too, not only in terraform/variables.tf's reasoning_effort:
+# this script is also the local-iteration path (README's "iterate locally
+# first" section calls it directly), which terraform's plan-time check never
+# sees. Failing here, before the stack starts, is a log line; failing inside
+# brain-go after the stack is already up is a wasted run.
+REASONING_EFFORT="${REASONING_EFFORT:-}"
+if [ -n "$REASONING_EFFORT" ]; then
+  case "$REASONING_EFFORT" in
+    low | medium | high) ;;
+    *) die "REASONING_EFFORT must be low, medium or high, got: $REASONING_EFFORT" ;;
+  esac
+  set_env_key LLM_EFFORT "$REASONING_EFFORT"
+  log "reasoning effort: $REASONING_EFFORT"
+else
+  log "reasoning effort: unset (brain-go default)"
+fi
+
 # Force every cli_mode turn onto the RCI path (NOFireAI/brain-go#1547, merged as
 # #1698). The flag is opt-in and off by default, so merging it was not enough:
 # without this the supervisor's createPlan decides per turn whether to

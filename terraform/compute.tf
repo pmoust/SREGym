@@ -125,6 +125,7 @@ resource "aws_instance" "bench" {
     arm                   = var.arm
     agent_model           = var.agent_model
     judge_model           = var.judge_model
+    reasoning_effort      = var.reasoning_effort
     agent_timeout_seconds = var.agent_timeout_seconds
     runs_per_instance     = var.runs_per_instance
     instance_type         = var.instance_type

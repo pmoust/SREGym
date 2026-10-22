@@ -75,3 +75,18 @@ models:
     cache_write: 12.50
     cache_write_1h: 20.00
     cache_read: 1.00
+  us.anthropic.claude-sonnet-4-5-20250929-v1:0: # the Sonnet 5.5 eval's 4.5 comparison run, same id as variables.tf's agent_model default
+    input: 3.00
+    output: 15.00
+    cache_write: 3.75
+    cache_write_1h: 6.00
+    cache_read: 0.30
+  us.anthropic.claude-sonnet-5-5: # PROVISIONAL prices. The id is a Bedrock
+    # inference profile in us-east-2 (seen 2026-10-22). The four prices are
+    # not yet confirmed against Bedrock; correct them and drop PROVISIONAL
+    # once they are.
+    input: 2.00
+    output: 10.00
+    cache_write: 2.50
+    cache_write_1h: 4.00
+    cache_read: 0.20

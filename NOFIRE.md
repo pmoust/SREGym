@@ -120,6 +120,16 @@ path:
   box has no evidence object store, so with the 256 KiB default a large tool
   result fails its call closed (sregym#141). The cap only decides where a
   snapshot is stored.
+  `terraform/variables.tf`'s `reasoning_effort` (sregym#149, default empty)
+  threads through `compute.tf` and `bootstrap.sh.tftpl` as `REASONING_EFFORT`
+  to `setup_brain_go.sh`, which writes `LLM_EFFORT=<value>` into `deploy/.env`
+  when it is set and writes nothing when it is not, so an unset run keeps
+  brain-go's own default (medium, brain-go#4093). `setup_brain_go.sh` rejects
+  anything other than low, medium or high itself, not only at the terraform
+  variable's own plan-time validation, since the script is also the
+  local-iteration path this doc's "iterate locally first" section calls
+  directly, which never goes through terraform. `write_run_manifest.sh`
+  records the value actually used as `reasoning_effort`, empty when unset.
   It also holds the native arm (`SREGYM_ARM=native`, brain-go#2410): `arm.py`
   resolves the flag, `seed_native_connections.py` registers brain-go's own
   Kubernetes, Prometheus, Loki and Jaeger connections in place of the four

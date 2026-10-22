@@ -191,6 +191,25 @@ variable "judge_model" {
   }
 }
 
+variable "reasoning_effort" {
+  description = <<-EOT
+    Effort brain-go answers at. Written by setup_brain_go.sh as LLM_EFFORT into
+    brain-go's deploy/.env, which brain-go reads directly (NOFireAI/brain-go#4093).
+
+    Empty (the default) means do not write the key, so brain-go keeps its own
+    default of medium. brain-go accepts only low, medium or high and rejects
+    anything else, so this is validated here too: a bad value should fail at
+    plan, not three minutes into a boot.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "low", "medium", "high"], var.reasoning_effort)
+    error_message = "reasoning_effort must be empty, low, medium or high."
+  }
+}
+
 variable "brain_env" {
   description = <<-EOT
     Extra key/value pairs written into brain-go's deploy/.env before its stack

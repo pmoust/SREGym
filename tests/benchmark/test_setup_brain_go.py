@@ -10,6 +10,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "benchmark" / "setup_brain_go.sh"
 
@@ -180,3 +182,50 @@ def test_the_box_raises_the_inline_evidence_cap_for_every_arm(tmp_path):
 
         assert env["FEDERATION_EVIDENCE_INLINE_MAX_BYTES"] == "4194304", arm
         assert sum(1 for line in lines if line.startswith("FEDERATION_EVIDENCE_INLINE_MAX_BYTES=")) == 1, arm
+
+
+def test_reasoning_effort_unset_writes_no_llm_effort_key(tmp_path):
+    """Unset must mean "do not write the key," not "write it empty." brain-go
+    defaults to medium only when the key is absent; an empty value would be a
+    fourth, unhandled effort level rather than that default."""
+    env, _ = _run(tmp_path)
+
+    assert "LLM_EFFORT" not in env
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_reasoning_effort_set_writes_llm_effort(tmp_path, effort):
+    env, lines = _run(tmp_path / effort, {"REASONING_EFFORT": effort})
+
+    assert env["LLM_EFFORT"] == effort
+    assert sum(1 for line in lines if line.startswith("LLM_EFFORT=")) == 1
+
+
+def test_reasoning_effort_rejects_a_value_brain_go_does_not_accept(tmp_path):
+    """brain-go accepts only low, medium or high. A bad value must fail here,
+    before the stack starts, rather than reach brain-go and fail mid-run."""
+    brain_go = tmp_path / "brain-go"
+    (brain_go / "scripts").mkdir(parents=True)
+    dev_env = brain_go / "scripts" / "dev-env.sh"
+    dev_env.write_text(FAKE_DEV_ENV)
+    dev_env.chmod(0o755)
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in (("curl", FAKE_CURL), ("docker", FAKE_DOCKER), ("make", "#!/bin/sh\nexit 0\n")):
+        stub = bindir / name
+        stub.write_text(body)
+        stub.chmod(0o755)
+
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HOME": os.environ.get("HOME", str(tmp_path)),
+        "BRAIN_GO_DIR": str(brain_go),
+        "BRAIN_GO_ENV_OUT": str(tmp_path / "sregym-brain-go.sh"),
+        "AGENT_MODEL_ID": "test-model",
+        "REASONING_EFFORT": "turbo",
+    }
+    done = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=str(ROOT))
+
+    assert done.returncode != 0
+    assert "REASONING_EFFORT must be low, medium or high" in done.stdout + done.stderr
