@@ -24,7 +24,7 @@ One-time, per account:
 
 ```bash
 # A token that can clone both this private mirror and NOFireAI/brain-go
-aws ssm put-parameter --region us-east-1 \
+aws ssm put-parameter --region us-east-2 \
   --name /sregym/benchmark/github-token \
   --type SecureString --value "ghp_..."
 ```

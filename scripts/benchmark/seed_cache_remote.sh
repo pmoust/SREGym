@@ -7,12 +7,9 @@
 # Usage: seed_cache_remote.sh <bucket> <region> <run-id> <sregym-ref> <brain-go-ref>...
 #
 # On every exit the EXIT trap uploads the log and a status file, then leaves
-# the group lowering desired capacity. If it cannot (no AWS CLI, or the leave
-# call fails) it shuts down instead: the launch template terminates on
-# shutdown, but desired capacity stays 1 and the group launches an idle
-# replacement, which seed_cache_on_ec2.sh or the nightly 22:00 UTC action
-# scales away. The whole run is capped by `timeout` so a hung seed cannot keep
-# the box alive.
+# the group lowering desired capacity, falling back to shutdown; what happens
+# then is in seed_cache_on_ec2.sh's header. The whole run is capped by
+# `timeout` so a hung seed cannot keep the box alive.
 
 set -uo pipefail
 
@@ -100,7 +97,18 @@ main() {
   git clone -q https://github.com/NOFireAI/sregym.git || return 22
   git -C sregym checkout -q "$SREGYM_REF" || return 23
   git clone -q https://github.com/NOFireAI/brain-go.git || return 24
-  git -C brain-go fetch -q origin "${BRAIN_GO_REFS[@]}" || return 25
+  # Resolve each ref to a commit here. A fetch without a refspec updates only
+  # FETCH_HEAD, so a branch other than brain-go's default would not resolve by
+  # name in seed_host_images.sh. Host images are keyed by image, not by ref,
+  # so seeding by SHA writes the same objects.
+  local ref sha i
+  local -a shas=()
+  for ref in "${BRAIN_GO_REFS[@]}"; do
+    git -C brain-go fetch -q origin "$ref" || return 25
+    sha=$(git -C brain-go rev-parse --verify 'FETCH_HEAD^{commit}') || return 25
+    say "brain-go $ref is $sha"
+    shas+=("$sha")
+  done
   unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
   say "sregym at $(git -C sregym log --oneline -1)"
 
@@ -113,11 +121,12 @@ main() {
   scripts/benchmark/seed_image_cache.sh --bucket "$BUCKET" --region "$REGION"
   rc=$?; echo "image_cache=$rc" >>"$STATUS"; [ $rc -eq 0 ] || failed=1
 
-  for ref in "${BRAIN_GO_REFS[@]}"; do
+  for i in "${!BRAIN_GO_REFS[@]}"; do
+    ref=${BRAIN_GO_REFS[$i]}; sha=${shas[$i]}
     export_role_keys || return 27
-    say "seeding host images for brain-go@$ref"
+    say "seeding host images for brain-go@$ref ($sha)"
     scripts/benchmark/seed_host_images.sh --bucket "$BUCKET" --region "$REGION" \
-      --brain-go-repo /root/brain-go --brain-go-ref "$ref"
+      --brain-go-repo /root/brain-go --brain-go-ref "$sha"
     rc=$?; echo "host_images_${ref:0:8}=$rc" >>"$STATUS"; [ $rc -eq 0 ] || failed=1
   done
   return $failed

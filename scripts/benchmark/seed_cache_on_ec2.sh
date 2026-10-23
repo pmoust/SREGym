@@ -95,12 +95,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-read -r ACCOUNT ARN <<<"$(aws sts get-caller-identity --query '[Account,Arn]' --output text)"
+# A command substitution inside a here-string does not trip errexit, so check
+# each AWS call's result explicitly before reading it.
+ident=$(aws sts get-caller-identity --query '[Account,Arn]' --output text) \
+  || { say "AWS credentials do not work (aws sts get-caller-identity failed); log in and retry"; exit 1; }
+read -r ACCOUNT ARN <<<"$ident"
 say "identity: $ARN"
 [ -n "$BUCKET" ] || BUCKET="sregym-bench-registry-cache-$ACCOUNT"
 PREFIX="s3://$BUCKET/seed-logs/$RUN_ID"
 say "bucket: $BUCKET ($REGION), sregym@$SREGYM_REF, brain-go ${BRAIN_GO_REFS[*]}"
-read -r desired count <<<"$(asg_state)"
+state=$(asg_state) \
+  || { say "could not describe $ASG in $REGION (credentials or permissions; see the error above)"; exit 1; }
+read -r desired count <<<"$state"
 # describe-auto-scaling-groups returns an empty list, not an error, for a group
 # that does not exist, which the query prints as None.
 if [ "$desired" = None ] || [ -z "$desired" ]; then
@@ -113,8 +119,9 @@ say "run $RUN_ID: uploading seed_cache_remote.sh"
 aws s3 cp "$HERE/seed_cache_remote.sh" "$PREFIX/seed_cache_remote.sh" --region "$REGION" --only-show-errors
 
 say "scaling $ASG to 1"
-aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 1
+# Set before the call, so a failure or Ctrl-C during it still scales back to 0.
 SCALED=1
+aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 1
 
 IID=""
 in_service() {
