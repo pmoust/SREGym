@@ -37,7 +37,11 @@ upload_log() {
 # Hand the registry containers the instance role's temporary keys. They run on
 # docker's bridge network and get no credentials from IMDS there (NOFIRE.md,
 # "Registry mirror and the S3 image cache"); registry_mirror.sh passes AWS_*
-# through. Called before each seed so a long run never uses expired keys.
+# through. Called before each seed, so each seed script's own AWS CLI calls
+# start with fresh keys. A registry container keeps the keys it got at
+# `docker run` for its whole life, so one seed_image_cache.sh run uses the keys
+# from its start; the first full seed took 13 minutes against a credential
+# lifetime of several hours.
 export_role_keys() {
   local imds_t role creds
   imds_t=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') || return 1

@@ -101,6 +101,12 @@ say "identity: $ARN"
 PREFIX="s3://$BUCKET/seed-logs/$RUN_ID"
 say "bucket: $BUCKET ($REGION), sregym@$SREGYM_REF, brain-go ${BRAIN_GO_REFS[*]}"
 read -r desired count <<<"$(asg_state)"
+# describe-auto-scaling-groups returns an empty list, not an error, for a group
+# that does not exist, which the query prints as None.
+if [ "$desired" = None ] || [ -z "$desired" ]; then
+  say "$ASG does not exist in $REGION; apply NOFireAI/terraform's aws/sandbox/sregym (cache_seeder.tf) first"
+  exit 1
+fi
 [ "$desired" = 0 ] && [ "$count" = 0 ] || { say "$ASG is not idle (desired=$desired instances=$count); refusing to start a second seeder"; exit 1; }
 
 say "run $RUN_ID: uploading seed_cache_remote.sh"

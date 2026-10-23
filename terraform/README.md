@@ -50,11 +50,13 @@ S3-backed registry cache (NOFireAI/sregym#150); a box never pulls from
 Docker Hub, ghcr.io, quay.io or registry.k8s.io directly. Before the first
 launch on a new account, in this order:
 
-1. Apply the NOFireAI/terraform change that creates the cache bucket
-   (`sregym-bench-registry-cache-<account-id>`) and grants the benchmark
-   instance role read-only access to it (`aws/sandbox/sregym`). This repo's
-   own Terraform does not create that bucket; see `s3.tf`'s own comment for
-   why.
+1. Apply NOFireAI/terraform's `aws/sandbox/sregym`. It creates the cache
+   bucket (`sregym-bench-registry-cache-<account-id>`) and grants the
+   benchmark instance role read-only access to it (`registry_cache.tf`,
+   `main.tf`), and it creates the seeder that step 2 uses: the
+   `sregym-cache-seeder` role, launch template and Auto Scaling group
+   (`cache_seeder.tf`). This repo's own Terraform creates neither; see
+   `s3.tf`'s own comment for why.
 2. Seed the cache. The default is one command from a developer machine:
    `scripts/benchmark/seed_cache_on_ec2.sh --sregym-ref <the sregym_ref
    this run's tfvars pins> --brain-go-ref <the brain_go_ref it pins>` (one
