@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-time: cache every host-level image in the S3 bucket, pinned by local
 # image ID, so a benchmark box never pulls any of them from Docker Hub
-# Run once per account from
-# a developer machine, same as seed_image_cache.sh, and re-run only when one
+# Run once per account through seed_cache_on_ec2.sh (or from a developer
+# machine), same as seed_image_cache.sh, and re-run only when one
 # of these images needs to move (a kind node image bump, a deliberate
 # registry:2 upgrade, or brain-go's own Dockerfile/compose file changing a
 # pinned base or service image tag).

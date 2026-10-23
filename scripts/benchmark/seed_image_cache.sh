@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Fill the S3-backed registry cache from scripts/benchmark/image_cache.list,
-# once, from a developer machine with AWS credentials for the bucket
-# (NOFireAI/sregym#150). A benchmark box never does this itself: it only ever
+# Fill the S3-backed registry cache from scripts/benchmark/image_cache.list
+# (NOFireAI/sregym#150). Run it through seed_cache_on_ec2.sh, which runs it on
+# a temporary EC2 seeder in the bucket's region; a developer machine with AWS
+# credentials for the bucket also works, much more slowly (#158). A benchmark
+# box never does this itself: it only ever
 # serves read-only from what this script already put there (see run_shard.sh
 # and registry_mirror.sh's "plain" mode).
 #

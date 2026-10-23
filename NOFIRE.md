@@ -232,9 +232,21 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   First-run order, per account: apply the NOFireAI/terraform change that
   creates the cache bucket and grants the benchmark instance role read-only
   access to it (`aws/sandbox/sregym`), run `seed_image_cache.sh` and
-  `seed_host_images.sh` once each from a developer machine with AWS
-  credentials for the bucket (the first needs `crane`; the second needs
-  `docker`), then launch a run as usual. `scripts/benchmark/image_cache.list`
+  `seed_host_images.sh` once each, then launch a run as usual. The default
+  way to run them is `seed_cache_on_ec2.sh` (#158): it scales NOFireAI/
+  terraform's `sregym-cache-seeder` Auto Scaling group to 1, runs both on
+  that instance through SSM with the instance's own role, which can write
+  the bucket, and the instance leaves the group when done, success or
+  failure, under a 5-hour cap. In-region, the first full seed (109 images,
+  read back, plus host images for two brain-go refs) took 16 minutes; from a
+  laptop each attempt took over an hour and two failed (Docker Desktop DNS,
+  an SSO session expiring mid-run). Running them from a developer machine
+  with AWS credentials for the bucket still works (the first needs `crane`;
+  the second needs `docker`). On the seeder the registry containers run on
+  docker's bridge network and got no credentials from IMDS there
+  (`NoCredentialProviders`, IMDSv2 with hop limit 2; cause not established),
+  so `seed_cache_remote.sh` exports the instance role's temporary keys as
+  `AWS_*`, which `registry_mirror.sh` passes into the container. `scripts/benchmark/image_cache.list`
   is the single source of what the first script seeds; `terraform/README.md`
   has the same order with the exact commands.
 
@@ -256,8 +268,8 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     versioning or lifecycle expiry, unlike results: a registry blob is
     content-addressed and immutable, and a moved tag is handled by
     re-seeding, not by S3 object versions. A benchmark box only ever reads
-    it (see "read-only" below); seeding is done by a developer with their
-    own credentials, never through the box's own role.
+    it (see "read-only" below); seeding is done by the EC2 seeder's role
+    or a developer's own credentials, never through the box's own role.
   - `scripts/benchmark/registry_mirror.sh` starts, stops, and addresses one
     `registry:2` container per upstream host (`docker.io`, `ghcr.io`,
     `quay.io`, `registry.k8s.io`, listed by the `hosts` subcommand), each its own fixed

@@ -55,9 +55,14 @@ launch on a new account, in this order:
    instance role read-only access to it (`aws/sandbox/sregym`). This repo's
    own Terraform does not create that bucket; see `s3.tf`'s own comment for
    why.
-2. From a developer machine (needs `crane`: `brew install crane`; never
-   from a benchmark box), run `scripts/benchmark/seed_image_cache.sh
-   --bucket sregym-bench-registry-cache-<account-id>` once.
+2. Run `scripts/benchmark/seed_cache_on_ec2.sh --brain-go-ref <the
+   brain_go_ref this run's tfvars pins>` (one `--brain-go-ref` per pinned
+   ref). It runs steps 2 and 3 below on a temporary EC2 seeder through SSM
+   and ends the instance when done; never from a benchmark box. The rest of
+   this step and step 3 describe what it runs, and how to run it from a
+   developer machine instead (needs `crane`: `brew install crane`):
+   `scripts/benchmark/seed_image_cache.sh --bucket
+   sregym-bench-registry-cache-<account-id>`.
    `scripts/benchmark/image_cache.list` is the single source of what gets
    seeded; re-run the seed script whenever that file gains a line or an
    existing tag changes meaning.
