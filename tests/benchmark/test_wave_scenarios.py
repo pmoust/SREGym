@@ -1,4 +1,5 @@
-"""The Sonnet 5.5 wave scenarios carry run.tfvars's values.
+"""The Sonnet 5.5 wave scenarios carry run.tfvars's values, and the pin smoke
+carries its refs.
 
 run.tfvars is the Sonnet 4.6 wave. run-sonnet55-low.tfvars and
 run-sonnet55-medium.tfvars are the other two waves of the same pin, and the
@@ -50,3 +51,18 @@ def test_the_run_itself_sets_no_effort():
     """Sonnet 4.6 takes no effort level; an effort in run.tfvars would be a
     value the 4.6 wave ignores and the 5.5 waves override, which hides drift."""
     assert not any(line.startswith("reasoning_effort") for line in _values(TF / "run.tfvars"))
+
+
+def test_the_pin_smoke_carries_the_run_refs():
+    """smoke-pin.tfvars validates the pin, so it has to carry the pin: its
+    own header says so, and a re-anchor that moves run.tfvars's two refs and
+    forgets these two lines would smoke the previous anchor while reporting
+    itself as the pin check."""
+    run = _values(TF / "run.tfvars")
+    smoke = _values(TF / "smoke-pin.tfvars")
+
+    for key in ("brain_go_ref", "sregym_ref"):
+        want = [line for line in run if line.startswith(key + " ")]
+        got = [line for line in smoke if line.startswith(key + " ")]
+        assert want and got, key
+        assert got == want
