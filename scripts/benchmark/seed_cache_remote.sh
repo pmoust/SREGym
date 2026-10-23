@@ -127,7 +127,7 @@ main() {
     say "seeding host images for brain-go@$ref ($sha)"
     scripts/benchmark/seed_host_images.sh --bucket "$BUCKET" --region "$REGION" \
       --brain-go-repo /root/brain-go --brain-go-ref "$sha"
-    rc=$?; echo "host_images_${ref:0:8}=$rc" >>"$STATUS"; [ $rc -eq 0 ] || failed=1
+    rc=$?; echo "host_images_${sha:0:8}=$rc" >>"$STATUS"; [ $rc -eq 0 ] || failed=1
   done
   return $failed
 }
