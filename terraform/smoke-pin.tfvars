@@ -1,7 +1,10 @@
-# One problem at the run's exact pins, to answer the one question
-# terraform/run.tfvars says to answer before letting a scored run stand: does
-# an attempt at the pinned brain-go carry a real investigation, or does the
-# entity-resolution clarification halt end the turn with a question first.
+# One problem at the run's exact pins, to check before a scored run that the
+# pins boot: the box reads every image from the registry cache (a missing
+# one fails loudly at boot), brain-go at the pinned commit starts and takes
+# the model and effort it is given, and an attempt carries a real
+# investigation to a report. To smoke a Sonnet 5.5 wave's configuration,
+# pass -var agent_model=us.anthropic.claude-sonnet-5-5 and
+# -var reasoning_effort=<low|medium> on top of this file.
 #
 # Not terraform/smoke.tfvars, which deliberately leaves both refs unset so it
 # tests whatever origin/main is at the time. A smoke that validates a pin has
@@ -68,5 +71,5 @@ brain_env = {
 # rule expire-noncurrent Enabled.
 results_bucket = "sregym-bench-results-819709950457"
 
-brain_go_ref = "97f4669755904fae14cb31a5820cd00192bf6a73"
-sregym_ref   = "f42ead3ad823e36e3696196c882e3ccc86511f7d"
+brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
+sregym_ref   = "2c0992ea8db07d8265796da3af8c52344e569d5e"

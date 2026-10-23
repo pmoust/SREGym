@@ -267,64 +267,65 @@ disk_iops = 16000
 # raised above. FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI turn
 # straight to RCI, so the agent branch #2815 touches is never taken here.
 #
-# The second re-anchor. run-20260921-1250 (brain-go ae48c4fc4, 21/63) is the
-# previous anchor. Between that pin and 97f466975, 97 commits landed, 47 of
-# them on the RCI path, and they change what every attempt does here:
+# The third re-anchor. 97f466975 (pinned in 768ee83) is the previous
+# anchor. Between that pin and 2f341c4a7, 1,591 commits landed,
+# 281 of them on the RCI path and 16 on the LLM layer, and they change what
+# every attempt does here:
 #
-#   - The planner sees a log-message count table before it proposes a cause
-#     (brain-go#3369) and a baseline-window count beside it (brain-go#3437),
-#     rendered from state the workflow seeds before the first turn. Every
-#     attempt here is chat-sourced with no alert rule, so the baseline is
-#     three times the incident window.
-#   - The evaluator refuses a baseline_noise verdict the rate comparison
-#     contradicts (brain-go#3444) and gates confirmation on alert coverage,
-#     with both sides of the ratio now counted rather than self-reported: the
-#     denominator grounded in the counted table (#3444), refused when
-#     counted on another connection (#3449), the numerator checked
-#     against counted rows (#3453), and the ask scoped to the agent
-#     whose tools can count (#3450). A hypothesis confirms less easily.
-#   - Custom MCP tools are scoped by signal (brain-go#3435). With sregym#116
-#     tagging prometheus, jaeger and loki, the metrics, logs and traces
-#     workers hold one server each instead of the same nine tools. The
-#     planner's union is unchanged.
-#   - Inconclusive cards show the log breakdown and the ruled-out theories
-#     (#3433).
+#   - Sonnet 5.5 runs on Bedrock (brain-go#4581) and takes an effort level
+#     through LLM_EFFORT (#4093). 97f466975 has neither, so a 5.5 wave on
+#     it fails at the first model call. This pin is the one the replay in
+#     brain-go#4101 measured 5.5 against 4.5 on.
+#   - The planner names up to two test signals per hypothesis, best first,
+#     and a signal the account lacks gives way to the next one. Hypothesis
+#     workers are shown what the planner
+#     already found, and replan workers the observation they verify.
+#   - A hypothesis cannot confirm when no requested signal observed
+#     anything; docs_lookup and load_runbook no longer count as
+#     observations; a typed-error result's ref stays citable.
+#   - The spec-health scan reaches the planner only for the alerting entity
+#     and its dependencies, and only behind a switch that is off (#4234,
+#     #4609), after the unfiltered scan pulled the planner onto a degraded
+#     sibling (#4232).
+#   - Counted-log hypotheses route to logs; the past-knowledge and planner
+#     leads blocks are fenced; tool calls are fenced to the run's
+#     environment.
 #
-# On the harness side (sregym 6cbb3db8 to f42ead3a): the MCP pod runs an
-# image built from this checkout instead of upstream's 2026-09-06 build, so
-# its event loop no longer blocks on kubectl and the supervisor restarts a
-# forward only when it is dead. Runs grade diagnosis only, so the archived
-# Temporal history is the diagnosis turn for the first time. The prompt
-# names the real application; every earlier run said "Application: unknown".
+# On the harness side (sregym f42ead3a to 2c0992ea, 62 commits): every
+# image the suite needs is served from the S3 registry cache instead of
+# pulled per attempt, a stuck pull is labelled a harness failure and the
+# attempt dropped from grading rather than scored as the agent's (#150), the
+# run records the effort and judge it used and prices Sonnet 4.5 and 5.5
+# (#157), the cache is seeded from EC2 (#159), and arm B's edge image, its
+# informers and its screened ConfigMap values are pinned (#144, #146).
 #
-# What this run answers:
+# What this pin answers, over three waves on these same refs, the same AMI
+# and the same cache:
 #
-#   1. Whether the coverage gate moves the inconclusive count off 21 of 63,
-#      and in which direction. A confirmed verdict now needs a counted
-#      denominator this account may not supply; the readout counts
-#      rci_alert_coverage_gate_total and the denominator counters.
-#   2. Per-worker tool calls by signal now that each holds one server:
-#      dispatch against logs 89 / state 82 / metrics 25 / traces 4, and
-#      whether traces is called at all.
-#   3. Restarts and breaker trips against 43 and 4. Both should be near
-#      zero with the fixed MCP image; if not, the image did not load.
-#   4. Tokens per attempt and TTD against 0.95M and 209 s, with the run now
-#      one turn instead of two, so the run total is not comparable with any
-#      earlier run and the per-attempt diagnosis figures are.
-#   5. The archive: 63 diagnosis histories readable by brain-go's
-#      cmd/replaycorpus batch, which reports the turn it read.
+#   1. Sonnet 4.6 against Sonnet 5.5 at low and at medium effort, per
+#      problem, on the replay result that 5.5 at either effort beats 4.5
+#      with no lost scenario (brain-go#4101). The 4.6 wave is also the
+#      harness base every later change is measured against.
+#   2. Attempt 1 against attempts 2 and 3, reported beside the pooled rate,
+#      because attempts 2 and 3 run in a namespace that still holds attempt
+#      1's fault (sregym#154). The gap is the size of that effect.
+#   3. harness_failure=image_pull against the earlier runs' pull failures,
+#      which should be zero with every image cached; if not, the cache did
+#      not serve.
+#   4. Tokens per attempt and TTD per model, with 5.5's lower prices.
 #
 # Do not read the headline rate as a result. At 63 attempts the interval
-# covers zero for anything under about 23pp. The nine-run band is 14 to 22.
+# covers zero for anything under about 23pp.
 #
-# This run is the gate anchor. The regression rule (a drop of more than 10
-# of 63, or any of the counts above outside the band of the last three
-# clean runs) applies from here, and every quality change is measured
-# against this archive by replay before it lands.
+# The 4.6 wave of this pin is the gate anchor. The regression rule (a drop
+# of more than 10 of 63, or any of the counts above outside the band of the
+# last three clean runs) applies from here, and every quality change is
+# measured against this archive by replay before it lands.
 #
-# The entity-resolution risk noted on the previous pin is still not
-# exercised: the account has no entity graph, because the harness installs
-# no edge agent, so the resolver finds nothing whatever the prompt names.
+# The entity-resolution risk noted on the previous pins is still not
+# exercised on arm B: the account has no entity graph, because the harness
+# installs no edge agent, so the resolver finds nothing whatever the prompt
+# names. The edge-only arm (#148) is where it would show.
 brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 
 # Pinned for the same reason brain_go_ref is. sregym_ref defaults to "main"
@@ -332,12 +333,13 @@ brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 # out different commits if something merges while they are booting, and a
 # rerun weeks later is not the same run.
 #
-# f42ead3a is main after sregym#112 to #116. #112 builds the MCP image from
-# this checkout and records it in the manifest and per slot; #113 restarts a
-# forward only when its process is gone or its port refuses or resets;
-# #114 grades diagnosis only by default and archives the diagnosis turn's
-# history; #115 runs the benchmark suite in CI; #116 tags the observation
-# connections with their signal and names the application in the prompt.
-# Together they make this the first run whose archive is a diagnosis corpus
-# and whose signal workers hold distinct toolsets.
+# 2c0992ea is main after sregym#134 to #159. #150 mirrors every benchmark
+# image through the S3 registry cache and labels a stuck pull a harness
+# failure; #157 prices Sonnet 4.5 and 5.5 and passes the effort level to
+# brain-go, recording it and the judge in the manifest; #159 seeds the cache
+# from EC2; #148 adds the edge-only arm; #144 and #146 pin arm B's edge
+# image, informers and screened ConfigMap values; #140 turns brain-go's
+# Kubernetes tools on for the native arm. Together they make this the first
+# run that pulls nothing from a public registry and can run Sonnet 5.5 at a
+# chosen effort.
 sregym_ref = "2c0992ea8db07d8265796da3af8c52344e569d5e"

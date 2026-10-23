@@ -272,6 +272,10 @@ variable "ami_id" {
     not the change under test. The default is the same image the sandbox
     fleet is pinned to (NOFireAI/terraform, aws/sandbox/sregym). Move it
     on purpose, with a run on each side, never as a side effect of a run.
+
+    An AMI id is bound to one region. The default is a us-east-2 id, and
+    compute.tf refuses to plan it in any other region; a run elsewhere
+    sets ami_id to that region's image.
   EOT
   type        = string
   default     = "ami-02ad619be5bc165df" # ubuntu-noble-24.04-amd64-server-20261017, us-east-2
