@@ -14,11 +14,14 @@
 # script or the laptop after the seed has started does not leave it running.
 # If this script fails BEFORE the seed starts, it scales the group back to 0.
 #
-# Usage: seed_cache_on_ec2.sh [--sregym-ref main] --brain-go-ref SHA [--brain-go-ref SHA]...
-#   --sregym-ref    the sregym commit the instance checks out to run the seed
-#                   scripts (default main)
+# Usage: seed_cache_on_ec2.sh --sregym-ref REF --brain-go-ref REF [--brain-go-ref REF]...
+#                              [--bucket NAME] [--region REGION]
+#   --sregym-ref    the sregym_ref the run's tfvars pins: its image_cache.list
+#                   is what gets seeded (default main)
 #   --brain-go-ref  every brain_go_ref a run's tfvars pins; one host-image seed
-#                   per ref
+#                   per ref. A full SHA, branch or tag; not an abbreviated SHA
+#   --bucket        default sregym-bench-registry-cache-<caller's account id>
+#   --region        default us-east-2
 # Needs: aws CLI with credentials for the sandbox account (DeveloperAccess),
 # python3. macOS-safe: no GNU-only tools.
 
@@ -26,8 +29,11 @@ set -euo pipefail
 
 REGION=us-east-2
 ASG=sregym-cache-seeder
-BUCKET=sregym-bench-registry-cache-819709950457
+BUCKET=""
 SREGYM_REF=main
+# The remote run is capped at 5 hours (seed_cache_remote.sh); stop following
+# 30 minutes after that.
+FOLLOW_LIMIT=$((5 * 3600 + 1800))
 BRAIN_GO_REFS=()
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -35,12 +41,18 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --sregym-ref) SREGYM_REF="$2"; shift 2 ;;
     --brain-go-ref) BRAIN_GO_REFS+=("$2"); shift 2 ;;
+    --bucket) BUCKET="$2"; shift 2 ;;
+    --region) REGION="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 [ ${#BRAIN_GO_REFS[@]} -gt 0 ] || { echo "at least one --brain-go-ref is required" >&2; exit 2; }
 for r in "${BRAIN_GO_REFS[@]}"; do
-  [[ "$r" =~ ^[0-9a-f]{40}$ ]] || { echo "--brain-go-ref must be a full 40-char SHA: $r" >&2; exit 2; }
+  # Same rule as terraform/variables.tf's brain_go_ref: a short SHA cannot be
+  # fetched by itself, so reject one; a full SHA, branch or tag is fine.
+  if [[ "$r" =~ ^[0-9a-f]{7,39}$ ]]; then
+    echo "--brain-go-ref looks like an abbreviated SHA; use the full 40 characters: $r" >&2; exit 2
+  fi
 done
 
 say() { echo "[seed $(date -u +%H:%M:%S)] $*"; }
@@ -58,7 +70,6 @@ wait_until() {  # wait_until <seconds> <description> <command...>
 }
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-PREFIX="s3://$BUCKET/seed-logs/$RUN_ID"
 STARTED=0
 cleanup() {
   local rc=$?
@@ -70,7 +81,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "identity: $(aws sts get-caller-identity --query Arn --output text)"
+read -r ACCOUNT ARN <<<"$(aws sts get-caller-identity --query '[Account,Arn]' --output text)"
+say "identity: $ARN"
+[ -n "$BUCKET" ] || BUCKET="sregym-bench-registry-cache-$ACCOUNT"
+PREFIX="s3://$BUCKET/seed-logs/$RUN_ID"
+say "bucket: $BUCKET ($REGION), sregym@$SREGYM_REF, brain-go ${BRAIN_GO_REFS[*]}"
 read -r desired count <<<"$(asg_state)"
 [ "$desired" = 0 ] && [ "$count" = 0 ] || { say "$ASG is not idle (desired=$desired instances=$count); refusing to start a second seeder"; exit 1; }
 
@@ -138,6 +153,7 @@ say "log: $PREFIX/seed.log"
 
 TMP=$(mktemp -d)
 seen=0
+follow_start=$SECONDS
 while :; do
   if aws s3 cp "$PREFIX/seed.log" "$TMP/seed.log" --region "$REGION" --only-show-errors 2>/dev/null; then
     total=$(wc -l <"$TMP/seed.log" | tr -d ' ')
@@ -148,6 +164,14 @@ while :; do
   fi
   if aws s3 cp "$PREFIX/status" "$TMP/status" --region "$REGION" --only-show-errors 2>/dev/null; then
     break
+  fi
+  # An instance that dies before it can upload status (e.g. the AWS CLI never
+  # installed) shuts down instead of leaving the group, and the group launches
+  # an idle replacement. Stop waiting past the remote cap and scale to 0.
+  if [ $((SECONDS - follow_start)) -ge "$FOLLOW_LIMIT" ]; then
+    say "no status after ${FOLLOW_LIMIT}s; scaling $ASG to 0"
+    aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 0
+    exit 1
   fi
   sleep 30
 done

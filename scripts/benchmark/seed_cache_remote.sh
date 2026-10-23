@@ -23,13 +23,37 @@ STATUS=/root/seed.status
 
 say() { echo "[remote-seed $(date -u +%H:%M:%S)] $*"; }
 
+# Upload the log with anything that looks like the clone token removed. The
+# token never goes in a URL (see main), but a git error could still echo an
+# auth header, and this log lives in a bucket the benchmark role can read.
+upload_log() {
+  sed -E 's#(x-access-token:)[^@[:space:]]+@#\1***@#g; s#(Authorization: (Basic|Bearer) )[A-Za-z0-9+/=._-]+#\1***#g' \
+    "$LOG" >"$LOG.scrubbed" && aws s3 cp "$LOG.scrubbed" "$PREFIX/seed.log" --region "$REGION" --only-show-errors
+}
+
+# Hand the registry containers the instance role's temporary keys. They run on
+# docker's bridge network and get no credentials from IMDS there (NOFIRE.md,
+# "Registry mirror and the S3 image cache"); registry_mirror.sh passes AWS_*
+# through. Called before each seed so a long run never uses expired keys.
+export_role_keys() {
+  local imds_t role creds
+  imds_t=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') || return 1
+  role=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_t" http://169.254.169.254/latest/meta-data/iam/security-credentials/) || return 1
+  creds=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_t" "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role") || return 1
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  AWS_ACCESS_KEY_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["AccessKeyId"])' <<<"$creds")
+  AWS_SECRET_ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretAccessKey"])' <<<"$creds")
+  AWS_SESSION_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["Token"])' <<<"$creds")
+  say "using $role's temporary keys, expiring $(python3 -c 'import json,sys; print(json.load(sys.stdin)["Expiration"])' <<<"$creds")"
+}
+
 leave() {
   local rc=$?
   say "exiting (rc=$rc); uploading log and leaving the group"
   echo "overall=$rc" >>"$STATUS"
   [ -n "${UPLOADER_PID:-}" ] && kill "$UPLOADER_PID" 2>/dev/null
   if command -v aws >/dev/null 2>&1; then
-    aws s3 cp "$LOG" "$PREFIX/seed.log" --region "$REGION" --only-show-errors
+    upload_log
     aws s3 cp "$STATUS" "$PREFIX/status" --region "$REGION" --only-show-errors
     local t iid
     t=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
@@ -53,40 +77,35 @@ main() {
   say "identity: $(aws sts get-caller-identity --query Arn --output text)"
 
   say "cloning sregym@$SREGYM_REF and brain-go"
-  local token
+  # The token goes in an auth header, never in a URL, so a git error cannot
+  # print it. The header is also stored in brain-go's own .git/config for the
+  # lazy blob fetches seed_host_images.sh's worktree triggers; that file lives
+  # only as long as this instance.
+  local token auth
   token=$(aws ssm get-parameter --region "$REGION" --name /sregym/benchmark/github-token \
     --with-decryption --query Parameter.Value --output text) || return 20
-  cd /root || return 21
-  git clone -q "https://x-access-token:${token}@github.com/NOFireAI/sregym.git" || return 22
-  git -C sregym checkout -q "$SREGYM_REF" || return 23
-  git clone -q --filter=blob:none "https://x-access-token:${token}@github.com/NOFireAI/brain-go.git" || return 24
-  git -C brain-go fetch -q origin "${BRAIN_GO_REFS[@]}" || return 25
+  auth="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
   unset token
+  cd /root || return 21
+  git -c http.https://github.com/.extraheader="$auth" clone -q https://github.com/NOFireAI/sregym.git || return 22
+  git -C sregym checkout -q "$SREGYM_REF" || return 23
+  git -c http.https://github.com/.extraheader="$auth" clone -q --filter=blob:none https://github.com/NOFireAI/brain-go.git || return 24
+  git -C brain-go config http.https://github.com/.extraheader "$auth" || return 24
+  git -C brain-go fetch -q origin "${BRAIN_GO_REFS[@]}" || return 25
+  unset auth
   say "sregym at $(git -C sregym log --oneline -1)"
 
   cd /root/sregym || return 26
-  # The registry containers run on docker's bridge network and get no
-  # credentials from IMDS there (NoCredentialProviders on the first try, even
-  # with hop limit 2). Hand them the instance role's temporary keys as plain
-  # environment variables instead; registry_mirror.sh passes AWS_* through.
   unset AWS_PROFILE
-  local imds_t role creds
-  imds_t=$(curl -sf -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') || return 27
-  role=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_t" http://169.254.169.254/latest/meta-data/iam/security-credentials/) || return 28
-  creds=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_t" "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role") || return 29
-  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-  AWS_ACCESS_KEY_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["AccessKeyId"])' <<<"$creds")
-  AWS_SECRET_ACCESS_KEY=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretAccessKey"])' <<<"$creds")
-  AWS_SESSION_TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["Token"])' <<<"$creds")
-  say "using $role's temporary keys, expiring $(python3 -c 'import json,sys; print(json.load(sys.stdin)["Expiration"])' <<<"$creds")"
-  unset creds
   local failed=0 rc
 
+  export_role_keys || return 27
   say "seeding the image cache"
   scripts/benchmark/seed_image_cache.sh --bucket "$BUCKET" --region "$REGION"
   rc=$?; echo "image_cache=$rc" >>"$STATUS"; [ $rc -eq 0 ] || failed=1
 
   for ref in "${BRAIN_GO_REFS[@]}"; do
+    export_role_keys || return 27
     say "seeding host images for brain-go@$ref"
     scripts/benchmark/seed_host_images.sh --bucket "$BUCKET" --region "$REGION" \
       --brain-go-repo /root/brain-go --brain-go-ref "$ref"
@@ -106,14 +125,14 @@ if ! command -v aws >/dev/null 2>&1; then
 fi
 
 # Push the log every 60s so the laptop can follow progress.
-( while sleep 60; do aws s3 cp "$LOG" "$PREFIX/seed.log" --region "$REGION" --only-show-errors; done ) &
+( while sleep 60; do upload_log; done ) &
 UPLOADER_PID=$!
 
-export -f main say
+export -f main say export_role_keys
 export BUCKET REGION SREGYM_REF STATUS
 BRAIN_GO_REFS_STR="${BRAIN_GO_REFS[*]}"
 export BRAIN_GO_REFS_STR
-timeout --kill-after=60 "$MAX_SECONDS" bash -c 'BRAIN_GO_REFS=($BRAIN_GO_REFS_STR); main'
+timeout --kill-after=60 "$MAX_SECONDS" bash -c 'set -uo pipefail; BRAIN_GO_REFS=($BRAIN_GO_REFS_STR); main'
 rc=$?
 [ $rc -eq 124 ] && say "hit the ${MAX_SECONDS}s cap"
 exit $rc

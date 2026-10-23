@@ -246,8 +246,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   docker's bridge network and got no credentials from IMDS there
   (`NoCredentialProviders`, IMDSv2 with hop limit 2; cause not established),
   so `seed_cache_remote.sh` exports the instance role's temporary keys as
-  `AWS_*`, which `registry_mirror.sh` passes into the container. `scripts/benchmark/image_cache.list`
-  is the single source of what the first script seeds; `terraform/README.md`
+  `AWS_*`, which `registry_mirror.sh` passes into the container. Pass the
+  run's pinned `--sregym-ref`: the seeder seeds that ref's list.
+  `scripts/benchmark/image_cache.list` is the single source of what the
+  first script seeds; `terraform/README.md`
   has the same order with the exact commands.
 
   - The bucket (`sregym-bench-registry-cache-<account-id>`, same
