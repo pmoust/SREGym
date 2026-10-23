@@ -16,11 +16,11 @@ resource "aws_instance" "bench" {
   instance_type = var.instance_type
 
   lifecycle {
-    # The default ami_id is a us-east-2 id. Caught at plan, not at
-    # RunInstances after the bucket, security group and role exist.
+    # An AMI id is valid in one region. Caught at plan, not at RunInstances
+    # after the bucket, security group and role exist.
     precondition {
-      condition     = var.region == "us-east-2" || var.ami_id != "ami-02ad619be5bc165df"
-      error_message = "The default ami_id is a us-east-2 image; set ami_id to an image in ${var.region}."
+      condition     = var.region == var.ami_region
+      error_message = "ami_id is an image in ${var.ami_region}, not ${var.region}; set ami_id and ami_region to that region's image."
     }
   }
   subnet_id = element(data.aws_subnets.default.ids, count.index)

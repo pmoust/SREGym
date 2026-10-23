@@ -135,6 +135,17 @@ n_attempts        = 3
 # on the model dimension, not as paired with either of them on that axis.
 # judge_model is left at variables.tf's default (bedrock/us.anthropic.
 # claude-sonnet-5): already the intended judge, nothing to override.
+#
+# This file is the Sonnet 4.6 wave. The two Sonnet 5.5 waves the pin
+# rationale below describes are this file plus one overlay, applied after
+# it so the overlay's two values win and everything else stays the run's:
+#
+#   terraform apply -var-file=run.tfvars -var-file=wave-sonnet55-low.tfvars
+#   terraform apply -var-file=run.tfvars -var-file=wave-sonnet55-medium.tfvars
+#
+# Each overlay sets agent_model to us.anthropic.claude-sonnet-5-5 and
+# reasoning_effort to its level; reasoning_effort is left unset here because
+# Sonnet 4.6 does not take one. The judge is the same in all three waves.
 agent_model = "us.anthropic.claude-sonnet-4-6"
 
 # Explicit, rather than inheriting the variables.tf default of 12. The deepest
@@ -244,28 +255,14 @@ instance_profile_name = "sregym-benchmark-instance-profile"
 # 12 containerd stores. 16000 is the gp3 max and costs ~$1.25 for this run.
 disk_iops = 16000
 
-# Pinned, where run-20260908-0739-4fc0249e left brain_go_ref unset and floated
-# on "main" resolved at each instance's boot. At that run's sha, a signal
-# agent whose every tool call failed still asked the model for an evidence
-# report, and the aggregator folded the result into the run-wide citable
-# evidence list; about 3.5% of that run's MCP calls failed, so some of its 45
-# scored attempts may cite fabricated evidence. brain-go commit 063119c2
-# gates that (NOFireAI/brain-go#2549).
+# Pinned to a sha rather than left on "main", so the run records what it
+# measured: "main" resolves at each instance's boot, so four hosts can check
+# out different commits, and a rerun weeks later is not the same run.
 #
-# Pinned to a sha rather than left on "main" so the run records what it
-# measured, but deliberately not to 063119c2 itself. That commit predates two
-# changes this run exists to measure: b81d2918 stops the secret-redaction
-# marker reading as broken config, which accounted for 4 attempts across 3
-# problems in the last run, and 5ff00330 adds the counter that makes a gated
-# evidence report countable at all. Pinning behind them would measure neither.
-#
-# The recursion-budget confound that argues for the earlier pin does not exist
-# on this path. main's "agentflow: increase recursion limit (#2815) (#2820)"
-# raises AgentRecursionLimit, which chatflow/limits.go documents as capping an
-# agent child workflow's super-steps. The RCI graph has its own separate
-# budget, Limits.RCI from CHAT_SERVICE_RCI_RECURSION_LIMIT, which is the one
-# raised above. FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI turn
-# straight to RCI, so the agent branch #2815 touches is never taken here.
+# The recursion budget raised in brain_env above is Limits.RCI, the RCI
+# graph's own budget. The agent child workflow's AgentRecursionLimit is a
+# separate budget, and FEATURE_FORCE_RCI_FOR_CLI_ENABLED routes every CLI
+# turn straight to RCI, so that branch is never taken here.
 #
 # The third re-anchor. 97f466975 (pinned in 768ee83) is the previous
 # anchor. Between that pin and 2f341c4a7, 1,591 commits landed,

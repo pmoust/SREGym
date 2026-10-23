@@ -273,9 +273,9 @@ variable "ami_id" {
     fleet is pinned to (NOFireAI/terraform, aws/sandbox/sregym). Move it
     on purpose, with a run on each side, never as a side effect of a run.
 
-    An AMI id is bound to one region. The default is a us-east-2 id, and
-    compute.tf refuses to plan it in any other region; a run elsewhere
-    sets ami_id to that region's image.
+    An AMI id is bound to one region, named by ami_region. compute.tf
+    refuses to plan when region differs from it; a run elsewhere sets
+    both ami_id and ami_region to that region's image.
   EOT
   type        = string
   default     = "ami-02ad619be5bc165df" # ubuntu-noble-24.04-amd64-server-20261017, us-east-2
@@ -284,6 +284,12 @@ variable "ami_id" {
     condition     = can(regex("^ami-[0-9a-f]{8,17}$", var.ami_id))
     error_message = "ami_id must be an AMI id (ami- followed by hex)."
   }
+}
+
+variable "ami_region" {
+  description = "The region ami_id is valid in. Moved together with ami_id; compute.tf refuses to plan when region differs from it."
+  type        = string
+  default     = "us-east-2"
 }
 
 variable "instance_type" {
