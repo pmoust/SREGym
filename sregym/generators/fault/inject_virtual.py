@@ -20,10 +20,11 @@ DAEMON_SET_RECOVERY_STATE_DIR = CACHE_DIR / "daemon_set_recovery"
 
 # rolling-update-misconfigured's fault init container, standalone (not part
 # of any app's Helm chart). Named here, once, rather than left as a literal
-# at the one call site below, because the harness's own image-pull detection
-# (sregym/conductor/conductor.py) imports this exact value to exclude it: a
-# pod stuck pulling it is the fault under test (it sleeps forever by design;
-# see inject_rolling_update_misconfigured below), not a harness failure.
+# at the one call site below, so the image-pull detection tests can refer to
+# it. It is not excluded from that detection: the container sleeps forever
+# by design (see inject_rolling_update_misconfigured below) and so never
+# waits on a pull, while a pull stuck on this image is a real cache miss on
+# the probe image many oracles use, which is a harness failure.
 CUSTOM_SERVICE_HANG_INIT_IMAGE = "busybox:1.36"
 
 

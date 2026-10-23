@@ -192,6 +192,9 @@ if [ -n "${SREGYM_REGISTRY_MIRROR_ADDR:-}" ]; then
     } >>"${MIRRORED_CONFIG}"
 
     echo "==> Registry mirror patch added (SREGYM_REGISTRY_MIRROR_ADDR=${SREGYM_REGISTRY_MIRROR_ADDR}): ${MIRRORED_CONFIG}"
+    # The committed config the copy was made from, for the messages below:
+    # that is the file an operator has to edit, not the temp copy.
+    SOURCE_KIND_CONFIG="${KIND_CONFIG}"
     KIND_CONFIG="${MIRRORED_CONFIG}"
 
     # Fail loudly, not a silent fallback: every node in both committed
@@ -208,11 +211,11 @@ if [ -n "${SREGYM_REGISTRY_MIRROR_ADDR:-}" ]; then
     nodes_total=$(grep -c '^  - role:' "${MIRRORED_CONFIG}" || true)
     nodes_mounted=$(grep -c '^        containerPath: /etc/containerd/certs.d$' "${MIRRORED_CONFIG}" || true)
     if [ "${nodes_total}" -eq 0 ]; then
-        echo "❌ no '  - role:' node found in ${KIND_CONFIG}; cannot check the registry mirror mount before using SREGYM_REGISTRY_MIRROR_ADDR"
+        echo "❌ no '  - role:' node found in ${SOURCE_KIND_CONFIG}; cannot check the registry mirror mount before using SREGYM_REGISTRY_MIRROR_ADDR"
         exit 1
     fi
     if [ "${nodes_mounted}" -lt "${nodes_total}" ]; then
-        echo "❌ ${nodes_mounted}/${nodes_total} nodes in ${KIND_CONFIG} have an 'extraMounts:' key to extend; add one to every node (see kind-config-x86.yaml) before using SREGYM_REGISTRY_MIRROR_ADDR"
+        echo "❌ ${nodes_mounted}/${nodes_total} nodes in ${SOURCE_KIND_CONFIG} have an 'extraMounts:' key to extend; add one to every node (see kind-config-x86.yaml) before using SREGYM_REGISTRY_MIRROR_ADDR"
         exit 1
     fi
 fi

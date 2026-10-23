@@ -80,9 +80,7 @@
 # host images from. --brain-go-repo is a local clone to read it from with a
 # temporary `git worktree add --detach`, removed again once the derivation
 # finishes; it never pushes, commits, or touches that clone's own branches.
-# Defaults to $BRAIN_GO_REPO, then ../brain-go next to this checkout (the
-# same sibling-repo convention brain-go's own docker-compose.yml uses for
-# ../dashboard).
+# It has no guessed default: pass --brain-go-repo or set $BRAIN_GO_REPO.
 #
 # Needs: docker, git, aws, and AWS credentials for the bucket (ambient:
 # profile, SSO, instance role: plain `aws s3 cp`, so no special SSO handling
