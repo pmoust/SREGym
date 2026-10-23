@@ -263,6 +263,25 @@ variable "agent_timeout_seconds" {
 # Instance
 # ---------------------------------------------------------------------------
 
+variable "ami_id" {
+  description = <<-EOT
+    The image every benchmark instance boots. Pinned, not looked up: this
+    stack used to read Canonical's "stable/current" Ubuntu 24.04 parameter,
+    and every run applies fresh state, so two waves days apart could boot
+    different images and their numbers would differ for a reason that is
+    not the change under test. The default is the same image the sandbox
+    fleet is pinned to (NOFireAI/terraform, aws/sandbox/sregym). Move it
+    on purpose, with a run on each side, never as a side effect of a run.
+  EOT
+  type        = string
+  default     = "ami-02ad619be5bc165df" # ubuntu-noble-24.04-amd64-server-20261017, us-east-2
+
+  validation {
+    condition     = can(regex("^ami-[0-9a-f]{8,17}$", var.ami_id))
+    error_message = "ami_id must be an AMI id (ami- followed by hex)."
+  }
+}
+
 variable "instance_type" {
   description = <<-EOT
     Sized for concurrency, not for one run. Each instance carries kind clusters

@@ -12,7 +12,7 @@
 resource "aws_instance" "bench" {
   count = var.instance_count
 
-  ami           = data.aws_ssm_parameter.ubuntu.value
+  ami           = var.ami_id
   instance_type = var.instance_type
   subnet_id     = element(data.aws_subnets.default.ids, count.index)
 

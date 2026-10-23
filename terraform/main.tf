@@ -79,12 +79,6 @@ resource "terraform_data" "judge_model_guard" {
   }
 }
 
-# Ubuntu 24.04 LTS x86_64. Canonical's SSM parameter always resolves to the
-# current image, so this does not go stale the way a hardcoded AMI id does.
-data "aws_ssm_parameter" "ubuntu" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
-}
-
 data "aws_vpc" "default" {
   default = true
 }

@@ -325,7 +325,7 @@ disk_iops = 16000
 # The entity-resolution risk noted on the previous pin is still not
 # exercised: the account has no entity graph, because the harness installs
 # no edge agent, so the resolver finds nothing whatever the prompt names.
-brain_go_ref = "97f4669755904fae14cb31a5820cd00192bf6a73"
+brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 
 # Pinned for the same reason brain_go_ref is. sregym_ref defaults to "main"
 # and resolves at each instance's boot, so the four hosts in a run can check
@@ -340,4 +340,4 @@ brain_go_ref = "97f4669755904fae14cb31a5820cd00192bf6a73"
 # connections with their signal and names the application in the prompt.
 # Together they make this the first run whose archive is a diagnosis corpus
 # and whose signal workers hold distinct toolsets.
-sregym_ref = "f42ead3ad823e36e3696196c882e3ccc86511f7d"
+sregym_ref = "2c0992ea8db07d8265796da3af8c52344e569d5e"
