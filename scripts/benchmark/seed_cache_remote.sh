@@ -6,10 +6,13 @@
 #
 # Usage: seed_cache_remote.sh <bucket> <region> <run-id> <sregym-ref> <brain-go-ref>...
 #
-# The instance ends itself whatever happens: the EXIT trap uploads the log and
-# a status file, then leaves the group lowering desired capacity, and falls
-# back to shutdown (the launch template terminates on shutdown). The whole run
-# is capped by `timeout` so a hung seed cannot keep the box alive.
+# On every exit the EXIT trap uploads the log and a status file, then leaves
+# the group lowering desired capacity. If it cannot (no AWS CLI, or the leave
+# call fails) it shuts down instead: the launch template terminates on
+# shutdown, but desired capacity stays 1 and the group launches an idle
+# replacement, which seed_cache_on_ec2.sh or the nightly 22:00 UTC action
+# scales away. The whole run is capped by `timeout` so a hung seed cannot keep
+# the box alive.
 
 set -uo pipefail
 
@@ -77,22 +80,24 @@ main() {
   say "identity: $(aws sts get-caller-identity --query Arn --output text)"
 
   say "cloning sregym@$SREGYM_REF and brain-go"
-  # The token goes in an auth header, never in a URL, so a git error cannot
-  # print it. The header is also stored in brain-go's own .git/config for the
-  # lazy blob fetches seed_host_images.sh's worktree triggers; that file lives
-  # only as long as this instance.
-  local token auth
+  # The token goes in an auth header passed through git's GIT_CONFIG_*
+  # environment: never in a URL (a git error could print it), never in argv
+  # (ps shows it), never in a .git/config. brain-go is a full clone, not a
+  # partial one, so seed_host_images.sh's worktree needs no later
+  # authenticated fetch.
+  local token
   token=$(aws ssm get-parameter --region "$REGION" --name /sregym/benchmark/github-token \
     --with-decryption --query Parameter.Value --output text) || return 20
-  auth="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+  GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+  export GIT_CONFIG_VALUE_0
   unset token
   cd /root || return 21
-  git -c http.https://github.com/.extraheader="$auth" clone -q https://github.com/NOFireAI/sregym.git || return 22
+  git clone -q https://github.com/NOFireAI/sregym.git || return 22
   git -C sregym checkout -q "$SREGYM_REF" || return 23
-  git -c http.https://github.com/.extraheader="$auth" clone -q --filter=blob:none https://github.com/NOFireAI/brain-go.git || return 24
-  git -C brain-go config http.https://github.com/.extraheader "$auth" || return 24
+  git clone -q https://github.com/NOFireAI/brain-go.git || return 24
   git -C brain-go fetch -q origin "${BRAIN_GO_REFS[@]}" || return 25
-  unset auth
+  unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
   say "sregym at $(git -C sregym log --oneline -1)"
 
   cd /root/sregym || return 26

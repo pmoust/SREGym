@@ -10,9 +10,21 @@
 # the group is back at 0. The group is used instead of run-instances because
 # DeveloperAccess can pass only the benchmark role to EC2.
 #
-# The instance ends itself (seed_cache_remote.sh's EXIT trap), so closing this
-# script or the laptop after the seed has started does not leave it running.
-# If this script fails BEFORE the seed starts, it scales the group back to 0.
+# The instance normally ends itself (seed_cache_remote.sh's EXIT trap leaves
+# the group, lowering desired capacity), so closing this script after the seed
+# has started does not leave it running. Two cases need this script or the
+# group's nightly 22:00 UTC scale-to-0: the trap falls back to shutdown (the
+# AWS CLI never installed, or the leave call failed), or the instance is killed
+# without the trap running. Either way desired capacity stays 1 and the group
+# launches an idle replacement. While following, this script checks the
+# instance is still running and scales the group to 0 if it is gone with no
+# status. If this script fails BEFORE the seed starts, it also scales to 0.
+# A seed still running at 22:00 UTC is cut off by that nightly action; rerun it,
+# the seed scripts skip what is already in the bucket.
+#
+# The idle check and the scale-up are not atomic: two people starting a seed at
+# the same moment would share one instance and one would end it under the
+# other. Coordinate before seeding.
 #
 # Usage: seed_cache_on_ec2.sh --sregym-ref REF --brain-go-ref REF [--brain-go-ref REF]...
 #                              [--bucket NAME] [--region REGION]
@@ -71,12 +83,14 @@ wait_until() {  # wait_until <seconds> <description> <command...>
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 STARTED=0
+TMP=""
 cleanup() {
   local rc=$?
   if [ $STARTED -eq 0 ] && [ "${SCALED:-0}" -eq 1 ]; then
     say "failed before the seed started; scaling $ASG back to 0"
     aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 0 || true
   fi
+  [ -n "$TMP" ] && rm -rf "$TMP"
   exit $rc
 }
 trap cleanup EXIT
@@ -148,14 +162,24 @@ launched() {
 }
 wait_until 600 "the launch command" launched
 STARTED=1
-say "seed started on $IID. It ends itself when done; Ctrl-C here only stops following."
+say "seed started on $IID. It normally ends itself when done; Ctrl-C here only stops following."
 say "log: $PREFIX/seed.log"
 
 TMP=$(mktemp -d)
 seen=0
 follow_start=$SECONDS
+gone_since=""
+creds_warned=0
+# Grace for an instance that is gone but uploaded status just before leaving.
+GONE_GRACE=180
+instance_state() {
+  aws ec2 describe-instances --region "$REGION" --instance-ids "$IID" \
+    --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown
+}
 while :; do
+  got_log=0
   if aws s3 cp "$PREFIX/seed.log" "$TMP/seed.log" --region "$REGION" --only-show-errors 2>/dev/null; then
+    got_log=1
     total=$(wc -l <"$TMP/seed.log" | tr -d ' ')
     if [ "$total" -gt "$seen" ]; then
       tail -n +"$((seen + 1))" "$TMP/seed.log" | grep -E '^\[remote-seed|^\[seed-|exit=|MISSING|ERROR' || true
@@ -165,9 +189,27 @@ while :; do
   if aws s3 cp "$PREFIX/status" "$TMP/status" --region "$REGION" --only-show-errors 2>/dev/null; then
     break
   fi
-  # An instance that dies before it can upload status (e.g. the AWS CLI never
-  # installed) shuts down instead of leaving the group, and the group launches
-  # an idle replacement. Stop waiting past the remote cap and scale to 0.
+  # S3 errors are silenced above; say so once if this machine's credentials
+  # stopped working, rather than going quiet for hours.
+  if [ $got_log -eq 0 ] && [ $creds_warned -eq 0 ] && ! aws sts get-caller-identity >/dev/null 2>&1; then
+    say "WARNING: AWS credentials on this machine no longer work (SSO session expired?)."
+    say "The instance still ends itself; log in again to keep following."
+    creds_warned=1
+  fi
+  # The instance died without uploading status: the trap fell back to
+  # shutdown, or it was killed without the trap running. The group then holds
+  # desired capacity 1 and launches an idle replacement, so scale it to 0.
+  state=$(instance_state)
+  case "$state" in
+    pending|running|unknown) gone_since="" ;;
+    *) [ -n "$gone_since" ] || { gone_since=$SECONDS; say "instance $IID is $state; waiting ${GONE_GRACE}s for its status"; } ;;
+  esac
+  if [ -n "$gone_since" ] && [ $((SECONDS - gone_since)) -ge "$GONE_GRACE" ]; then
+    say "instance $IID is gone with no status; scaling $ASG to 0"
+    aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 0
+    exit 1
+  fi
+  # Backstop for a hang the instance check cannot see: stop past the remote cap.
   if [ $((SECONDS - follow_start)) -ge "$FOLLOW_LIMIT" ]; then
     say "no status after ${FOLLOW_LIMIT}s; scaling $ASG to 0"
     aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 0

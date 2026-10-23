@@ -59,7 +59,9 @@ launch on a new account, in this order:
    `scripts/benchmark/seed_cache_on_ec2.sh --sregym-ref <the sregym_ref
    this run's tfvars pins> --brain-go-ref <the brain_go_ref it pins>` (one
    `--brain-go-ref` per pinned ref). It runs the two seed scripts below on a
-   temporary EC2 seeder through SSM and ends the instance when done. The
+   temporary EC2 seeder through SSM and ends the instance when done. A seed
+   still running at 22:00 UTC is cut off by the seeder group's nightly
+   scale-to-0; rerun it, the seed scripts skip what is already cached. The
    `--sregym-ref` matters: the seeder seeds that ref's `image_cache.list`,
    and a run preflights its own ref's list. Never seed from a benchmark box.
 

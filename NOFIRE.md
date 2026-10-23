@@ -237,7 +237,10 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   terraform's `sregym-cache-seeder` Auto Scaling group to 1, runs both on
   that instance through SSM with the instance's own role, which can write
   the bucket, and the instance leaves the group when done, success or
-  failure, under a 5-hour cap. In-region, the first full seed (109 images,
+  failure, under a 5-hour cap. If it dies without leaving (shutdown fallback,
+  or killed), the group launches an idle replacement; the script, while
+  following, scales the group to 0, and the group's nightly 22:00 UTC
+  scale-to-0 is the backstop, which also cuts off a seed still running then. In-region, the first full seed (109 images,
   read back, plus host images for two brain-go refs) took 16 minutes; from a
   laptop each attempt took over an hour and two failed (Docker Desktop DNS,
   an SSO session expiring mid-run). Running them from a developer machine
