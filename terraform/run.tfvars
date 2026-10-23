@@ -137,15 +137,13 @@ n_attempts        = 3
 # claude-sonnet-5): already the intended judge, nothing to override.
 #
 # This file is the Sonnet 4.6 wave. The two Sonnet 5.5 waves the pin
-# rationale below describes are this file plus one overlay, applied after
-# it so the overlay's two values win and everything else stays the run's:
-#
-#   terraform apply -var-file=run.tfvars -var-file=wave-sonnet55-low.tfvars
-#   terraform apply -var-file=run.tfvars -var-file=wave-sonnet55-medium.tfvars
-#
-# Each overlay sets agent_model to us.anthropic.claude-sonnet-5-5 and
-# reasoning_effort to its level; reasoning_effort is left unset here because
-# Sonnet 4.6 does not take one. The judge is the same in all three waves.
+# rationale below describes are run-sonnet55-low.tfvars and
+# run-sonnet55-medium.tfvars, launched the same way as this one
+# (./scripts/benchmark/launch.sh run-sonnet55-low). They carry every value
+# of this file and differ only in agent_model and reasoning_effort;
+# tests/benchmark/test_wave_scenarios.py fails when they drift from it.
+# reasoning_effort is left unset here because Sonnet 4.6 does not take one.
+# The judge is the same in all three waves.
 agent_model = "us.anthropic.claude-sonnet-4-6"
 
 # Explicit, rather than inheriting the variables.tf default of 12. The deepest
@@ -309,7 +307,10 @@ disk_iops = 16000
 #   3. harness_failure=image_pull against the earlier runs' pull failures,
 #      which should be zero with every image cached; if not, the cache did
 #      not serve.
-#   4. Tokens per attempt and TTD per model, with 5.5's lower prices.
+#   4. Tokens per attempt and TTD per model. The 5.5 dollar figures use
+#      rates.yml's provisional 5.5 prices; the 4.6 figures use a confirmed
+#      row, so the two cost sides are not on the same footing until the 5.5
+#      prices are confirmed.
 #
 # Do not read the headline rate as a result. At 63 attempts the interval
 # covers zero for anything under about 23pp.

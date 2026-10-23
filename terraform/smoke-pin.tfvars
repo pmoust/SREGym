@@ -3,8 +3,8 @@
 # one fails loudly at boot), brain-go at the pinned commit starts and takes
 # the model and effort it is given, and an attempt carries a real
 # investigation to a report. To smoke a Sonnet 5.5 wave's configuration,
-# pass -var agent_model=us.anthropic.claude-sonnet-5-5 and
-# -var reasoning_effort=<low|medium> on top of this file.
+# copy the agent_model and reasoning_effort lines of its run-sonnet55-*.tfvars
+# into a copy of this file.
 #
 # Not terraform/smoke.tfvars, which deliberately leaves both refs unset so it
 # tests whatever origin/main is at the time. A smoke that validates a pin has
