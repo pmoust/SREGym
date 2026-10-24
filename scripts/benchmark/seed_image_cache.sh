@@ -8,9 +8,9 @@
 # and registry_mirror.sh's "plain" mode).
 #
 # For each upstream host present in the list: start a writable, non-proxying
-# registry:2 over S3 ("store" mode), `crane copy` every one of that host's
+# registry:3 over S3 ("store" mode), `crane copy` every one of that host's
 # images from the real upstream straight into it, stop it. Then, as
-# verification: start a FRESH, read-only registry:2 over the same bucket
+# verification: start a FRESH, read-only registry:3 over the same bucket
 # ("plain" mode, the same container run_shard.sh starts on a benchmark box)
 # and `crane validate --remote` every image through that, which fetches the
 # manifest and every blob it references, not just the manifest. If an image's
@@ -18,13 +18,13 @@
 # registry's clients will never ask for), this is where that shows up, not a
 # benchmark run.
 #
-# This used to pull each image through a registry:2 configured as a
+# This used to pull each image through a registry:3 configured as a
 # pull-through proxy (REGISTRY_PROXY_REMOTEURL), and verify by re-pulling
 # through a plain registry with `docker pull`. Both had real gaps:
 # `docker pull` skips a layer already present in the local docker
 # store, so a verification pull could report success while the bucket was
 # missing a blob a different image happened to share; and registry:2 2.8.3,
-# the version this script pulls, has no `proxy.ttl` config key at all (a
+# the version this script pulled then, has no `proxy.ttl` config key at all (a
 # previous version of this script set one, believing it suppressed proxy
 # mode's default 7-day cache eviction; it did nothing, silently, since an
 # unrecognized key under `proxy:` is not an error). The scheduler state
@@ -41,7 +41,7 @@
 # github.com/google/go-containerregistry/cmd/crane@latest`. Not run as a
 # container: the only container image that would need (gcr.io/
 # go-containerregistry/crane) is itself an upstream pull, and unlike
-# registry:2 and the kind node image (cached in the bucket under
+# registry:3 and the kind node image (cached in the bucket under
 # scripts/benchmark/seed_host_images.sh, since the BOX needs those and must
 # never reach Docker Hub) that pull only ever happens on a developer's own
 # machine, which has no such restriction. A CLI a developer installs once is
@@ -187,4 +187,4 @@ fi
 
 log ""
 log "every image in $LIST is seeded and verified in s3://$BUCKET"
-log "registry:2 and the kind node image still need scripts/benchmark/seed_host_images.sh (run once, separately; see its header)"
+log "registry:3 and the kind node image still need scripts/benchmark/seed_host_images.sh (run once, separately; see its header)"

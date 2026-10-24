@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start, stop, and address the per-upstream registry:2 containers behind the
+# Start, stop, and address the per-upstream registry:3 containers behind the
 # benchmark's image cache (NOFireAI/sregym#150). Shared by seed_image_cache.sh
 # (store mode, run once from a developer machine to fill the S3 bucket via
 # `crane copy`) and run_shard.sh (plain mode, run on every benchmark box to
@@ -8,7 +8,7 @@
 # section for the design and scripts/benchmark/image_cache.list for the
 # seeded image list.
 #
-# One registry:2 container per upstream host, not one combined registry: a
+# One registry:3 container per upstream host, not one combined registry: a
 # registry's own repository namespace is per-container, and keeping that 1:1
 # shape avoids ever having to prove two different upstreams' repository paths
 # cannot collide in one shared S3 prefix.
@@ -142,7 +142,7 @@ _write_config() {
   redirect_yaml=""
   case "$driver" in
     s3)
-      # Without disabling the redirect, registry:2's S3 driver answers a
+      # Without disabling the redirect, registry:3's S3 driver answers a
       # blob GET/HEAD with a 302 to a presigned HTTPS S3 URL and the CALLER
       # (a kind node's containerd, or this script's own preflight) fetches
       # the bytes directly from S3, bypassing this container entirely. That
@@ -160,7 +160,7 @@ _write_config() {
       # redirect would; accepted, since the alternative is an undocumented
       # new egress path per kind node.
       #
-      # distribution v2.8.3 reads "redirect" as a sibling of the storage
+      # distribution (v2.8.3 and v3 alike) reads "redirect" as a sibling of the storage
       # driver under "storage:", not a key inside the driver's own block
       # ("storage.s3.redirect" is silently ignored; "storage.redirect" is
       # what the code checks). Emitted as its own variable below so it
@@ -351,7 +351,7 @@ EOF
     "${aws_env[@]+"${aws_env[@]}"}" \
     -v "${START_CONFIG_FILE}:/etc/distribution/config.yml:ro" \
     "${fs_mount[@]+"${fs_mount[@]}"}" \
-    registry:2 /etc/distribution/config.yml >/dev/null \
+    registry:3.1.2 /etc/distribution/config.yml >/dev/null \
     || { docker rm -f "$name" >/dev/null 2>&1 || true; die "could not start $name"; }
 
   if ! _wait_ready "$port"; then

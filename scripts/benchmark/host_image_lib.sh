@@ -3,7 +3,7 @@
 #
 # A host-level image is one a box's own docker daemon pulls directly rather
 # than one a kind node's containerd pulls through registry_mirror.sh:
-# registry:2 and the kind node image (both `docker run` by the host itself),
+# registry:3 and the kind node image (both `docker run` by the host itself),
 # and brain-go's compose-declared images and build-base images (both pulled
 # or built by the host's own docker compose / docker build, before kind or
 # the registry mirror are involved at all). None of these go through the

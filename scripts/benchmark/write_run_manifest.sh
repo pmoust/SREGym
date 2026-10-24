@@ -25,7 +25,7 @@
 # --stages and --host-images each rewrite one field of a manifest this script
 # already wrote, for a value that is not knowable when the rest is: the
 # bootstrap writes the manifest and only then sources run_shard.sh, which is
-# where the tasklist gets generated (--stages) and where registry:2 and the
+# where the tasklist gets generated (--stages) and where registry:3 and the
 # kind node image get appended to the host-image TSV (--host-images). Same
 # derivation either way, called from the place that produced the new bytes,
 # so a refresh cannot read its source two different ways from the first
@@ -92,7 +92,7 @@ fi
 # each call rather than caching a value, because the two callers (the first
 # write below, and the --host-images refresh) read it at two different
 # points in the TSV's life: setup_brain_go.sh has written brain-go's own
-# rows by the first call, and run_shard.sh has appended registry:2 and the
+# rows by the first call, and run_shard.sh has appended registry:3 and the
 # kind node image by the second.
 emit_host_images() {
   local manifest="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
@@ -343,7 +343,7 @@ fi
   # Which bytes this run's host images actually were, read back from
   # SREGYM_HOST_IMAGE_MANIFEST: setup_brain_go.sh's own gate has written
   # brain-go's own rows there by this point, but run_shard.sh has not yet
-  # appended registry:2 and the kind node image, since the bootstrap calls
+  # appended registry:3 and the kind node image, since the bootstrap calls
   # this script before it sources run_shard.sh. Empty when
   # REGISTRY_CACHE_BUCKET was unset (a developer machine) or
   # setup_brain_go.sh has not run yet. See emit_host_images above for the

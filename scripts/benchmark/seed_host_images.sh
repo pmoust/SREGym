@@ -4,13 +4,13 @@
 # Run once per account through seed_cache_on_ec2.sh (or from a developer
 # machine), same as seed_image_cache.sh, and re-run only when one
 # of these images needs to move (a kind node image bump, a deliberate
-# registry:2 upgrade, or brain-go's own Dockerfile/compose file changing a
+# registry:3 upgrade, or brain-go's own Dockerfile/compose file changing a
 # pinned base or service image tag).
 #
 # A "host-level" image is one the box's own docker daemon pulls or builds
 # from directly, never one a kind node's containerd pulls through
 # registry_mirror.sh, so none of these belong in image_cache.list either:
-#   - registry2, kindnode-x86: `docker run` directly by the HOST
+#   - registry3, kindnode-x86: `docker run` directly by the HOST
 #     (registry_mirror.sh and `kind create cluster` respectively), before
 #     anything can pull through the mirror they serve.
 #   - the rest: every brain-go compose service with no "build" key (postgres,
@@ -66,7 +66,7 @@
 # `docker load`s it, and checks the loaded image's own ID against the
 # pointer before anything uses it. Every benchmark box boots from a fresh EC2
 # instance, so that tag exists locally only because of this load, and
-# neither registry_mirror.sh's "docker run registry:2", kind's node
+# neither registry_mirror.sh's "docker run registry:3", kind's node
 # creation, nor brain-go's own `make up` ever has a reason to contact a
 # registry for one of these.
 #
@@ -84,7 +84,7 @@
 #
 # Needs: docker, git, aws, and AWS credentials for the bucket (ambient:
 # profile, SSO, instance role: plain `aws s3 cp`, so no special SSO handling
-# is needed here the way registry_mirror.sh needs it for registry:2's own S3
+# is needed here the way registry_mirror.sh needs it for registry:3's own S3
 # driver).
 #
 # Only the x86 kind node image is cached: every benchmark box and kind
@@ -161,11 +161,11 @@ log "brain-go $BRAIN_GO_REF needs: $(printf '%s' "$BRAIN_GO_HOST_IMAGES" | cut -
 
 # "<name> <ref>", one pair per host image. "ref" is the exact tag a benchmark
 # box's own scripts reference: loading a tarball under this same tag is what
-# lets those scripts run unmodified once the image is cached. registry2 and
+# lets those scripts run unmodified once the image is cached. registry3 and
 # kindnode-x86 are fixed (unrelated to any brain-go ref); the rest comes
 # from the derivation above, one "<name>\t<ref>" per line, converted to the
 # space-separated pairs the loop below already expects.
-HOST_IMAGES="registry2 registry:2
+HOST_IMAGES="registry3 registry:3.1.2
 kindnode-x86 jacksonarthurclark/aiopslab-kind-x86:latest
 $(printf '%s\n' "$BRAIN_GO_HOST_IMAGES" | tr '\t' ' ')"
 
@@ -228,4 +228,4 @@ if [ -n "$failures" ]; then
 fi
 
 log ""
-log "registry:2, the kind node image, and brain-go $BRAIN_GO_REF's host images are cached in s3://$BUCKET/host-images/"
+log "registry:3, the kind node image, and brain-go $BRAIN_GO_REF's host images are cached in s3://$BUCKET/host-images/"

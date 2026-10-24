@@ -19,7 +19,7 @@ BUCKET="${bucket}"
 S3_PREFIX="s3://${bucket}/${run_id}/shard-${shard_index}"
 # Read-only image cache (NOFireAI/sregym#150), seeded ahead of time by
 # scripts/benchmark/seed_image_cache.sh. run_shard.sh exports this so
-# registry_mirror.sh can start each upstream's registry:2 against it.
+# registry_mirror.sh can start each upstream's registry:3 against it.
 REGISTRY_CACHE_BUCKET="${registry_cache_bucket}"
 export REGISTRY_CACHE_BUCKET
 

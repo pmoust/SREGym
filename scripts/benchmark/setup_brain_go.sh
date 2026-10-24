@@ -384,7 +384,7 @@ fi
 # AWS_DEFAULT_REGION is passed on this script's own invocation. See
 # scripts/benchmark/seed_host_images.sh for how these tarballs are built and
 # scripts/benchmark/host_image_lib.sh for the shared load step run_shard.sh
-# also uses for registry:2 and the kind node image.
+# also uses for registry:3 and the kind node image.
 if [ -n "${REGISTRY_CACHE_BUCKET:-}" ]; then
   # shellcheck source=scripts/benchmark/host_image_lib.sh
   . "$SREGYM_SCRIPT_DIR/host_image_lib.sh"

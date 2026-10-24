@@ -248,8 +248,9 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
   credentials for the bucket still works (the first needs `crane`; the
   second needs `docker`). On the seeder the registry containers run on
   docker's bridge network and got no credentials from IMDS there
-  (`NoCredentialProviders`, IMDSv2 with hop limit 2; cause not
-  established), so `seed_cache_remote.sh` exports the instance role's
+  (`NoCredentialProviders`; the bridge adds a network hop, and the
+  registry:2 image's SDK also cannot do IMDSv2 at all, see the
+  `registry_mirror.sh` entry below), so `seed_cache_remote.sh` exports the instance role's
   temporary keys as `AWS_*`, which `registry_mirror.sh` passes into the
   container. `scripts/benchmark/image_cache.list` is the single source of
   what the first script seeds; `terraform/README.md` has the same order
@@ -276,11 +277,11 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     it (see "read-only" below); seeding is done by the EC2 seeder's role
     or a developer's own credentials, never through the box's own role.
   - `scripts/benchmark/registry_mirror.sh` starts, stops, and addresses one
-    `registry:2` container per upstream host (`docker.io`, `ghcr.io`,
+    `registry:3` container per upstream host (`docker.io`, `ghcr.io`,
     `quay.io`, `registry.k8s.io`, listed by the `hosts` subcommand), each its own fixed
     local port (5000-5003) and its own S3 key prefix, so no two upstreams'
     repository paths have to be proven never to collide in one shared
-    prefix. `start-plain` configures `registry:2` with no `proxy.remoteurl`
+    prefix. `start-plain` configures `registry:3` with no `proxy.remoteurl`
     at all, so a cache miss 404s instead of reaching out to the real
     registry, for serving a benchmark box and for `seed_image_cache.sh`'s
     verification pass; `start-store` configures it writable, with no
@@ -288,16 +289,31 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     There used to be a third, `start-proxy`, configuring `registry:2` as a
     pull-through (`proxy.remoteurl`) cache over the bucket. Removed:
     distribution 2.8.3, the version this
-    pulls, has no `proxy.ttl` config key at all, so a line that believed it
+    pulled then, has no `proxy.ttl` config key at all, so a line that believed it
     disabled the default 7-day proxy-cache eviction did nothing, silently,
     and a seed left running or resumed past that window could have expired
     and deleted content a benchmark run was reading mid-run. See the seed
     script entry below for the replacement. Both remaining modes write a
-    full generated `config.yml` rather than relying on `registry:2`'s
+    full generated `config.yml` rather than relying on `registry:3`'s
     env-var flattening for nested keys, which panics ("readonly config key
     must contain additional keys") on
     `REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED=true` rather than doing
     what it looks like it should.
+    The image is pinned to an exact release, `registry:3.1.2`, not `registry:2`.
+    `registry:2` (distribution 2.8.x) vendors aws-sdk-go v1.15.11 (2018-08),
+    which has no IMDSv2 support (added in v1.25.38), and the box's
+    `terraform/compute.tf` requires IMDSv2 (`http_tokens = "required"`). The
+    registry's S3 driver therefore found no credentials on a box even though
+    the host's own role credentials worked: `/v2/_catalog` returned 500
+    (`NoCredentialProviders`) and every bootstrap ended with "could not start
+    the docker.io registry mirror" (runs run-20261023-1754-f7109e45 and
+    run-20261024-1910-12161092). distribution v3.1.2 vendors aws-sdk-go
+    v1.55.5, which requests an IMDSv2 token. Weakening the box's IMDS to
+    optional was rejected. The config keys this script writes
+    (`storage.s3.region/bucket/rootdirectory`, `storage.redirect.disable`,
+    `storage.maintenance.readonly.enabled`, `http.addr`) and the bucket layout
+    are the same in v3, so the seeded image cache needs no re-seed (the host images do, see `seed_host_images.sh` below). The IMDSv2 path
+    itself is only confirmed by a real box.
 
     `start-plain` takes an optional network argument, `bridge` (default) or
     `host`. `run_shard.sh` always passes `host`; every other caller
@@ -323,7 +339,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     caveat, not a bug in the script.
   - `scripts/benchmark/seed_host_images.sh` caches every image a box's own
     docker daemon pulls or builds directly, never through the in-cluster
-    containerd the mirror above covers: `registry:2` itself (the mirror
+    containerd the mirror above covers: `registry:3` itself (the mirror
     containers have to exist before anything can pull through them, so this
     one pull cannot be moved behind itself), the kind node image
     (`jacksonarthurclark/aiopslab-kind-x86`, box and kind node are always
@@ -350,7 +366,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     `golang:1.26.9` and no entry at all for `node` or `caddy`, so the
     dashboard and entry images were a live, undocumented Docker Hub pull
     this whole time). The first
-    two (`registry:2`, the kind node image) were a documented, deliberate
+    two (`registry:3`, the kind node image) were a documented, deliberate
     gap, pulled from Docker Hub once per box; the owner decided there is no
     exception to "a benchmark run never touches Docker Hub", which the
     brain-go compose stack (every arm runs it) was still violating until
@@ -379,7 +395,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     if the pointer, the tarball, or the loaded ID do not match. Every
     benchmark box boots from a fresh EC2 instance, so that tag exists
     locally only because of this load, and `registry_mirror.sh`'s `docker
-    run registry:2`, kind's own node creation, and brain-go's `docker
+    run registry:3`, kind's own node creation, and brain-go's `docker
     compose build`/`up` never have a reason to contact a registry for one
     again. Done once per box, not once per slot: later `kind create cluster`
     calls in the same shard reuse the same loaded image.
@@ -411,7 +427,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     files for an `--image=<ref>` shell flag inside an f-string and for
     embedded YAML `image:` text (not just real Python dict/kwarg/constant
     syntax), and allows a leading underscore on an `*_IMAGE` constant name.
-    `registry:2`
+    `registry:3`
     and the kind node image are cached too (see `seed_host_images.sh`
     above), under a different S3 prefix, not as lines in this list: the HOST
     pulls both directly, so neither is a `<host>/<path>:<tag>` line
@@ -649,7 +665,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     to fall through to; and the preflight above means nothing should ever
     actually miss in the first place. Between them, every CONTAINER IMAGE a
     kind node pulls resolves against this box's own cache, seeded from the
-    one shared bucket, and the box itself never pulls `registry:2` or the
+    one shared bucket, and the box itself never pulls `registry:3` or the
     kind node image from Docker Hub either (`seed_host_images.sh` above).
     Five remote YAML manifests used to be fetched the same way, round
     trip, on every run: `kind/setup_kind_cluster.sh`'s Calico manifest
@@ -695,7 +711,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     `scripts/benchmark/brain_go_images.py` against the ref actually checked
     out at `$BRAIN_GO_DIR` and loads every one of them from the S3
     host-image cache (`seed_host_images.sh` above) before calling `make up`,
-    the same `load_host_image` step `run_shard.sh` uses for `registry:2` and
+    the same `load_host_image` step `run_shard.sh` uses for `registry:3` and
     the kind node image; a gate right after re-checks every derived image
     with `docker image inspect` and dies naming every one still absent,
     together, rather than stopping at the first. Compose's own default

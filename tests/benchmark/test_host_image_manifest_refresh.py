@@ -1,4 +1,4 @@
-"""registry:2 and the kind node image must reach the manifest's
+"""registry:3 and the kind node image must reach the manifest's
 brain_go_host_images field, not just setup_brain_go.sh's brain-go rows.
 
 run_shard.sh appends those two images to SREGYM_HOST_IMAGE_MANIFEST after
@@ -56,7 +56,7 @@ exit 0
 
 
 def _extract_host_images_block() -> str:
-    """The real "host images: registry:2, the kind node image" section.
+    """The real "host images: registry:3, the kind node image" section.
 
     Same technique as test_tasklist_generation.py's
     test_the_shard_hard_stops_on_a_rejected_stage_value: slice the live
@@ -64,7 +64,7 @@ def _extract_host_images_block() -> str:
     to the real block is what this test exercises.
     """
     text = RUN_SHARD.read_text()
-    opener = "# --- host images: registry:2, the kind node image ---"
+    opener = "# --- host images: registry:3, the kind node image ---"
     closer = "# --- registry mirror ---"
     assert text.count(opener) == 1, "the host-images block is not defined exactly once in run_shard.sh"
     after = text.split(opener, 1)[1]
@@ -124,7 +124,7 @@ def _run_host_images_block(tmp_path, *, manifest_text: str, host_image_rows: str
 def test_the_block_appends_both_images_and_refreshes_the_manifest(tmp_path):
     """The end-to-end case the review finding describes.
 
-    Before the fix, this ran clean (registry:2 and the kind node image both
+    Before the fix, this ran clean (registry:3 and the kind node image both
     load and both land in the TSV) but the manifest's brain_go_host_images
     kept saying only the brain-go row that was there before the append,
     because nothing re-read the TSV after it changed.
@@ -142,13 +142,13 @@ def test_the_block_appends_both_images_and_refreshes_the_manifest(tmp_path):
     rows = [line.split("\t") for line in host_images.read_text().splitlines() if line]
     assert [r[:2] for r in rows] == [
         ["brain-brain-go", "brain-go/brain:local"],
-        ["registry2", "registry:2"],
+        ["registry3", "registry:3.1.2"],
         ["kindnode-x86", "jacksonarthurclark/aiopslab-kind-x86:latest"],
     ]
 
     fields = dict(line.split("=", 1) for line in manifest.read_text().strip().split("\n") if "=" in line)
     images = fields["brain_go_host_images"]
-    assert f"registry2:registry:2@{_DIGEST}" in images, images
+    assert f"registry3:registry:3.1.2@{_DIGEST}" in images, images
     assert f"kindnode-x86:jacksonarthurclark/aiopslab-kind-x86:latest@{_DIGEST}" in images, images
     # The pre-existing brain-go row survives the refresh; this is a
     # replacement of the one line, not a loss of what the first write knew.
@@ -177,7 +177,7 @@ def test_the_block_is_best_effort_when_the_manifest_is_missing(tmp_path):
 
     rows = [line.split("\t") for line in host_images.read_text().splitlines() if line]
     assert [r[:2] for r in rows] == [
-        ["registry2", "registry:2"],
+        ["registry3", "registry:3.1.2"],
         ["kindnode-x86", "jacksonarthurclark/aiopslab-kind-x86:latest"],
     ]
 

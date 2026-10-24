@@ -2,7 +2,7 @@
 replaced `docker pull`-into-the-host-store for run_shard.sh's ~108-image
 check.
 
-Exercised two ways: against a real local `registry:2` seeded with `crane`
+Exercised two ways: against a real local `registry:3` seeded with `crane`
 (the two tests marked with the docker/crane skip conditions, which prove
 "one present image passes, one with a deleted blob fails naming the blob")
 and, for every other shape, against a
@@ -265,7 +265,7 @@ def test_real_registry_present_image_passes_and_deleted_blob_fails(tmp_path: Pat
     data_dir.mkdir()
     subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
     subprocess.run(
-        ["docker", "run", "-d", "--name", name, "-p", "0:5000", "-v", f"{data_dir}:/var/lib/registry", "registry:2"],
+        ["docker", "run", "-d", "--name", name, "-p", "0:5000", "-v", f"{data_dir}:/var/lib/registry", "registry:3.1.2"],
         check=True,
         capture_output=True,
         timeout=30,

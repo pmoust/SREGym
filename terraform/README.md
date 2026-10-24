@@ -77,13 +77,13 @@ launch on a new account, in this order:
    --bucket sregym-bench-registry-cache-<account-id> --brain-go-ref
    <the brain_go_ref this run's tfvars pins>` once. This covers every image
    a box's own docker daemon pulls or builds directly rather than through
-   the registry mirror: `registry:2`, the kind node image, and brain-go's
+   the registry mirror: `registry:3`, the kind node image, and brain-go's
    own compose-pulled and build-base images (derived from the exact
    `--brain-go-ref` checkout, so a different ref can need a different set);
    see that script's header for why these need a separate seed step.
 4. Launch a run as usual (`launch.sh`). `run_shard.sh` preflights every
    image in the list against the cache before any slot starts, and loads
-   and verifies `registry:2` and the kind node image before that;
+   and verifies `registry:3` and the kind node image before that;
    `setup_brain_go.sh` does the same for brain-go's own host images before
    `make up`. Any of these abort loudly, naming what is missing, if step 2
    or 3 was skipped, stale, or run for a different `--brain-go-ref` than

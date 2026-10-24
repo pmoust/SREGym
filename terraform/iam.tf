@@ -74,7 +74,7 @@ data "aws_iam_policy_document" "bench" {
 
   # The registry cache (NOFireAI/sregym#150), managed in NOFireAI/terraform's
   # aws/sandbox/sregym, not here (see s3.tf). Read-only: run_shard.sh starts
-  # each upstream's registry:2 in plain mode with no proxy.remoteurl, so a
+  # each upstream's registry:3 in plain mode with no proxy.remoteurl, so a
   # benchmark box only ever GETs from this bucket, never writes to it.
   # Seeding is scripts/benchmark/seed_image_cache.sh's job, run by a
   # developer with their own AWS credentials against their own grant, not

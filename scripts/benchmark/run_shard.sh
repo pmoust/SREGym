@@ -173,10 +173,10 @@ SREGYM_PRIVATE_IP=$("$WORKDIR/scripts/benchmark/native_arm.sh" private-ip) || {
 export SREGYM_PRIVATE_IP
 echo "[bootstrap] private address $SREGYM_PRIVATE_IP"
 
-# --- host images: registry:2, the kind node image ------------------------
+# --- host images: registry:3, the kind node image ------------------------
 # Neither is ever pulled by a kind node's containerd, so neither is covered
 # by the registry mirror below or image_cache.list's preflight: both are
-# `docker run` directly by THIS host instead: registry:2 by
+# `docker run` directly by THIS host instead: registry:3 by
 # registry_mirror.sh just below, and the kind node image by `kind create
 # cluster` itself, once per slot. An earlier version of this benchmark left
 # both as a documented, deliberate gap, pulled from Docker Hub once per box.
@@ -205,10 +205,10 @@ mkdir -p "$HOST_IMAGE_TMP"
 # bootstrap's one call to write_run_manifest.sh already ran before this file
 # was sourced, the same ordering problem --stages solves for the tasklist
 # below, so the refresh right after this loop is what makes
-# brain_go_host_images name registry:2 and the kind node image, not just
+# brain_go_host_images name registry:3 and the kind node image, not just
 # brain-go's own.
 HOST_IMAGE_MANIFEST="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
-for pair in "registry2 registry:2" "kindnode-x86 jacksonarthurclark/aiopslab-kind-x86:latest"; do
+for pair in "registry3 registry:3.1.2" "kindnode-x86 jacksonarthurclark/aiopslab-kind-x86:latest"; do
   hi_name="${pair%% *}"
   hi_ref="${pair#* }"
   load_host_image "$hi_name" "$hi_ref" "$REGISTRY_CACHE_BUCKET" "$REGION" "$HOST_IMAGE_TMP" || {
@@ -229,7 +229,7 @@ fi
 # --- registry mirror ---------------------------------------------------
 # Every arm's kind clusters pull through here instead of Docker Hub, ghcr.io,
 # quay.io or registry.k8s.io directly (NOFireAI/sregym#150): one read-only
-# registry:2 per upstream host, serving scripts/benchmark/image_cache.list's
+# registry:3 per upstream host, serving scripts/benchmark/image_cache.list's
 # images out of the pre-seeded S3 bucket (REGISTRY_CACHE_BUCKET, from the
 # bootstrap template). Always "plain" (read-only) here, never the writable
 # "store" mode: that one is scripts/benchmark/seed_image_cache.sh's job, run

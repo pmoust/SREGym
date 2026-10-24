@@ -51,10 +51,10 @@
 # covers their "image:" keys and env "value:" fields the same as any other
 # raw manifest in this tree; nothing extra to maintain here for them.
 #
-# registry:2 and the kind node image (jacksonarthurclark/aiopslab-kind-x86)
+# registry:3 and the kind node image (jacksonarthurclark/aiopslab-kind-x86)
 # are cached too, under scripts/benchmark/seed_host_images.sh's
 # "host-images/" prefix in the same bucket, not as lines in this list: the
-# HOST pulls both directly (`docker run registry:2`, `kind create cluster`),
+# HOST pulls both directly (`docker run registry:3`, `kind create cluster`),
 # never through the in-cluster containerd this list's mirror covers, so
 # neither one is a "<host>/<path>:<tag>" line registry_mirror.sh could route.
 # See that script's header for the caching mechanism.
