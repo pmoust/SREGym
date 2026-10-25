@@ -24,8 +24,6 @@ SREGYM_LITE_PROBLEMS = (
     "search_rate_retry_collapse_hotel_reservation",
 )
 
-PROBLEM_SETS = {"sregym-lite": SREGYM_LITE_PROBLEMS}
-
 # Every id sregym/conductor/problems/registry.py's ProblemRegistry registers,
 # copied out as pure data. It has to be pure data rather than derived from
 # ProblemRegistry() itself: that class's __init__ unconditionally constructs
@@ -162,6 +160,64 @@ ALL_PROBLEM_IDS = (
     "operator_wrong_update_strategy_fault",
     "operator_wrong_operator_image",
 )
+
+
+# Problems the benchmark harness cannot run today, each with the reason. A
+# problem listed here stays in sregym-full (the registry's own list) and is
+# left out of sregym-full-runnable. The reasons were read from the problem
+# classes, conductor.py and scripts/benchmark/image_cache.list; none was
+# confirmed by running the problem on a benchmark box.
+#
+# The registry mirror is fail-closed: a kind node pulls only what
+# image_cache.list holds, so an image missing there is an ImagePullBackOff,
+# and a deploy that cannot finish is retried 3 times per attempt. One such
+# problem costs the slot that owns it far more than its own share of the wave.
+# Adding the image to image_cache.list and re-seeding the cache bucket lifts
+# the image-only exclusions below.
+NOT_RUNNABLE_ON_BENCHMARK_BOX = {
+    # Khaos needs eBPF on the node. Conductor.start_problem returns
+    # SKIPPED_KHAOS_REQUIRED on any emulated (kind) cluster, which is every
+    # benchmark box, so the attempt never starts.
+    "silent_data_corruption": "requires Khaos (dm-flakey); skipped on a kind cluster",
+    "latent_sector_error": "requires Khaos (eBPF); skipped on a kind cluster",
+    # Same Khaos skip, and the registry also raises for this id on a kind
+    # cluster (ProblemRegistry.non_emulated_cluster_problems).
+    "node_clock_drift_hotel_reservation": "requires Khaos and a non-emulated cluster; the registry refuses it on kind",
+    # The Blueprint hotel service images are in image_cache.list, but the
+    # workload generator these problems start is 777lefty/wlgen-proc:latest,
+    # which is not. Without it the load never starts.
+    "capacity_decrease_rpc_retry_storm": "workload image 777lefty/wlgen-proc:latest is not in image_cache.list",
+    "gc_capacity_degradation": "workload image 777lefty/wlgen-proc:latest is not in image_cache.list",
+    "load_spike_rpc_retry_storm": "workload image 777lefty/wlgen-proc:latest is not in image_cache.list",
+    # ingress-nginx is installed from a live helm repo with an unpinned chart.
+    # Its controller and admission-webhook images are not in image_cache.list.
+    "expired_tls_hotel_reservation": "deploys ingress-nginx; its images are not in image_cache.list",
+    "ingress_misroute": "deploys ingress-nginx; its images are not in image_cache.list",
+    # FleetCast deploys ingress-nginx first (same uncached images), then the
+    # TiDB operator and cluster from the live pingcap and fleetcast chart
+    # repos. The nested FleetCast submodule is also needed for the TiDB CR.
+    "operator_overload_replicas": "FleetCast app: needs ingress-nginx images and live helm repos",
+    "operator_non_existent_storage": "FleetCast app: needs ingress-nginx images and live helm repos",
+    "operator_invalid_affinity_toleration": "FleetCast app: needs ingress-nginx images and live helm repos",
+    "operator_security_context_fault": "FleetCast app: needs ingress-nginx images and live helm repos",
+    "operator_wrong_update_strategy_fault": "FleetCast app: needs ingress-nginx images and live helm repos",
+    "operator_wrong_operator_image": "FleetCast app: needs ingress-nginx images and live helm repos",
+    # Train Ticket's chart runs a job that applies ~41 microservice manifests
+    # at install time. Those images are a documented gap in image_cache.list.
+    "trainticket_f17_nested_sql_select_clause_error": "Train Ticket microservice images are not in image_cache.list",
+    "trainticket_f22_sql_column_name_mismatch_error": "Train Ticket microservice images are not in image_cache.list",
+}
+
+SREGYM_FULL_RUNNABLE_PROBLEMS = tuple(p for p in ALL_PROBLEM_IDS if p not in NOT_RUNNABLE_ON_BENCHMARK_BOX)
+
+PROBLEM_SETS = {
+    "sregym-lite": SREGYM_LITE_PROBLEMS,
+    # Every registered problem. Includes the ones that cannot run on the
+    # benchmark box; use sregym-full-runnable for a wave.
+    "sregym-full": ALL_PROBLEM_IDS,
+    # sregym-full minus NOT_RUNNABLE_ON_BENCHMARK_BOX.
+    "sregym-full-runnable": SREGYM_FULL_RUNNABLE_PROBLEMS,
+}
 
 
 def resolve_problems(spec: str) -> list[str]:

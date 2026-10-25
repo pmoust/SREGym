@@ -20,7 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from sregym.conductor.problem_sets import ALL_PROBLEM_IDS, SREGYM_LITE_PROBLEMS, resolve_problems
+from sregym.conductor.problem_sets import (
+    ALL_PROBLEM_IDS,
+    NOT_RUNNABLE_ON_BENCHMARK_BOX,
+    PROBLEM_SETS,
+    SREGYM_FULL_RUNNABLE_PROBLEMS,
+    SREGYM_LITE_PROBLEMS,
+    resolve_problems,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "terraform" / "templates" / "bootstrap.sh.tftpl"
@@ -224,6 +231,31 @@ def test_sregym_lite_is_a_subset_of_all_problem_ids():
     assert set(SREGYM_LITE_PROBLEMS) <= set(ALL_PROBLEM_IDS)
 
 
+def test_sregym_full_is_every_registered_problem():
+    assert PROBLEM_SETS["sregym-full"] == ALL_PROBLEM_IDS
+    assert resolve_problems("sregym-full") == sorted(ALL_PROBLEM_IDS)
+
+
+def test_every_exclusion_names_a_registered_problem_and_gives_a_reason():
+    unknown = sorted(set(NOT_RUNNABLE_ON_BENCHMARK_BOX) - set(ALL_PROBLEM_IDS))
+    assert not unknown, f"exclusions that are not registered problems: {unknown}"
+    assert all(reason.strip() for reason in NOT_RUNNABLE_ON_BENCHMARK_BOX.values())
+
+
+def test_sregym_full_runnable_is_sregym_full_minus_the_exclusions():
+    runnable = PROBLEM_SETS["sregym-full-runnable"]
+    assert runnable == SREGYM_FULL_RUNNABLE_PROBLEMS
+    assert set(runnable) == set(ALL_PROBLEM_IDS) - set(NOT_RUNNABLE_ON_BENCHMARK_BOX)
+    assert len(runnable) == len(set(runnable))
+    assert len(runnable) + len(NOT_RUNNABLE_ON_BENCHMARK_BOX) == len(ALL_PROBLEM_IDS)
+
+
+def test_sregym_lite_loses_nothing_to_the_exclusions():
+    # Lite is the set every scored run so far drew from. An exclusion that
+    # named one of its ids would mean lite itself could not run.
+    assert set(SREGYM_LITE_PROBLEMS) <= set(SREGYM_FULL_RUNNABLE_PROBLEMS)
+
+
 def test_resolve_problems_expands_a_named_set():
     assert resolve_problems("sregym-lite") == sorted(SREGYM_LITE_PROBLEMS)
 
@@ -318,8 +350,17 @@ def _write_manifest(
             "network_policy_block wrong_dns_policy_astronomy_shop",
             sorted(["network_policy_block", "wrong_dns_policy_astronomy_shop"]),
         ),
+        ("sregym-full", "", sorted(ALL_PROBLEM_IDS)),
+        ("sregym-full-runnable", "", sorted(SREGYM_FULL_RUNNABLE_PROBLEMS)),
     ],
-    ids=["named-set", "bare-ids", "set-plus-bare-id", "narrowed-by-override"],
+    ids=[
+        "named-set",
+        "bare-ids",
+        "set-plus-bare-id",
+        "narrowed-by-override",
+        "full-set",
+        "full-runnable-set",
+    ],
 )
 def test_the_manifest_records_the_resolved_list_regardless_of_how_selection_was_expressed(
     tmp_path, problem_set, problems_override, expected
