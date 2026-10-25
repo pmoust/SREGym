@@ -126,6 +126,19 @@ def _call_class_name(node: ast.AST) -> str | None:
     return None
 
 
+def _local_call_class(init_node: ast.FunctionDef, name: str) -> str | None:
+    """The class a local variable was bound to, for `name = Cls()` in this
+    __init__ (e.g. `app = AstronomyShop()` then `super().__init__(app=app)`)."""
+    for node in ast.walk(init_node):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    cls = _call_class_name(node.value)
+                    if cls:
+                        return cls
+    return None
+
+
 def _app_from_init(init_node: ast.FunctionDef) -> tuple[str, str] | None:
     """What app this __init__ constructs: an explicit app_name default, or the
     class passed to super().__init__(app=...) / assigned to self.app."""
@@ -148,6 +161,8 @@ def _app_from_init(init_node: ast.FunctionDef) -> tuple[str, str] | None:
                 for kw in node.keywords:
                     if kw.arg == "app":
                         cls = _call_class_name(kw.value)
+                        if cls is None and isinstance(kw.value, ast.Name):
+                            cls = _local_call_class(init_node, kw.value.id)
                         if cls:
                             return ("app_class", cls)
         if isinstance(node, ast.Assign):

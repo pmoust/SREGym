@@ -99,6 +99,35 @@ def test_every_sregym_lite_id_resolves_to_a_category():
     assert set(categories) == set(ids)
 
 
+def test_every_registered_problem_resolves_to_a_category():
+    """The whole registry, not only lite: a full-set report must not drop a
+    problem into an unresolved bucket."""
+    import ast
+
+    src = (_ROOT / "sregym" / "conductor" / "problem_sets.py").read_text()
+    ids = None
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "ALL_PROBLEM_IDS" for t in node.targets):
+            ids = [e.value for e in node.value.elts]
+    assert ids
+
+    categories, unresolved = run_stats.resolve_categories(set(ids))
+
+    assert unresolved == []
+    assert set(categories) == set(ids)
+
+
+def test_an_app_bound_to_a_local_name_before_super_init_resolves():
+    """kubelet_eviction_threshold_misconfig does `app = AstronomyShop()` and
+    then `super().__init__(app=app)`."""
+    categories, unresolved = run_stats.resolve_categories({"kubelet_eviction_threshold_misconfig"})
+
+    assert unresolved == []
+    assert categories == {"kubelet_eviction_threshold_misconfig": "astronomy_shop"}
+
+
 def test_problems_with_no_app_name_in_the_id_still_resolve_correctly():
     """These four hardcode their app inside __init__ rather than taking an
     app_name parameter at all -- the case a suffix-match on the id string
