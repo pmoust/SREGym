@@ -54,7 +54,10 @@ OUT="${1:?usage: write_run_manifest.sh [--stages|--host-images] <output-path>}"
 # A stage still needs its oracle attached: a problem with no mitigation_oracle
 # is skipped with "Mitigation oracle is not attached", which cannot be seen
 # from here. All 21 sregym-lite problems have one, checked against the
-# archived results rather than by reading the registry.
+# archived results rather than by reading the registry. For the rest of the
+# registry only a static read backs it: every registered class assigns a
+# diagnosis_oracle, a mitigation_oracle and a root_cause (the per-problem
+# ground truth the judge compares against) in its own or a base __init__.
 emit_stages() {
   local tasklist="${SREGYM_TASKLIST:-${WORKDIR:-.}/sregym/conductor/tasklist.yml}"
   if [ -f "$tasklist" ]; then

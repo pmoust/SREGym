@@ -34,12 +34,15 @@ aws s3 sync "$S3_PREFIX/slots/" "$SLOTS_DIR" --region "$REGION" --only-show-erro
 # matters is instance death, and S3 resume already covers that.
 # problem_sets.py is pure data. The registry is not: ProblemRegistry() loads a
 # kubeconfig on construction, and at this point the cluster may not exist yet.
-# The full-suite path is blocked on NOFireAI/brain-go#2221 anyway, which has to
-# reconstruct which 90 of the 123 registered problems the paper used.
+# An empty PROBLEM_SET is not "the whole registry": the paper used 90 of the
+# registered problems and nothing in the repo says which (NOFireAI/brain-go#2221).
+# The full registry is the named set sregym-full, and sregym-full-runnable is
+# that set minus the problems a benchmark box cannot run.
 if [ -z "$PROBLEM_SET" ]; then
   echo "[bootstrap] problem_set is empty, which means the full registry."
-  echo "[bootstrap] That set is undefined: 123 problems are registered, the paper"
-  echo "[bootstrap] used 90, and nothing in the repo says which. See NOFireAI/brain-go#2221."
+  echo "[bootstrap] That set is undefined: the paper used 90 of the registered"
+  echo "[bootstrap] problems and nothing in the repo says which. See NOFireAI/brain-go#2221."
+  echo "[bootstrap] Name sregym-full-runnable or sregym-full to run the registry."
   terminate "full-suite runs need a defined problem set"
   exit 1
 fi

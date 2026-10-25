@@ -439,12 +439,19 @@ must not shard to nothing and read like a clean short run):
 --problems sregym-lite,kafka_producer_leak                 # the 21, plus one more
 ```
 
-`sregym-lite` is the only named set that exists today. The full registry
-(123 ids as of this writing — check `sregym/conductor/problem_sets.py`'s
-`ALL_PROBLEM_IDS` for the current, test-pinned count) has no default set of
-its own: nobody has reconstructed which 90 the SREGym paper actually used
-(NOFireAI/brain-go#2221), so there is no "run everything" default and never
-will be until that's resolved.
+Three named sets exist (`sregym/conductor/problem_sets.py`):
+
+- `sregym-lite`: the 21 standard problems.
+- `sregym-full`: every registered problem (123 ids as of this writing; the
+  test-pinned `ALL_PROBLEM_IDS` has the current count). Some of these cannot
+  run on a benchmark box.
+- `sregym-full-runnable`: `sregym-full` minus
+  `NOT_RUNNABLE_ON_BENCHMARK_BOX`, a dict that gives the reason for each
+  exclusion. Use this one for a wave.
+
+An empty `--problems` is still a hard stop, not "run everything": nobody has
+reconstructed which 90 the SREGym paper actually used (NOFireAI/brain-go#2221),
+so the full set is always named explicitly.
 
 ## Which stages a run grades
 

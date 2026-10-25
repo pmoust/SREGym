@@ -101,7 +101,12 @@ variable "problems" {
 # been handled.
 
 variable "problem_set" {
-  description = "Suite name passed to main.py --suite. Empty runs the full registry."
+  description = <<-EOT
+    Named problem set from sregym/conductor/problem_sets.py: sregym-lite,
+    sregym-full, or sregym-full-runnable. One name only; the comma syntax of
+    resolve_problems() does not pass the charset check below. Empty is not
+    allowed: run_shard.sh stops on an empty set.
+  EOT
   type        = string
   default     = "sregym-lite"
 
