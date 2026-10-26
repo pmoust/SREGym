@@ -553,23 +553,32 @@ GET_ONLY = {
 }
 
 
+def _cluster_role_doc() -> dict:
+    """The ClusterRole document from native_arm.sh's ServiceAccount heredoc,
+    parsed as YAML so a rule's layout cannot hide it from the checks below."""
+    src = NATIVE_ARM.read_text()
+    body = src.split("kubectl apply -f - >/dev/null <<YAML || die \"could not apply the read-only ServiceAccount\"", 1)[1]
+    body = body.split("\nYAML\n", 1)[0]
+    roles = [d for d in yaml.safe_load_all(body) if d and d.get("kind") == "ClusterRole"]
+    assert len(roles) == 1, f"expected one ClusterRole in the heredoc, found {len(roles)}"
+    return roles[0]
+
+
 def _cluster_role_verbs() -> dict[tuple[str, str], list[str]]:
     """The ClusterRole native_arm.sh applies, as {(apiGroup, resource): verbs}.
     A group can appear in more than one rule; each resource keeps its own
     rule's verbs."""
-    src = NATIVE_ARM.read_text()
-    rules = re.findall(
-        r"- apiGroups: \[([^\]]*)\]\n  resources: \[([^\]]*)\]\n  verbs: \[([^\]]*)\]", src
-    )
+    rules = _cluster_role_doc()["rules"]
     assert rules, "no ClusterRole rules found in native_arm.sh"
 
     out: dict[tuple[str, str], list[str]] = {}
-    for group, resources, verbs in rules:
-        g = group.strip().strip('"')
-        for r in resources.split(","):
-            key = (g, r.strip().strip('"'))
-            assert key not in out, f"{key} granted twice"
-            out[key] = sorted(v.strip().strip('"') for v in verbs.split(","))
+    for rule in rules:
+        assert set(rule) == {"apiGroups", "resources", "verbs"}, f"unexpected rule fields: {sorted(rule)}"
+        for g in rule["apiGroups"]:
+            for r in rule["resources"]:
+                key = (g, r)
+                assert key not in out, f"{key} granted twice"
+                out[key] = sorted(rule["verbs"])
     return out
 
 
@@ -585,6 +594,16 @@ def test_the_read_only_grant_is_exactly_what_brain_go_reaches():
     """Over-granting weakens the least-privilege claim; under-granting breaks a
     tool. Both are silent on this machine and expensive on a cloud run."""
     assert _cluster_role_rules() == EXPECTED_GRANT
+
+
+def test_every_rule_is_read_only_and_names_no_secret():
+    """No write verb, no wildcard, no Secret and no subresource anywhere in
+    the role, whatever the rule's layout."""
+    for (group, resource), verbs in _cluster_role_verbs().items():
+        assert set(verbs) <= {"get", "list"}, (group, resource, verbs)
+        assert "*" not in (group, resource)
+        assert resource != "secrets"
+        assert "/" not in resource, (group, resource)
 
 
 def test_the_describe_only_kinds_grant_get_alone():
