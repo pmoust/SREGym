@@ -286,7 +286,7 @@ disk_iops = 16000
 #     leads blocks are fenced; tool calls are fenced to the run's
 #     environment.
 #
-# On the harness side (sregym f42ead3a to 2c0992ea, 62 commits): every
+# On the harness side (sregym f42ead3a to c3799eeb, 66 commits): every
 # image the suite needs is served from the S3 registry cache instead of
 # pulled per attempt, a stuck pull is labelled a harness failure and the
 # attempt dropped from grading rather than scored as the agent's (#150), the
@@ -331,7 +331,10 @@ brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 # out different commits if something merges while they are booting, and a
 # rerun weeks later is not the same run.
 #
-# 2c0992ea is main after sregym#134 to #159. #150 mirrors every benchmark
+# c3799eeb is main after sregym#134 to #162. #161 moves the mirror to
+# registry 3, whose S3 client reads the instance role over IMDSv2 (registry 2
+# could not, and the first smoke on the cache died on it). #162 adds the
+# sregym-full and sregym-full-runnable problem sets. #150 mirrors every benchmark
 # image through the S3 registry cache and labels a stuck pull a harness
 # failure; #157 prices Sonnet 4.5 and 5.5 and passes the effort level to
 # brain-go, recording it and the judge in the manifest; #159 seeds the cache
@@ -340,4 +343,4 @@ brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 # Kubernetes tools on for the native arm. Together they make this the first
 # run that pulls nothing from a public registry and can run Sonnet 5.5 at a
 # chosen effort.
-sregym_ref = "2c0992ea8db07d8265796da3af8c52344e569d5e"
+sregym_ref = "c3799eeb7070ab974c957d6cff8c270c3056271c"

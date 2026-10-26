@@ -34,4 +34,4 @@ use_spot              = false
 instance_profile_name = "sregym-benchmark-instance-profile"
 disk_iops             = 16000
 brain_go_ref          = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
-sregym_ref            = "2c0992ea8db07d8265796da3af8c52344e569d5e"
+sregym_ref            = "c3799eeb7070ab974c957d6cff8c270c3056271c"
