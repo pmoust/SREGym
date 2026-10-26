@@ -424,7 +424,7 @@ fi
   # this point in the bootstrap the file does not exist yet.
   emit_stages
   # One KEY=VALUE per line, as written into brain-go's deploy/.env, except
-  # that a secret's value is replaced by its length and a short digest. See
-  # emit_brain_env above.
+  # that a secret's value is replaced by "<redacted sha256:...>", or by
+  # "<redacted>" when it is short. See emit_brain_env above.
   emit_brain_env
 } >"$OUT"
