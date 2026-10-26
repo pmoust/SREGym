@@ -227,7 +227,7 @@ cmd_kubeconfig() {
   # internal/clients/kubernetes at brain-go describe-more-kinds e744e086, which
   # is the whole API surface this connection has:
   # the tool adapter (internal/app/kubernetes_tool_resolver.go) calls only
-  # that package's seven methods, and the connection probe calls its
+  # that package's methods, and the connection probe calls its
   # IsConnectionValid.
   #
   # To re-derive after a brain-go change:
@@ -253,7 +253,11 @@ cmd_kubeconfig() {
   #                 ipamconfigs Get
   #
   # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
-  # their rules grant get and nothing else. A ServiceAccount describe shows a
+  # their rules grant get and nothing else. Two of them, priorityclasses and
+  # serviceaccounts, have no counterpart in the MCP arm's kubectl ClusterRole
+  # (mcp_server/k8s/clusterrole.yaml), so on a problem that needs one of those
+  # objects the native arm can read it and the MCP arm cannot. The MCP arm is
+  # left as it is: it is the anchor archived runs were measured against. A ServiceAccount describe shows a
   # secret count, never a secret name, and the role still grants no secrets.
   #
   # batch/jobs is not optional and a missing grant is not a partial outage.
