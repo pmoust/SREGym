@@ -97,6 +97,48 @@ fi
 # points in the TSV's life: setup_brain_go.sh has written brain-go's own
 # rows by the first call, and run_shard.sh has appended registry:3 and the
 # kind node image by the second.
+# A brain_env name whose underscore-separated words include one of these
+# holds a credential (TYPESAFE_API_KEY, GITHUB_TOKEN, DB_PASSWORD). The
+# manifest is uploaded to the results bucket next to every run's results, so
+# its value must never be written here.
+SECRET_NAME_WORDS=" KEY APIKEY TOKEN SECRET PASSWORD PASSWD PASS CREDENTIAL CREDENTIALS PRIVATE "
+
+_is_secret_name() {
+  local word upper
+  upper=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+  for word in ${upper//_/ }; do
+    case "$SECRET_NAME_WORDS" in *" $word "*) return 0 ;; esac
+  done
+  return 1
+}
+
+_sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d' ' -f1
+  else
+    shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+# BRAIN_ENV_EXTRA, one KEY=VALUE per line, with every secret's value replaced
+# by "<redacted len=N sha256:XXXXXXXXXXXX>". The length and a 12-hex digest
+# still let two runs be compared ("same key or not") without the value. The
+# value reaches the digest through a pipe from printf, a builtin, so it never
+# appears in a process's argv.
+emit_brain_env() {
+  local line name value
+  while IFS= read -r line; do
+    name=${line%%=*}
+    if [ "$name" != "$line" ] && _is_secret_name "$name"; then
+      value=${line#*=}
+      printf '%s=<redacted len=%d sha256:%s>\n' "$name" "${#value}" \
+        "$(printf '%s' "$value" | _sha256_hex | cut -c1-12)"
+    else
+      printf '%s\n' "$line"
+    fi
+  done <<<"${BRAIN_ENV_EXTRA:-}"
+}
+
 emit_host_images() {
   local manifest="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
   local images=""
@@ -358,6 +400,8 @@ fi
   # second time with --stages once it has generated the tasklist, because at
   # this point in the bootstrap the file does not exist yet.
   emit_stages
-  # One KEY=VALUE per line, exactly as written into brain-go's deploy/.env.
-  printf '%s\n' "${BRAIN_ENV_EXTRA:-}"
+  # One KEY=VALUE per line, as written into brain-go's deploy/.env, except
+  # that a secret's value is replaced by its length and a short digest. See
+  # emit_brain_env above.
+  emit_brain_env
 } >"$OUT"

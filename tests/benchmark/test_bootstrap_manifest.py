@@ -852,3 +852,58 @@ def test_a_generated_local_tfvars_is_not_treated_as_a_scenario(tmp_path, monkeyp
         assert not _is_scenario(generated)
     finally:
         generated.unlink()
+
+
+_FAKE_SECRET = "ts_live_" + "x7Qp2LmN9vR4kD8sW1yB6cH3fJ0gT5aZ" * 3
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["TYPESAFE_API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "service_api_key", "PRIVATE_KEY_PEM"],
+)
+def test_the_manifest_masks_a_secret_brain_env_value(tmp_path, name):
+    """The manifest is uploaded to the results bucket, so a credential passed
+    through brain_env must not be written there. The run of 2026-10-25 wrote
+    TYPESAFE_API_KEY in plain text into 34 manifests."""
+    out = tmp_path / "manifest.txt"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": f"{name}={_FAKE_SECRET}"})
+    text = out.read_text()
+
+    assert _FAKE_SECRET not in text
+    assert re.search(rf"^{name}=<redacted len={len(_FAKE_SECRET)} sha256:[0-9a-f]{{12}}>$", text, re.M), text
+
+
+def test_the_manifest_keeps_non_secret_brain_env_lines_verbatim(tmp_path):
+    env = "CHAT_SERVICE_RCI_RECURSION_LIMIT=200\nFEATURE_RCI_SINGLE_LOOP_ENABLED=true\nRCI_LOOP_JUDGE_STOP=0.6"
+    out = tmp_path / "manifest.txt"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": env})
+    text = out.read_text()
+
+    for line in env.split("\n"):
+        assert re.search(rf"^{re.escape(line)}$", text, re.M), line
+
+
+def test_the_masked_digest_is_stable_and_tells_two_keys_apart(tmp_path):
+    """The digest is what lets two runs be compared without the value: the
+    same key gives the same digest, a different key a different one."""
+
+    def masked(value: str, sub: str) -> str:
+        d = tmp_path / sub
+        d.mkdir()
+        _write_manifest(d, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": f"TYPESAFE_API_KEY={value}"})
+        return re.search(r"^TYPESAFE_API_KEY=(.*)$", (d / "manifest.txt").read_text(), re.M).group(1)
+
+    assert masked(_FAKE_SECRET, "a") == masked(_FAKE_SECRET, "b")
+    assert masked(_FAKE_SECRET, "c") != masked(_FAKE_SECRET + "x", "d")
+
+
+def test_a_name_that_only_contains_a_secret_word_inside_another_word_is_kept(tmp_path):
+    """Matching is on whole underscore-separated words, so MONKEY or
+    PASSTHROUGH_MODE stay readable."""
+    env = "FEATURE_MONKEY_MODE=on\nPASSTHROUGH_MODE=1"
+    out = tmp_path / "manifest.txt"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": env})
+    text = out.read_text()
+
+    assert re.search(r"^FEATURE_MONKEY_MODE=on$", text, re.M)
+    assert re.search(r"^PASSTHROUGH_MODE=1$", text, re.M)
