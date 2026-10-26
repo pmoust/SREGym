@@ -286,7 +286,7 @@ disk_iops = 16000
 #     leads blocks are fenced; tool calls are fenced to the run's
 #     environment.
 #
-# On the harness side (sregym f42ead3a to c3799eeb, 66 commits): every
+# On the harness side (sregym f42ead3a to c3799eeb, 72 commits): every
 # image the suite needs is served from the S3 registry cache instead of
 # pulled per attempt, a stuck pull is labelled a harness failure and the
 # attempt dropped from grading rather than scored as the agent's (#150), the
@@ -333,7 +333,12 @@ brain_go_ref = "2f341c4a73c634872724ceac9b39d1a49f524f6c"
 #
 # c3799eeb is main after sregym#134 to #162. #161 moves the mirror to
 # registry 3, whose S3 client reads the instance role over IMDSv2 (registry 2
-# could not, and the first smoke on the cache died on it). #162 adds the
+# could not, and the first smoke on the cache died on it). A box on this pin
+# loads registry:3.1.2 from host-images/registry3 in the cache bucket and
+# stops at boot when that entry is missing, so the cache has to be seeded
+# for this pin before a launch (seed_cache_on_ec2.sh --sregym-ref <this>).
+# It was seeded on 2026-10-25; the two 107-problem waves of brain-go#4697
+# ran on it. #162 adds the
 # sregym-full and sregym-full-runnable problem sets. #150 mirrors every benchmark
 # image through the S3 registry cache and labels a stuck pull a harness
 # failure; #157 prices Sonnet 4.5 and 5.5 and passes the effort level to
