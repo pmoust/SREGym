@@ -61,7 +61,13 @@ EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
 # and has_endpoints on a Service comes from an Endpoints get that returns
 # nothing when RBAC denies it. networkpolicies needs no rule; the chart's
 # ClusterRole already grants it.
-EDGE_KUBE_RESOURCES="pods nodes k8services configmaps secrets persistentvolumeclaims persistentvolumes deployments replicasets statefulsets daemonsets jobs ingresses namespaces services endpoints networkpolicies"
+#
+# The last four are informers edge v3.6.0 already has but chart 0.5.2's list
+# leaves out. poddisruptionbudgets and resourcequotas need no rule (the chart
+# grants both); horizontalpodautoscalers and storageclasses get theirs in
+# edge_values. An HPA whose ScalingActive condition turns false, or a quota a
+# fault tightens, is a change the graph now records.
+EDGE_KUBE_RESOURCES="pods nodes k8services configmaps secrets persistentvolumeclaims persistentvolumes deployments replicasets statefulsets daemonsets jobs ingresses namespaces services endpoints networkpolicies poddisruptionbudgets horizontalpodautoscalers resourcequotas storageclasses"
 
 # How often the agent's informers resync and how often it publishes the graph,
 # both under the chart's 5m defaults.
@@ -513,6 +519,12 @@ rbac:
   extraRules:
     - apiGroups: [""]
       resources: ["endpoints"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: ["autoscaling"]
+      resources: ["horizontalpodautoscalers"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: ["storage.k8s.io"]
+      resources: ["storageclasses"]
       verbs: ["get", "list", "watch"]
 YAML
 }

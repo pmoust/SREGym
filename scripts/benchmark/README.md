@@ -527,12 +527,15 @@ are produced. Concretely, per slot:
   kind imports all platforms of a manifest list and a pulled image holds only
   one platform's blobs, so neither of kind's load paths can take it.
 - The chart's informer list (`config.kube.resources`) replaces the agent's
-  compiled default and leaves out `endpoints` and `networkpolicies`.
-  `install-edge` passes a values file that repeats the chart's 15 entries and
-  adds those two, and adds a get/list/watch rule on core `endpoints` through
-  `rbac.extraRules`, which the chart's ClusterRole does not grant. Without
-  that rule the agent skips the endpoints informer and `has_endpoints` is
-  never set on a Service. The chart already grants `networkpolicies`.
+  compiled default and leaves out six informers the agent has: `endpoints`,
+  `networkpolicies`, `poddisruptionbudgets`, `horizontalpodautoscalers`,
+  `resourcequotas` and `storageclasses`. `install-edge` passes a values file
+  that repeats the chart's 15 entries and adds those six, and adds
+  get/list/watch rules through `rbac.extraRules` for the three the chart's
+  ClusterRole does not grant: core `endpoints`, `autoscaling`
+  `horizontalpodautoscalers` and `storage.k8s.io` `storageclasses`. The agent
+  skips an informer whose list is refused, and without the endpoints rule
+  `has_endpoints` is never set on a Service.
 - `helm --wait` is not the install's check. Chart 0.5.2 runs one replica with
   `maxUnavailable: 1`, and Helm 3 counts that ready with zero ready pods, so
   a crash-looping agent passes it. `install-edge` then waits for the pod to

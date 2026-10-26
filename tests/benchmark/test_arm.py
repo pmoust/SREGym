@@ -860,22 +860,34 @@ def test_the_edge_image_is_still_overridable(install_edge, tmp_path):
     assert "image.tag=dev" in args
 
 
-def test_the_informer_list_keeps_the_charts_and_adds_endpoints_and_networkpolicies(install_edge, tmp_path):
+def test_the_informer_list_keeps_the_charts_and_adds_six(install_edge, tmp_path):
     """The override replaces the chart's list, so a missing entry is an
-    informer that silently stops running."""
+    informer that silently stops running. The six added are informers edge
+    v3.6.0 has that chart 0.5.2's list leaves out."""
     args, values = _installed(install_edge, tmp_path)
 
-    assert values["config"]["kube"]["resources"] == CHART_052_RESOURCES + ["endpoints", "networkpolicies"]
+    assert values["config"]["kube"]["resources"] == CHART_052_RESOURCES + [
+        "endpoints",
+        "networkpolicies",
+        "poddisruptionbudgets",
+        "horizontalpodautoscalers",
+        "resourcequotas",
+        "storageclasses",
+    ]
     assert not [a for a in args if a.startswith("config.kube.resources")], "--set would override the file"
 
 
-def test_the_edge_service_account_is_granted_endpoints(install_edge, tmp_path):
-    """Without it the agent skips the endpoints informer and its Endpoints
-    get returns nothing, so has_endpoints is never set on a Service."""
+def test_the_edge_service_account_is_granted_what_the_chart_lacks(install_edge, tmp_path):
+    """The agent lists a resource before starting its informer and skips it
+    when the list is refused. Without endpoints, has_endpoints is never set on
+    a Service; without the other two, their informers never start. The chart
+    already grants poddisruptionbudgets and resourcequotas."""
     _, values = _installed(install_edge, tmp_path)
 
     assert values["rbac"]["extraRules"] == [
-        {"apiGroups": [""], "resources": ["endpoints"], "verbs": ["get", "list", "watch"]}
+        {"apiGroups": [""], "resources": ["endpoints"], "verbs": ["get", "list", "watch"]},
+        {"apiGroups": ["autoscaling"], "resources": ["horizontalpodautoscalers"], "verbs": ["get", "list", "watch"]},
+        {"apiGroups": ["storage.k8s.io"], "resources": ["storageclasses"], "verbs": ["get", "list", "watch"]},
     ]
 
 
