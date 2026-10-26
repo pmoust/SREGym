@@ -870,7 +870,8 @@ def test_the_manifest_masks_a_secret_brain_env_value(tmp_path, name):
     text = out.read_text()
 
     assert _FAKE_SECRET not in text
-    assert re.search(rf"^{name}=<redacted len={len(_FAKE_SECRET)} sha256:[0-9a-f]{{12}}>$", text, re.M), text
+    assert re.search(rf"^{name}=<redacted sha256:[0-9a-f]{{12}}>$", text, re.M), text
+    assert f"len={len(_FAKE_SECRET)}" not in text
 
 
 def test_the_manifest_keeps_non_secret_brain_env_lines_verbatim(tmp_path):
@@ -893,8 +894,11 @@ def test_the_masked_digest_is_stable_and_tells_two_keys_apart(tmp_path):
         _write_manifest(d, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": f"TYPESAFE_API_KEY={value}"})
         return re.search(r"^TYPESAFE_API_KEY=(.*)$", (d / "manifest.txt").read_text(), re.M).group(1)
 
+    other = _FAKE_SECRET[:-1] + ("A" if _FAKE_SECRET[-1] != "A" else "B")
+    assert len(other) == len(_FAKE_SECRET)
     assert masked(_FAKE_SECRET, "a") == masked(_FAKE_SECRET, "b")
-    assert masked(_FAKE_SECRET, "c") != masked(_FAKE_SECRET + "x", "d")
+    assert masked(_FAKE_SECRET, "c") != masked(other, "d")
+    assert re.fullmatch(r"<redacted sha256:[0-9a-f]{12}>", masked(other, "e"))
 
 
 def test_a_name_that_only_contains_a_secret_word_inside_another_word_is_kept(tmp_path):
@@ -907,3 +911,31 @@ def test_a_name_that_only_contains_a_secret_word_inside_another_word_is_kept(tmp
 
     assert re.search(r"^FEATURE_MONKEY_MODE=on$", text, re.M)
     assert re.search(r"^PASSTHROUGH_MODE=1$", text, re.M)
+
+
+def test_a_short_secret_gets_no_digest(tmp_path):
+    """A short value may be a human-chosen password, where an unsalted digest
+    would let anyone confirm a guess offline."""
+    out = tmp_path / "manifest.txt"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": "DB_PASSWORD=hunter2"})
+    text = out.read_text()
+
+    assert "hunter2" not in text
+    assert re.search(r"^DB_PASSWORD=<redacted>$", text, re.M), text
+
+
+def test_a_url_with_credentials_is_masked_whatever_its_name(tmp_path):
+    out = tmp_path / "manifest.txt"
+    value = "postgres://bench:s3cretpassw0rd@db.internal:5432/brain"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": f"DATABASE_URL={value}"})
+    text = out.read_text()
+
+    assert "s3cretpassw0rd" not in text
+    assert re.search(r"^DATABASE_URL=<redacted sha256:[0-9a-f]{12}>$", text, re.M), text
+
+
+def test_a_url_without_credentials_is_kept(tmp_path):
+    out = tmp_path / "manifest.txt"
+    _write_manifest(tmp_path, "sregym-lite", extra_env={"BRAIN_ENV_EXTRA": "BRAIN_API_URL=http://127.0.0.1:8001"})
+
+    assert re.search(r"^BRAIN_API_URL=http://127\.0\.0\.1:8001$", out.read_text(), re.M)

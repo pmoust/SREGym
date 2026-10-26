@@ -12,10 +12,12 @@
 # of the three to lose, being the largest driver of the run-to-run variance
 # that run existed to measure.
 #
-# Values, not just keys, because this is a different surface from the log: the
-# bucket is private and encrypted, and brain_env's own documentation already
-# tells operators not to put secrets in it, since the values reach terraform
-# state, plan output and user_data regardless.
+# Values, not just keys, for every brain_env entry that is not a credential.
+# A credential's value is masked (see emit_brain_env): the bucket being
+# private is not what makes this safe, since everyone who can read run
+# results can read it. brain_env's own documentation tells operators not to
+# put secrets in it, because the values reach terraform state, plan output
+# and user_data regardless; the masking is a second line, not a licence.
 #
 # Usage: write_run_manifest.sh <output-path>
 #        write_run_manifest.sh --stages <output-path>
@@ -97,11 +99,29 @@ fi
 # points in the TSV's life: setup_brain_go.sh has written brain-go's own
 # rows by the first call, and run_shard.sh has appended registry:3 and the
 # kind node image by the second.
+emit_host_images() {
+  local manifest="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
+  local images=""
+  if [ -f "$manifest" ]; then
+    images=$(awk -F'\t' '{printf "%s%s:%s@%s", (NR>1?",":""), $1, $2, $3}' "$manifest")
+  fi
+  echo "brain_go_host_images=$images"
+}
+
 # A brain_env name whose underscore-separated words include one of these
-# holds a credential (TYPESAFE_API_KEY, GITHUB_TOKEN, DB_PASSWORD). The
-# manifest is uploaded to the results bucket next to every run's results, so
-# its value must never be written here.
-SECRET_NAME_WORDS=" KEY APIKEY TOKEN SECRET PASSWORD PASSWD PASS CREDENTIAL CREDENTIALS PRIVATE "
+# holds a credential (TYPESAFE_API_KEY, GITHUB_TOKEN, DB_PASSWORD, PG_DSN).
+# The manifest is uploaded to the results bucket next to every run's
+# results, so its value must not be written here. A value that carries
+# credentials in a URL (scheme://user:password@host) is masked whatever its
+# name. This is a deny list, not a guarantee: a credential under a name with
+# none of these words and no URL userinfo is still written as is, and a
+# non-secret knob whose name has one of them (LANGFUSE_PUBLIC_KEY) is masked.
+SECRET_NAME_WORDS=" KEY APIKEY TOKEN SECRET PASSWORD PASSWD PASS PAT DSN CREDENTIAL CREDENTIALS PRIVATE "
+
+# A value at least this long is assumed to be a generated key, so its digest
+# is safe to publish. A shorter one may be a human-chosen password, where an
+# unsalted digest would let anyone confirm a guess, so it gets no digest.
+SECRET_DIGEST_MIN_LEN=20
 
 _is_secret_name() {
   local word upper
@@ -109,6 +129,13 @@ _is_secret_name() {
   for word in ${upper//_/ }; do
     case "$SECRET_NAME_WORDS" in *" $word "*) return 0 ;; esac
   done
+  return 1
+}
+
+# True for a value with credentials in a URL's userinfo:
+# scheme://user:password@host.
+_has_url_userinfo() {
+  case "$1" in *://*:*@*) return 0 ;; esac
   return 1
 }
 
@@ -121,31 +148,27 @@ _sha256_hex() {
 }
 
 # BRAIN_ENV_EXTRA, one KEY=VALUE per line, with every secret's value replaced
-# by "<redacted len=N sha256:XXXXXXXXXXXX>". The length and a 12-hex digest
-# still let two runs be compared ("same key or not") without the value. The
-# value reaches the digest through a pipe from printf, a builtin, so it never
-# appears in a process's argv.
+# by "<redacted sha256:XXXXXXXXXXXX>", or by "<redacted>" when the value is
+# shorter than SECRET_DIGEST_MIN_LEN. The 12-hex digest lets two runs be
+# compared ("same key or not") without the value; the length is not
+# published. The value reaches the digest through a pipe from printf, a
+# builtin, so it never appears in a process's argv.
 emit_brain_env() {
   local line name value
   while IFS= read -r line; do
     name=${line%%=*}
-    if [ "$name" != "$line" ] && _is_secret_name "$name"; then
-      value=${line#*=}
-      printf '%s=<redacted len=%d sha256:%s>\n' "$name" "${#value}" \
-        "$(printf '%s' "$value" | _sha256_hex | cut -c1-12)"
+    value=${line#*=}
+    if [ "$name" != "$line" ] && { _is_secret_name "$name" || _has_url_userinfo "$value"; }; then
+      if [ "${#value}" -ge "$SECRET_DIGEST_MIN_LEN" ]; then
+        printf '%s=<redacted sha256:%s>\n' "$name" \
+          "$(printf '%s' "$value" | _sha256_hex | cut -c1-12)"
+      else
+        printf '%s=<redacted>\n' "$name"
+      fi
     else
       printf '%s\n' "$line"
     fi
   done <<<"${BRAIN_ENV_EXTRA:-}"
-}
-
-emit_host_images() {
-  local manifest="${SREGYM_HOST_IMAGE_MANIFEST:-/tmp/sregym-brain-go-host-images.tsv}"
-  local images=""
-  if [ -f "$manifest" ]; then
-    images=$(awk -F'\t' '{printf "%s%s:%s@%s", (NR>1?",":""), $1, $2, $3}' "$manifest")
-  fi
-  echo "brain_go_host_images=$images"
 }
 
 if [ "$HOST_IMAGES_ONLY" = "1" ]; then
