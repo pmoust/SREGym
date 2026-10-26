@@ -518,37 +518,81 @@ def test_a_loopback_telemetry_url_is_refused(tmp_path):
 NATIVE_ARM = ROOT / "scripts" / "benchmark" / "native_arm.sh"
 
 # Every resource brain-go's Kubernetes client reaches, by API group. Derived
-# from `git grep 'clientset\.' -- internal/clients/kubernetes` on brain-go
-# e49e7711, which is the client's whole surface: the tool adapter calls only
-# that package's seven methods and the connection probe calls its
-# IsConnectionValid.
+# from `git grep 'clientset\.\|dynamicClient\.' -- internal/clients/kubernetes`
+# on brain-go describe-more-kinds e744e086, which is the client's whole
+# surface: the tool adapter calls only that package's methods and the
+# connection probe calls its IsConnectionValid.
 #
 # Copied here rather than imported because the ClusterRole is YAML inside a
 # shell heredoc. That makes this a second copy, which is the point: the two
 # have to be edited together, and the test fails when only one is.
 EXPECTED_GRANT = {
-    "": ["configmaps", "events", "namespaces", "nodes", "persistentvolumeclaims", "pods", "services"],
+    "": ["configmaps", "events", "namespaces", "nodes", "persistentvolumeclaims", "pods", "serviceaccounts", "services"],
     "apps": ["controllerrevisions", "daemonsets", "deployments", "replicasets", "statefulsets"],
-    "batch": ["jobs"],
+    "batch": ["cronjobs", "jobs"],
+    "autoscaling": ["horizontalpodautoscalers"],
+    "scheduling.k8s.io": ["priorityclasses"],
+    "rbac.authorization.k8s.io": ["clusterrolebindings", "clusterroles", "rolebindings", "roles"],
+    "crd.projectcalico.org": ["bgppeers", "ipamconfigs", "ippools"],
 }
+
+# The kinds k8s_describe added in describe-more-kinds are reached only by a
+# Get, so their rules grant get alone.
+GET_ONLY = {
+    ("batch", "cronjobs"),
+    ("", "serviceaccounts"),
+    ("autoscaling", "horizontalpodautoscalers"),
+    ("scheduling.k8s.io", "priorityclasses"),
+    ("rbac.authorization.k8s.io", "roles"),
+    ("rbac.authorization.k8s.io", "clusterroles"),
+    ("rbac.authorization.k8s.io", "rolebindings"),
+    ("rbac.authorization.k8s.io", "clusterrolebindings"),
+    ("crd.projectcalico.org", "ippools"),
+    ("crd.projectcalico.org", "bgppeers"),
+    ("crd.projectcalico.org", "ipamconfigs"),
+}
+
+
+def _cluster_role_verbs() -> dict[tuple[str, str], list[str]]:
+    """The ClusterRole native_arm.sh applies, as {(apiGroup, resource): verbs}.
+    A group can appear in more than one rule; each resource keeps its own
+    rule's verbs."""
+    src = NATIVE_ARM.read_text()
+    rules = re.findall(
+        r"- apiGroups: \[([^\]]*)\]\n  resources: \[([^\]]*)\]\n  verbs: \[([^\]]*)\]", src
+    )
+    assert rules, "no ClusterRole rules found in native_arm.sh"
+
+    out: dict[tuple[str, str], list[str]] = {}
+    for group, resources, verbs in rules:
+        g = group.strip().strip('"')
+        for r in resources.split(","):
+            key = (g, r.strip().strip('"'))
+            assert key not in out, f"{key} granted twice"
+            out[key] = sorted(v.strip().strip('"') for v in verbs.split(","))
+    return out
 
 
 def _cluster_role_rules() -> dict[str, list[str]]:
     """The ClusterRole native_arm.sh applies, as {apiGroup: [resources]}."""
-    src = NATIVE_ARM.read_text()
-    rules = re.findall(r"- apiGroups: \[([^\]]*)\]\n  resources: \[([^\]]*)\]", src)
-    assert rules, "no ClusterRole rules found in native_arm.sh"
-
-    return {
-        group.strip().strip('"'): sorted(r.strip().strip('"') for r in resources.split(","))
-        for group, resources in rules
-    }
+    grouped: dict[str, list[str]] = {}
+    for group, resource in _cluster_role_verbs():
+        grouped.setdefault(group, []).append(resource)
+    return {g: sorted(rs) for g, rs in grouped.items()}
 
 
 def test_the_read_only_grant_is_exactly_what_brain_go_reaches():
     """Over-granting weakens the least-privilege claim; under-granting breaks a
     tool. Both are silent on this machine and expensive on a cloud run."""
     assert _cluster_role_rules() == EXPECTED_GRANT
+
+
+def test_the_describe_only_kinds_grant_get_alone():
+    """Nothing lists or watches these kinds; a broader verb is a grant nothing
+    exercises."""
+    verbs = _cluster_role_verbs()
+    for key in GET_ONLY:
+        assert verbs.get(key) == ["get"], key
 
 
 def test_the_grant_covers_batch_jobs():

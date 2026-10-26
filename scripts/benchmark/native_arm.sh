@@ -223,14 +223,15 @@ cmd_kubeconfig() {
     || die "could not create namespace $ns"
 
   # The rules below are derived from brain-go, not guessed. They are every
-  # resource reached by a clientset call in internal/clients/kubernetes at
-  # brain-go e49e7711, which is the whole API surface this connection has:
+  # resource reached by a clientset or dynamic-client call in
+  # internal/clients/kubernetes at brain-go describe-more-kinds e744e086, which
+  # is the whole API surface this connection has:
   # the tool adapter (internal/app/kubernetes_tool_resolver.go) calls only
   # that package's seven methods, and the connection probe calls its
   # IsConnectionValid.
   #
   # To re-derive after a brain-go change:
-  #   git grep -n 'clientset\.' -- internal/clients/kubernetes
+  #   git grep -n 'clientset\.\|dynamicClient\.' -- internal/clients/kubernetes
   #
   # What that returns today, by file:
   #   client.go     CoreV1 Namespaces List          (the connection probe)
@@ -243,7 +244,17 @@ cmd_kubeconfig() {
   #                 AppsV1 ReplicaSets/ControllerRevisions List
   #   describe.go   AppsV1 Deployments/StatefulSets/DaemonSets/ReplicaSets Get,
   #                 BatchV1 Jobs Get, CoreV1 Pods/Nodes/Namespaces/Services/
-  #                 ConfigMaps/PersistentVolumeClaims Get
+  #                 ConfigMaps/PersistentVolumeClaims Get,
+  #                 AutoscalingV2 HorizontalPodAutoscalers Get,
+  #                 SchedulingV1 PriorityClasses Get, BatchV1 CronJobs Get,
+  #                 RbacV1 Roles/ClusterRoles/RoleBindings/
+  #                 ClusterRoleBindings Get, CoreV1 ServiceAccounts Get
+  #   calico.go     dynamic crd.projectcalico.org/v1 ippools/bgppeers/
+  #                 ipamconfigs Get
+  #
+  # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
+  # their rules grant get and nothing else. A ServiceAccount describe shows a
+  # secret count, never a secret name, and the role still grants no secrets.
   #
   # batch/jobs is not optional and a missing grant is not a partial outage.
   # ListWorkloads lists jobs last and returns (nil, err) on failure, so a 403
@@ -252,12 +263,9 @@ cmd_kubeconfig() {
   # exercise, would fail on every call in every namespace whether or not any
   # Job exists.
   #
-  # Two things deliberately absent. events.k8s.io, because CoreV1().Events()
-  # is served by the core group and nothing here touches the newer API. And
-  # batch/cronjobs, because no call reaches one: describeKindAllowed is a
-  # fixed eleven-kind list with no cronjob entry, and ListWorkloads lists four
-  # kinds, none of them CronJob. Granting it would be a rule nothing exercises
-  # in a role whose point is that it grants nothing extra.
+  # Deliberately absent: events.k8s.io, because CoreV1().Events() is served
+  # by the core group and nothing here touches the newer API; and list on
+  # cronjobs, because ListWorkloads lists four kinds, none of them CronJob.
   #
   # No chaos-mesh, which is the correctness rule rather than the least
   # privilege one: an agent that can read a PodChaos reads the injected fault
@@ -292,6 +300,24 @@ rules:
 - apiGroups: ["batch"]
   resources: ["jobs"]
   verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["cronjobs"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get"]
+- apiGroups: ["scheduling.k8s.io"]
+  resources: ["priorityclasses"]
+  verbs: ["get"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+  verbs: ["get"]
+- apiGroups: ["crd.projectcalico.org"]
+  resources: ["ippools", "bgppeers", "ipamconfigs"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
