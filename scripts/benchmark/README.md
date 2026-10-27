@@ -490,7 +490,7 @@ are produced. Concretely, per slot:
   address instead of loopback, because brain-go dials it from inside a
   container. kind puts that address in the API server certificate's SANs.
 - A read-only ServiceAccount is created with get/list on exactly the objects
-  brain-go's Kubernetes client lists (core configmaps, events, namespaces,
+  brain-go's Kubernetes client reaches by a list or a get (core configmaps, events, namespaces,
   nodes, persistentvolumeclaims, pods, services; apps controllerrevisions,
   daemonsets, deployments, replicasets, statefulsets; batch jobs), get alone
   on the kinds `k8s_describe` only reads by name (batch cronjobs, core
