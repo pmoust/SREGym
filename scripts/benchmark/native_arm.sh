@@ -224,8 +224,12 @@ cmd_kubeconfig() {
 
   # The rules below are derived from brain-go, not guessed. They are every
   # resource reached by a clientset or dynamic-client call in
-  # internal/clients/kubernetes at brain-go describe-more-kinds e744e086, which
-  # is the whole API surface this connection has:
+  # internal/clients/kubernetes at brain-go describe-more-kinds e744e086, plus
+  # the two Gets in policy.go from brain-go fix/k8s-tool-diagnosis-fields
+  # (NOFireAI/brain-go#4834), which is the whole API surface this connection
+  # has. Until #4834 merges, a re-derivation on brain-go main does not return
+  # networkpolicies or resourcequotas; keep both rules. The two grants are
+  # unused, not wrong, against a brain-go without that change:
   # the tool adapter (internal/app/kubernetes_tool_resolver.go) calls only
   # that package's methods, and the connection probe calls its
   # IsConnectionValid.
