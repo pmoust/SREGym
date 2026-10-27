@@ -224,7 +224,7 @@ cmd_kubeconfig() {
 
   # The rules below are derived from brain-go, not guessed. They are every
   # resource reached by a clientset or dynamic-client call in
-  # internal/clients/kubernetes at brain-go describe-more-kinds e744e086, plus
+  # internal/clients/kubernetes at brain-go main 428144dde (#4784 merged), plus
   # the two Gets in policy.go from brain-go fix/k8s-tool-diagnosis-fields
   # (NOFireAI/brain-go#4834), which is the whole API surface this connection
   # has: the tool adapter (internal/app/kubernetes_tool_resolver.go) calls

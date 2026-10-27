@@ -519,7 +519,7 @@ NATIVE_ARM = ROOT / "scripts" / "benchmark" / "native_arm.sh"
 
 # Every resource brain-go's Kubernetes client reaches, by API group. Derived
 # from `git grep 'clientset\.\|dynamicClient\.' -- internal/clients/kubernetes`
-# on brain-go describe-more-kinds e744e086, plus networkpolicies and
+# on brain-go main 428144dde (#4784 merged), plus networkpolicies and
 # resourcequotas from brain-go#4834 (fix/k8s-tool-diagnosis-fields), which is
 # the client's whole surface: the tool adapter calls only that package's
 # methods and the connection probe calls its IsConnectionValid. native_arm.sh's
