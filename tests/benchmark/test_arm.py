@@ -519,9 +519,11 @@ NATIVE_ARM = ROOT / "scripts" / "benchmark" / "native_arm.sh"
 
 # Every resource brain-go's Kubernetes client reaches, by API group. Derived
 # from `git grep 'clientset\.\|dynamicClient\.' -- internal/clients/kubernetes`
-# on brain-go describe-more-kinds e744e086, which is the client's whole
-# surface: the tool adapter calls only that package's methods and the
-# connection probe calls its IsConnectionValid.
+# on brain-go describe-more-kinds e744e086, plus networkpolicies and
+# resourcequotas from brain-go#4834 (fix/k8s-tool-diagnosis-fields), which is
+# the client's whole surface: the tool adapter calls only that package's
+# methods and the connection probe calls its IsConnectionValid. native_arm.sh's
+# header is the authority; re-pin both copies once #4834 merges.
 #
 # Copied here rather than imported because the ClusterRole is YAML inside a
 # shell heredoc. That makes this a second copy, which is the point: the two
