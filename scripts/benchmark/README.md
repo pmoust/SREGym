@@ -500,7 +500,10 @@ are produced. Concretely, per slot:
   ipamconfigs), and nothing on chaos-mesh's CRDs, and its token goes into the connection as a
   kubeconfig. The grant is derived from `git grep 'clientset\.' --
   internal/clients/kubernetes` in brain-go, not hand-picked; `native_arm.sh`
-  carries the derivation and how to redo it. `batch/jobs` is the one whose
+  carries the derivation and how to redo it, and is the authority for it.
+  networkpolicies and resourcequotas come from brain-go#4834; until that
+  merges, the grep on brain-go main does not return them, and both rules
+  stay. `batch/jobs` is the one whose
   absence is not survivable: `ListWorkloads` returns an error for the whole
   call if listing Jobs is refused, so `k8s_list_workloads` would fail every
   time.
