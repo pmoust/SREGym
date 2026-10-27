@@ -490,10 +490,14 @@ are produced. Concretely, per slot:
   address instead of loopback, because brain-go dials it from inside a
   container. kind puts that address in the API server certificate's SANs.
 - A read-only ServiceAccount is created with get/list on exactly the objects
-  brain-go's Kubernetes client reaches (core configmaps, events, namespaces,
+  brain-go's Kubernetes client lists (core configmaps, events, namespaces,
   nodes, persistentvolumeclaims, pods, services; apps controllerrevisions,
-  daemonsets, deployments, replicasets, statefulsets; batch jobs) and nothing
-  on chaos-mesh's CRDs, and its token goes into the connection as a
+  daemonsets, deployments, replicasets, statefulsets; batch jobs), get alone
+  on the kinds `k8s_describe` only reads by name (batch cronjobs, core
+  serviceaccounts and resourcequotas, autoscaling horizontalpodautoscalers,
+  scheduling.k8s.io priorityclasses, the four rbac.authorization.k8s.io
+  kinds, networking.k8s.io networkpolicies, and Calico's ippools, bgppeers and
+  ipamconfigs), and nothing on chaos-mesh's CRDs, and its token goes into the connection as a
   kubeconfig. The grant is derived from `git grep 'clientset\.' --
   internal/clients/kubernetes` in brain-go, not hand-picked; `native_arm.sh`
   carries the derivation and how to redo it. `batch/jobs` is the one whose

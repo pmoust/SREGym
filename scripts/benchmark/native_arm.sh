@@ -255,16 +255,18 @@ cmd_kubeconfig() {
   #                 CoreV1 ResourceQuotas Get
   #
   # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
-  # their rules grant get and nothing else. NetworkPolicy and ResourceQuota
-  # (brain-go fix/k8s-tool-diagnosis-fields) are the same: the Service
-  # selector, NetworkPolicy spec and quota limits are the fields Sonnet 5.5
-  # reported it could not read on the selector, network-policy and
-  # namespace-memory-limit problems. Two of them, priorityclasses and
-  # serviceaccounts, have no counterpart in the MCP arm's kubectl ClusterRole
-  # (mcp_server/k8s/clusterrole.yaml), so on a problem that needs one of those
-  # objects the native arm can read it and the MCP arm cannot. The MCP arm is
-  # left as it is: it is the anchor archived runs were measured against. A ServiceAccount describe shows a
-  # secret count, never a secret name, and the role still grants no secrets.
+  # their rules grant get and nothing else. Two of those added kinds,
+  # priorityclasses and serviceaccounts, have no counterpart in the MCP arm's
+  # kubectl ClusterRole (mcp_server/k8s/clusterrole.yaml), so on a problem
+  # that needs one of those objects the native arm can read it and the MCP arm
+  # cannot. The MCP arm is left as it is: it is the anchor archived runs were
+  # measured against. A ServiceAccount describe shows a secret count, never a
+  # secret name, and the role still grants no secrets.
+  #
+  # NetworkPolicy and ResourceQuota (brain-go fix/k8s-tool-diagnosis-fields)
+  # are also reached only by a Get. Their spec and limits are what Sonnet 5.5
+  # reported it could not read on the network-policy and
+  # namespace-memory-limit problems. The MCP arm already grants both.
   #
   # batch/jobs is not optional and a missing grant is not a partial outage.
   # ListWorkloads lists jobs last and returns (nil, err) on failure, so a 403

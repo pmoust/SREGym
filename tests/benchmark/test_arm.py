@@ -547,7 +547,8 @@ EXPECTED_GRANT = {
     "networking.k8s.io": ["networkpolicies"],
 }
 
-# The kinds k8s_describe added in describe-more-kinds are reached only by a
+# The kinds k8s_describe added in describe-more-kinds, and NetworkPolicy and
+# ResourceQuota added in fix/k8s-tool-diagnosis-fields, are reached only by a
 # Get, so their rules grant get alone.
 GET_ONLY = {
     ("batch", "cronjobs"),
