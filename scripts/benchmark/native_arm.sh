@@ -251,9 +251,15 @@ cmd_kubeconfig() {
   #                 ClusterRoleBindings Get, CoreV1 ServiceAccounts Get
   #   calico.go     dynamic crd.projectcalico.org/v1 ippools/bgppeers/
   #                 ipamconfigs Get
+  #   policy.go     NetworkingV1 NetworkPolicies Get,
+  #                 CoreV1 ResourceQuotas Get
   #
   # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
-  # their rules grant get and nothing else. Two of them, priorityclasses and
+  # their rules grant get and nothing else. NetworkPolicy and ResourceQuota
+  # (brain-go fix/k8s-tool-diagnosis-fields) are the same: the Service
+  # selector, NetworkPolicy spec and quota limits are the fields Sonnet 5.5
+  # reported it could not read on the selector, network-policy and
+  # namespace-memory-limit problems. Two of them, priorityclasses and
   # serviceaccounts, have no counterpart in the MCP arm's kubectl ClusterRole
   # (mcp_server/k8s/clusterrole.yaml), so on a problem that needs one of those
   # objects the native arm can read it and the MCP arm cannot. The MCP arm is
@@ -321,6 +327,12 @@ rules:
   verbs: ["get"]
 - apiGroups: ["crd.projectcalico.org"]
   resources: ["ippools", "bgppeers", "ipamconfigs"]
+  verbs: ["get"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["resourcequotas"]
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

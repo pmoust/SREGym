@@ -527,13 +527,24 @@ NATIVE_ARM = ROOT / "scripts" / "benchmark" / "native_arm.sh"
 # shell heredoc. That makes this a second copy, which is the point: the two
 # have to be edited together, and the test fails when only one is.
 EXPECTED_GRANT = {
-    "": ["configmaps", "events", "namespaces", "nodes", "persistentvolumeclaims", "pods", "serviceaccounts", "services"],
+    "": [
+        "configmaps",
+        "events",
+        "namespaces",
+        "nodes",
+        "persistentvolumeclaims",
+        "pods",
+        "resourcequotas",
+        "serviceaccounts",
+        "services",
+    ],
     "apps": ["controllerrevisions", "daemonsets", "deployments", "replicasets", "statefulsets"],
     "batch": ["cronjobs", "jobs"],
     "autoscaling": ["horizontalpodautoscalers"],
     "scheduling.k8s.io": ["priorityclasses"],
     "rbac.authorization.k8s.io": ["clusterrolebindings", "clusterroles", "rolebindings", "roles"],
     "crd.projectcalico.org": ["bgppeers", "ipamconfigs", "ippools"],
+    "networking.k8s.io": ["networkpolicies"],
 }
 
 # The kinds k8s_describe added in describe-more-kinds are reached only by a
@@ -550,6 +561,8 @@ GET_ONLY = {
     ("crd.projectcalico.org", "ippools"),
     ("crd.projectcalico.org", "bgppeers"),
     ("crd.projectcalico.org", "ipamconfigs"),
+    ("networking.k8s.io", "networkpolicies"),
+    ("", "resourcequotas"),
 }
 
 
