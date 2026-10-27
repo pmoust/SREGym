@@ -498,8 +498,9 @@ are produced. Concretely, per slot:
   scheduling.k8s.io priorityclasses, the four rbac.authorization.k8s.io
   kinds, networking.k8s.io networkpolicies, and Calico's ippools, bgppeers and
   ipamconfigs), and nothing on chaos-mesh's CRDs, and its token goes into the connection as a
-  kubeconfig. The grant is derived from `git grep 'clientset\.' --
-  internal/clients/kubernetes` in brain-go, not hand-picked; `native_arm.sh`
+  kubeconfig. The grant is derived from `git grep -n
+  'clientset\.\|dynamicClient\.' -- internal/clients/kubernetes` in brain-go
+  (the dynamic-client calls are the Calico kinds), not hand-picked; `native_arm.sh`
   carries the derivation and how to redo it, and is the authority for it.
   networkpolicies and resourcequotas come from brain-go#4834; until that
   merges, the grep on brain-go main does not return them, and both rules
