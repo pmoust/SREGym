@@ -200,7 +200,7 @@ docker.io/openebs/provisioner-localpv:3.4.0
 # this image, so without it in the cache no PVC using that StorageClass
 # (Loki's, Prometheus's) ever binds.
 docker.io/openebs/linux-utils:3.5.0
-docker.io/nofireai/edge:v3.6.0
+docker.io/nofireai/edge:v3.7.0
 
 # --- ghcr.io -------------------------------------------------------------
 ghcr.io/open-telemetry/demo:2.2.0-accounting

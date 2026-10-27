@@ -203,7 +203,7 @@ def check(env: dict[str, str] | None = None) -> dict[str, object]:
 #
 # Reaching the cap does not fail the attempt. Some faults change no object the
 # agent watches (chaos-mesh CPU or network stress touches no Kubernetes
-# object, and chart 0.5.2's default resource list has no networkpolicies), and
+# object, and chart 0.7.0's default resource list has no networkpolicies), and
 # a publish that changed nothing is invisible, so an empty read at the cap
 # does not show the agent is broken. install-edge already proved the agent
 # publishes, and the pre-fault gate proved the graph is populated. Failing

@@ -682,7 +682,7 @@ def install_edge(tmp_path):
         (bindir / name).write_text(body)
         (bindir / name).chmod(0o755)
 
-    chart = tmp_path / "nofire-edge-0.5.2.tgz"
+    chart = tmp_path / "nofire-edge-0.7.0.tgz"
     chart.write_bytes(b"chart")
     kubectl_log = tmp_path / "kubectl.log"
 
@@ -799,13 +799,14 @@ def test_install_edge_aborts_when_the_pod_never_becomes_ready(install_edge):
 
 # --- what install-edge hands the chart ---------------------------------------
 
-# Chart 0.5.2's config.kube.resources, in its order (values.yaml at tag
-# nofire-edge-0.5.2, commit ad148fce). A values override replaces the chart's
-# list, so native_arm.sh has to repeat every one of these.
-CHART_052_RESOURCES = [
+# Chart 0.7.0's config.kube.resources, in its order (values.yaml at tag
+# nofire-edge-0.7.0). A values override replaces the chart's list, so
+# native_arm.sh has to repeat every one of these.
+CHART_070_RESOURCES = [
     "pods",
     "nodes",
     "k8services",
+    "endpoints",
     "configmaps",
     "secrets",
     "persistentvolumeclaims",
@@ -841,7 +842,7 @@ def test_the_edge_image_is_pinned_to_a_release_tag(install_edge, tmp_path):
     args, _ = _installed(install_edge, tmp_path)
 
     assert "image.repository=nofireai/edge" in args
-    assert "image.tag=v3.6.0" in args
+    assert "image.tag=v3.7.0" in args
 
     versions = subprocess.run(
         ["bash", str(NATIVE_ARM), "edge-versions"],
@@ -850,7 +851,7 @@ def test_the_edge_image_is_pinned_to_a_release_tag(install_edge, tmp_path):
         cwd=ROOT,
         env={k: v for k, v in os.environ.items() if k != "SREGYM_EDGE_IMAGE"},
     )
-    assert versions.stdout.split("\t")[0] == "nofireai/edge:v3.6.0"
+    assert versions.stdout.split("\t")[0] == "nofireai/edge:v3.7.0"
 
 
 def test_the_edge_image_is_still_overridable(install_edge, tmp_path):
@@ -860,35 +861,63 @@ def test_the_edge_image_is_still_overridable(install_edge, tmp_path):
     assert "image.tag=dev" in args
 
 
-def test_the_informer_list_keeps_the_charts_and_adds_six(install_edge, tmp_path):
+# Informers edge v3.7.0 has that chart 0.7.0's list leaves out.
+EXTRA_AGENT_RESOURCES = [
+    "networkpolicies",
+    "poddisruptionbudgets",
+    "horizontalpodautoscalers",
+    "resourcequotas",
+    "storageclasses",
+]
+
+# The chart's own opt-in kinds, commented out of its list. Its ClusterRole
+# grants all of them.
+CHART_OPT_IN_RESOURCES = [
+    "cronjobs",
+    "priorityclasses",
+    "roles",
+    "clusterroles",
+    "rolebindings",
+    "clusterrolebindings",
+    "calicoippools",
+    "calicobgppeers",
+    "calicoipamconfigs",
+]
+
+
+def test_the_informer_list_keeps_the_charts_and_adds_fourteen(install_edge, tmp_path):
     """The override replaces the chart's list, so a missing entry is an
-    informer that silently stops running. The six added are informers edge
-    v3.6.0 has that chart 0.5.2's list leaves out."""
+    informer that silently stops running. Five added are agent informers the
+    chart's list leaves out; nine are the chart's opt-in kinds."""
     args, values = _installed(install_edge, tmp_path)
 
-    assert values["config"]["kube"]["resources"] == CHART_052_RESOURCES + [
-        "endpoints",
-        "networkpolicies",
-        "poddisruptionbudgets",
-        "horizontalpodautoscalers",
-        "resourcequotas",
-        "storageclasses",
-    ]
+    assert values["config"]["kube"]["resources"] == (
+        CHART_070_RESOURCES + EXTRA_AGENT_RESOURCES + CHART_OPT_IN_RESOURCES
+    )
+    assert len(values["config"]["kube"]["resources"]) == 30
     assert not [a for a in args if a.startswith("config.kube.resources")], "--set would override the file"
 
 
 def test_the_edge_service_account_is_granted_what_the_chart_lacks(install_edge, tmp_path):
     """The agent lists a resource before starting its informer and skips it
-    when the list is refused. Without endpoints, has_endpoints is never set on
-    a Service; without the other two, their informers never start. The chart
-    already grants poddisruptionbudgets and resourcequotas."""
+    when the list is refused, so without these two rules the HPA and
+    storageclass informers never start. Chart 0.7.0 grants endpoints, the
+    other agent informers and all nine opt-in kinds itself."""
     _, values = _installed(install_edge, tmp_path)
 
     assert values["rbac"]["extraRules"] == [
-        {"apiGroups": [""], "resources": ["endpoints"], "verbs": ["get", "list", "watch"]},
         {"apiGroups": ["autoscaling"], "resources": ["horizontalpodautoscalers"], "verbs": ["get", "list", "watch"]},
         {"apiGroups": ["storage.k8s.io"], "resources": ["storageclasses"], "verbs": ["get", "list", "watch"]},
     ]
+
+
+def test_configmap_and_env_capture_stay_hashed(install_edge, tmp_path):
+    """The agent under test reads this graph through brain-go, so captured
+    ConfigMap and env values must not be stored in cleartext."""
+    args, _ = _installed(install_edge, tmp_path)
+
+    assert "config.configMapCapture.clearText=false" in args
+    assert "config.envCapture.clearText=false" in args
 
 
 def test_install_edge_removes_its_values_file(install_edge, tmp_path):

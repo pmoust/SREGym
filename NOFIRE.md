@@ -681,7 +681,7 @@ Context: [NOFireAI/engineering#800](https://github.com/NOFireAI/engineering/issu
     covers their `image:` keys and (for the OpenEBS manifest's
     `OPENEBS_IO_HELPER_IMAGE`/`CLEANUP_JOB_IMAGE` env vars) its new env
     `value:` pattern the same as any other raw manifest in this tree.
-  - The edge agent's image (`nofireai/edge:v3.6.0`, `native_arm.sh`) still
+  - The edge agent's image (`nofireai/edge:v3.7.0`, `native_arm.sh`) still
     cannot be `kind load`ed (a known, unrelated limitation: kind's import
     path requires `--all-platforms` and the image is a multi-arch manifest
     list, so the node has to pull it itself either way) but is mirrored like
@@ -869,7 +869,7 @@ path:
   since neither `launch.sh` nor `terraform/templates/bootstrap.sh.tftpl`
   forwards it. `write_run_manifest.sh` records the value a run actually
   seeded as `seeded_configmap_values` (native arm only).
-  `install-edge` does not trust `helm --wait`: chart 0.5.2 runs one replica
+  `install-edge` does not trust `helm --wait`: chart 0.7.0 runs one replica
   with `maxUnavailable: 1`, so Helm 3 counts it ready with zero ready pods.
   After the release it waits for the agent's pod to be Ready with no restarts
   (180s) and for brain-go to hold at least one entity for the slot's account
@@ -877,10 +877,13 @@ path:
   the namespace's pods, its last 30 events and the agent's logs to the slot
   log and aborts the slot. The agent publishes every 60s, which is its floor:
   it exits at startup on a shorter interval (sregym#133). The image is
-  pinned to `nofireai/edge:v3.6.0` rather than `:latest`, and a values file
-  adds the `endpoints` and `networkpolicies` informers that chart 0.5.2's
-  resource list drops, plus the `endpoints` RBAC rule the chart does not
-  grant (sregym#143).
+  pinned to `nofireai/edge:v3.7.0` rather than `:latest`, and a values file
+  adds the `networkpolicies`, `poddisruptionbudgets`,
+  `horizontalpodautoscalers`, `resourcequotas` and `storageclasses` informers
+  that chart 0.7.0's resource list drops, plus the chart's nine opt-in kinds
+  (cronjobs, priorityclasses, RBAC roles and bindings, Calico). Only the HPA
+  and storageclasses RBAC rules are added; the chart grants the rest
+  (sregym#143). ConfigMap and env capture stay hashed (`clearText=false`).
   After the fault is injected the conductor waits, native and edge arms only
   and capped at 120s, until brain-go holds a change event from after the
   fault, on the fault's component or anywhere in the cluster, so diagnosis

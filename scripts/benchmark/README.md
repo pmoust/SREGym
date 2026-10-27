@@ -516,27 +516,33 @@ are produced. Concretely, per slot:
   `jaeger-out` in the `observe` namespace. They are supervised rather than
   started once, because those services belong to the application and the
   conductor deploys it per problem.
-- The edge agent is installed from the `nofire-edge` chart 0.5.2 with image
-  `nofireai/edge:v3.6.0` (`SREGYM_EDGE_IMAGE` overrides it), publishing to
+- The edge agent is installed from the `nofire-edge` chart 0.7.0 with image
+  `nofireai/edge:v3.7.0` (`SREGYM_EDGE_IMAGE` overrides it), publishing to
   `http://<private ip>:8000/api/edge` every 60s under a key of type `edge`
   minted through `POST /api/account/api-keys`. 60s is the agent's floor: it
   exits at startup on a shorter publish interval. Causal analysis, network
-  observability and Sentry are off. The chart is fetched once per box and
+  observability and Sentry are off, and ConfigMap and environment values are
+  captured hashed, never in cleartext (`clearText=false`). The chart is fetched once per box and
   handed to each slot, since slots run concurrently and would otherwise race
   on one download path. The image is not: each kind node pulls it, because
   kind imports all platforms of a manifest list and a pulled image holds only
   one platform's blobs, so neither of kind's load paths can take it.
 - The chart's informer list (`config.kube.resources`) replaces the agent's
-  compiled default and leaves out six informers the agent has: `endpoints`,
-  `networkpolicies`, `poddisruptionbudgets`, `horizontalpodautoscalers`,
-  `resourcequotas` and `storageclasses`. `install-edge` passes a values file
-  that repeats the chart's 15 entries and adds those six, and adds
-  get/list/watch rules through `rbac.extraRules` for the three the chart's
-  ClusterRole does not grant: core `endpoints`, `autoscaling`
+  compiled default. Chart 0.7.0's list has 16 entries, `endpoints` among them,
+  and leaves out five informers the agent has: `networkpolicies`,
+  `poddisruptionbudgets`, `horizontalpodautoscalers`, `resourcequotas` and
+  `storageclasses`. It also lists nine opt-in kinds commented out: `cronjobs`,
+  `priorityclasses`, `roles`, `clusterroles`, `rolebindings`,
+  `clusterrolebindings` and the Calico `calicoippools`, `calicobgppeers` and
+  `calicoipamconfigs`. `install-edge` passes a values file that repeats the 16
+  entries and adds those five and the nine, so cluster-wide objects behind
+  preemption, permission and pod-network faults reach the entity graph. The
+  chart's ClusterRole grants all of them except two, so the file adds
+  get/list/watch rules through `rbac.extraRules` for `autoscaling`
   `horizontalpodautoscalers` and `storage.k8s.io` `storageclasses`. The agent
-  skips an informer whose list is refused, and without the endpoints rule
-  `has_endpoints` is never set on a Service.
-- `helm --wait` is not the install's check. Chart 0.5.2 runs one replica with
+  skips an informer whose list is refused or whose CRD is absent, which is
+  what happens to the Calico kinds on a cluster without Calico.
+- `helm --wait` is not the install's check. Chart 0.7.0 runs one replica with
   `maxUnavailable: 1`, and Helm 3 counts that ready with zero ready pods, so
   a crash-looping agent passes it. `install-edge` then waits for the pod to
   be Ready with no restarts (180s) and for brain-go to hold an entity for the

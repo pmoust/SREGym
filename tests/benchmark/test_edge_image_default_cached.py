@@ -1,7 +1,7 @@
 """native_arm.sh's default edge agent image has to be in the registry cache.
 
 scripts/benchmark/native_arm.sh's EDGE_IMAGE defaults to
-"nofireai/edge:v3.6.0" and SREGYM_EDGE_IMAGE can override it per run.
+"nofireai/edge:v3.7.0" and SREGYM_EDGE_IMAGE can override it per run.
 run_shard.sh's preflight checks whichever image is actually effective at
 run time, but that check cannot catch
 a *default* that drifted out of image_cache.list ahead of time, since it

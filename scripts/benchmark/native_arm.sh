@@ -38,36 +38,40 @@ set -uo pipefail
 # The edge agent's published image and chart. Pinned rather than floating:
 # an arm comparison that cannot say which agent produced its graph is not a
 # comparison. The image is a release tag, not :latest, so a new edge release
-# cannot change the agent between two runs of one measurement. v3.6.0 had the
-# same digest as :latest when the pin was made (sha256:4b577d0e...).
+# cannot change the agent between two runs of one measurement. v3.7.0 had the
+# same digest as :latest when the pin was made (sha256:d25f2e3e...).
 # Overridable so a run can test an unreleased build.
-EDGE_IMAGE="${SREGYM_EDGE_IMAGE:-nofireai/edge:v3.6.0}"
+EDGE_IMAGE="${SREGYM_EDGE_IMAGE:-nofireai/edge:v3.7.0}"
 EDGE_CHART_REPO="${SREGYM_EDGE_CHART_REPO:-NOFireAI/edge-helm-chart}"
-EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.5.2}"
+EDGE_CHART_VERSION="${SREGYM_EDGE_CHART_VERSION:-0.7.0}"
 
 # The resources the agent runs an informer for (config.kube.resources).
 #
 # The chart's list replaces the agent's compiled default rather than adding to
-# it, and chart 0.5.2's list leaves out endpoints and networkpolicies, both of
-# which the agent's default has (edge v3.6.0 internal/edge/config/config.go).
-# A Helm values override of a list replaces the whole list too, so this
-# repeats chart 0.5.2's 15 entries in the chart's order (values.yaml at tag
-# nofire-edge-0.5.2) and adds the two. "services" is not a name the agent
-# knows ("k8services" is its Service informer); it is kept because the chart
-# sends it and dropping it is not this change.
+# it. A Helm values override of a list replaces the whole list too, so this
+# repeats chart 0.7.0's 16 entries in the chart's order (values.yaml at tag
+# nofire-edge-0.7.0) and adds more after them. "services" is not a name the
+# agent knows ("k8services" is its Service informer); it is kept because the
+# chart sends it and dropping it is not this change. endpoints is in the
+# chart's list and its ClusterRole as of 0.7.0, so it needs no rule here.
 #
-# endpoints also needs the RBAC rule in edge_values below: the agent lists a
-# resource before starting its informer and skips it when the list is refused,
-# and has_endpoints on a Service comes from an Endpoints get that returns
-# nothing when RBAC denies it. networkpolicies needs no rule; the chart's
-# ClusterRole already grants it.
+# The next five are informers edge v3.7.0 has that the chart's list leaves
+# out. networkpolicies, poddisruptionbudgets and resourcequotas need no rule
+# (the chart's ClusterRole grants them); horizontalpodautoscalers and
+# storageclasses get theirs in edge_values. An HPA whose ScalingActive
+# condition turns false, or a quota a fault tightens, is a change the graph
+# now records.
 #
-# The last four are informers edge v3.6.0 already has but chart 0.5.2's list
-# leaves out. poddisruptionbudgets and resourcequotas need no rule (the chart
-# grants both); horizontalpodautoscalers and storageclasses get theirs in
-# edge_values. An HPA whose ScalingActive condition turns false, or a quota a
-# fault tightens, is a change the graph now records.
-EDGE_KUBE_RESOURCES="pods nodes k8services configmaps secrets persistentvolumeclaims persistentvolumes deployments replicasets statefulsets daemonsets jobs ingresses namespaces services endpoints networkpolicies poddisruptionbudgets horizontalpodautoscalers resourcequotas storageclasses"
+# The last nine are the chart's own opt-in kinds, listed there commented out:
+# cronjobs, priorityclasses, roles, clusterroles, rolebindings,
+# clusterrolebindings and the three Calico kinds. The chart's ClusterRole
+# already grants them, so they need no rule. The agent lists a resource before
+# starting its informer and skips it when the list is refused or the CRD is
+# absent, so the Calico kinds cost nothing on a cluster without Calico. They
+# are on because cluster-wide objects sit behind preemption, permission and
+# pod-network faults, and with them on those objects and their change events
+# reach the entity graph.
+EDGE_KUBE_RESOURCES="pods nodes k8services endpoints configmaps secrets persistentvolumeclaims persistentvolumes deployments replicasets statefulsets daemonsets jobs ingresses namespaces services networkpolicies poddisruptionbudgets horizontalpodautoscalers resourcequotas storageclasses cronjobs priorityclasses roles clusterroles rolebindings clusterrolebindings calicoippools calicobgppeers calicoipamconfigs"
 
 # How often the agent's informers resync and how often it publishes the graph,
 # both under the chart's 5m defaults.
@@ -438,8 +442,8 @@ cmd_install_edge() {
     --from-literal=api-key="$api_key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
     || die "could not create the edge API key Secret"
 
-  # The informer list and the endpoints grant go in a values file rather than
-  # --set: a list of 17 strings and a nested RBAC rule are unreadable as --set
+  # The informer list and the extra RBAC rules go in a values file rather than
+  # --set: a list of 30 strings and nested RBAC rules are unreadable as --set
   # paths, and --set still overrides the file for any key both carry.
   local values
   values="$(mktemp "${TMPDIR:-/tmp}/nofire-edge-values.XXXXXX")" || die "could not create the edge values file"
@@ -459,9 +463,13 @@ cmd_install_edge() {
   #   sentry.dsn            the chart ships NOFire's production DSN. Sixty
   #                         ephemeral clusters reporting into the product's
   #                         own Sentry project is noise in the wrong place.
+  #   configMapCapture      the agent captures ConfigMap values for change
+  #   .clearText            detection. false keeps them hashed, never in
+  #                         cleartext in the graph the agent under test reads.
+  #   envCapture.clearText  the same for container environment values.
   #
   # --wait catches a release Helm cannot apply at all, and nothing more on
-  # this chart. Chart 0.5.2 runs one replica with maxUnavailable: 1, and Helm
+  # this chart. Chart 0.7.0 runs one replica with maxUnavailable: 1, and Helm
   # 3's waiter (what the bootstrap installs) counts a Deployment ready at
   # replicas - maxUnavailable = 1 - 1 = 0 ready pods (pkg/kube/ready.go). A
   # crash-looping agent passes it, which is how run-20260928-1641-d4349432
@@ -481,6 +489,8 @@ cmd_install_edge() {
     --set config.enableCausalAnalysis=false \
     --set config.netobs.enabled=false \
     --set config.sentry.dsn= \
+    --set config.configMapCapture.clearText=false \
+    --set config.envCapture.clearText=false \
     --set edgeProxy.enabled=false \
     --wait --timeout 5m >&2 \
     || die "helm install of the edge agent failed"
@@ -503,9 +513,9 @@ cmd_install_edge() {
 }
 
 # The values file install-edge hands Helm: the informer list and the extra
-# RBAC rule described at EDGE_KUBE_RESOURCES. The chart renders
+# RBAC rules described at EDGE_KUBE_RESOURCES. The chart renders
 # rbac.extraRules with toYaml into its ClusterRole's rules list
-# (templates/rbac.yaml at nofire-edge-0.5.2), so each entry is one whole rule.
+# (templates/rbac.yaml at nofire-edge-0.7.0), so each entry is one whole rule.
 edge_values() {
   local r
   echo "config:"
@@ -517,9 +527,6 @@ edge_values() {
   cat <<'YAML'
 rbac:
   extraRules:
-    - apiGroups: [""]
-      resources: ["endpoints"]
-      verbs: ["get", "list", "watch"]
     - apiGroups: ["autoscaling"]
       resources: ["horizontalpodautoscalers"]
       verbs: ["get", "list", "watch"]

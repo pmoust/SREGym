@@ -394,7 +394,7 @@ if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
   echo "[bootstrap] edge agent image $EDGE_IMAGE, pulled by each kind node"
 
   # The *effective* edge image, not just the default: SREGYM_EDGE_IMAGE can
-  # override native_arm.sh's "nofireai/edge:v3.6.0" default, and an override
+  # override native_arm.sh's "nofireai/edge:v3.7.0" default, and an override
   # that is not in image_cache.list would otherwise only surface as a cold
   # ImagePullBackOff deep inside the first slot that deploys the agent,
   # exactly the failure mode the preflight above exists to catch for every
@@ -407,7 +407,7 @@ if [ "$SREGYM_ARM" = "native" ] || [ "$SREGYM_ARM" = "edge" ]; then
   # "<org>/<image>:<tag>", which a real pull resolves against docker.io
   # implicitly). Checking "*/*" first, before looking at the leading
   # segment, matters: a single-segment override with a tag but no org (a
-  # bare "edge:v3.6.0") has no "/" at all, so its tag's own ":" must not be
+  # bare "edge:v3.7.0") has no "/" at all, so its tag's own ":" must not be
   # mistaken for a registry host's ":port". A ref with at least one "/" is
   # checked for an explicit host the same way containerd and Docker do (a
   # leading segment with a "." or ":", or "localhost"); a ref with no "/" at
