@@ -258,6 +258,9 @@ cmd_kubeconfig() {
   #                 ipamconfigs Get
   #   policy.go     NetworkingV1 NetworkPolicies Get,
   #                 CoreV1 ResourceQuotas Get
+  #   admissionwebhooks.go
+  #                 AdmissionregistrationV1 MutatingWebhookConfigurations/
+  #                 ValidatingWebhookConfigurations Get
   #
   # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
   # their rules grant get and nothing else. Two of those added kinds,
@@ -272,6 +275,12 @@ cmd_kubeconfig() {
   # are also reached only by a Get. Their spec and limits are what Sonnet 5.5
   # reported it could not read on the network-policy and
   # namespace-memory-limit problems. The MCP arm already grants both.
+  #
+  # The webhook configurations (brain-go exp/single-agent-loop-jev #4969) are
+  # reached only by a Get as well. The admission-webhook problems inject one
+  # as the fault, the way other problems inject a Deployment change, and the
+  # MCP arm's kubectl role already reads both kinds. The describe projection
+  # never reads caBundle and shows a URL's host only.
   #
   # batch/jobs is not optional and a missing grant is not a partial outage.
   # ListWorkloads lists jobs last and returns (nil, err) on failure, so a 403
@@ -340,6 +349,9 @@ rules:
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["resourcequotas"]
+  verbs: ["get"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
