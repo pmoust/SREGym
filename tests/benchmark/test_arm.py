@@ -534,6 +534,7 @@ EXPECTED_GRANT = {
         "events",
         "namespaces",
         "nodes",
+        "nodes/proxy",
         "persistentvolumeclaims",
         "pods",
         "resourcequotas",
@@ -547,6 +548,7 @@ EXPECTED_GRANT = {
     "rbac.authorization.k8s.io": ["clusterrolebindings", "clusterroles", "rolebindings", "roles"],
     "crd.projectcalico.org": ["bgppeers", "ipamconfigs", "ippools"],
     "networking.k8s.io": ["networkpolicies"],
+    "admissionregistration.k8s.io": ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"],
 }
 
 # The kinds k8s_describe added in describe-more-kinds, and NetworkPolicy and
@@ -566,7 +568,12 @@ GET_ONLY = {
     ("crd.projectcalico.org", "ipamconfigs"),
     ("networking.k8s.io", "networkpolicies"),
     ("", "resourcequotas"),
+    ("", "nodes/proxy"),
 }
+
+# The one subresource the role grants: the loop scan's kubelet eviction read.
+# Any other subresource is refused below.
+ALLOWED_SUBRESOURCES = {("", "nodes/proxy")}
 
 
 def _cluster_role_doc() -> dict:
@@ -613,13 +620,13 @@ def test_the_read_only_grant_is_exactly_what_brain_go_reaches():
 
 
 def test_every_rule_is_read_only_and_names_no_secret():
-    """No write verb, no wildcard, no Secret and no subresource anywhere in
-    the role, whatever the rule's layout."""
+    """No write verb, no wildcard, no Secret and no subresource other than
+    nodes/proxy anywhere in the role, whatever the rule's layout."""
     for (group, resource), verbs in _cluster_role_verbs().items():
         assert set(verbs) <= {"get", "list"}, (group, resource, verbs)
         assert "*" not in (group, resource)
         assert resource != "secrets"
-        assert "/" not in resource, (group, resource)
+        assert "/" not in resource or (group, resource) in ALLOWED_SUBRESOURCES, (group, resource)
 
 
 def test_the_describe_only_kinds_grant_get_alone():

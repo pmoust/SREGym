@@ -261,6 +261,12 @@ cmd_kubeconfig() {
   #   admissionwebhooks.go
   #                 AdmissionregistrationV1 MutatingWebhookConfigurations/
   #                 ValidatingWebhookConfigurations Get
+  #   admissionwebhooklist.go
+  #                 AdmissionregistrationV1 MutatingWebhookConfigurations/
+  #                 ValidatingWebhookConfigurations List, CoreV1 Namespaces Get
+  #   nodeeviction.go
+  #                 CoreV1 RESTClient nodes/<name>/proxy/configz and
+  #                 proxy/stats/summary Get
   #
   # The kinds k8s_describe added after e49e7711 are reached only by a Get, so
   # their rules grant get and nothing else. Two of those added kinds,
@@ -281,6 +287,15 @@ cmd_kubeconfig() {
   # as the fault, the way other problems inject a Deployment change, and the
   # MCP arm's kubectl role already reads both kinds. The describe projection
   # never reads caBundle and shows a URL's host only.
+  #
+  # The loop scan (brain-go exp/single-agent-loop-jev #5011 and #5012) lists
+  # the webhook configurations that apply to a pod CREATE in the scanned
+  # namespace, so those two kinds get list as well, and reads a pressured
+  # Node's kubelet eviction thresholds and filesystem bytes through
+  # nodes/proxy. get on nodes/proxy reaches every kubelet GET endpoint, not
+  # only configz and stats/summary. brain-go fixes those two paths in code and
+  # no tool takes a kubelet path from the model, so nothing the model asks for
+  # reaches the kubelet's pod list or logs. It is the only subresource here.
   #
   # batch/jobs is not optional and a missing grant is not a partial outage.
   # ListWorkloads lists jobs last and returns (nil, err) on failure, so a 403
@@ -352,6 +367,9 @@ rules:
   verbs: ["get"]
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
